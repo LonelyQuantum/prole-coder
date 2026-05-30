@@ -73,6 +73,14 @@ function assertAlphaManifestShape(manifest) {
     Array.isArray(manifest.activationEvents) && manifest.activationEvents.includes("onView:prole-coder.chat"),
     "activationEvents must include onView:prole-coder.chat.",
   );
+  assert(
+    manifest.activationEvents.includes("onChatParticipant:prole-coder.chatParticipant"),
+    "activationEvents must include onChatParticipant:prole-coder.chatParticipant.",
+  );
+  const chatParticipant = manifest.contributes?.chatParticipants?.find(
+    (participant) => participant?.id === "prole-coder.chatParticipant",
+  );
+  assert(chatParticipant?.name === "prole", "native chat participant @prole must be declared.");
 }
 
 function assertPackagedManifest(packageInfo, sourceManifest) {

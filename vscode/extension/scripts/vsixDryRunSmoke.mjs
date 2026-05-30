@@ -72,6 +72,16 @@ async function assertManifestPackagingShape(manifest) {
   for (const event of ["onCommand:prole-coder.openChat", "onView:prole-coder.chat"]) {
     assert(activationEvents.includes(event), `activationEvents must include ${event}.`);
   }
+  assert(
+    activationEvents.includes("onChatParticipant:prole-coder.chatParticipant"),
+    "activationEvents must include onChatParticipant:prole-coder.chatParticipant.",
+  );
+
+  const chatParticipant = manifest.contributes?.chatParticipants?.find(
+    (participant) => participant?.id === "prole-coder.chatParticipant",
+  );
+  assert(chatParticipant?.name === "prole", "native chat participant @prole must be declared.");
+  assert(chatParticipant?.isSticky === true, "native chat participant must be sticky.");
 
   const iconPath = manifest.contributes?.viewsContainers?.activitybar?.find(
     (container) => container?.id === "prole-coder",

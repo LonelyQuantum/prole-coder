@@ -16,7 +16,8 @@
     "onStartupFinished",
     "onCommand:prole-coder.openChat",
     "onCommand:prole-coder.openSettings",
-    "onView:prole-coder.chat"
+    "onView:prole-coder.chat",
+    "onChatParticipant:prole-coder.chatParticipant"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -28,6 +29,33 @@
       {
         "command": "prole-coder.openSettings",
         "title": "ProleCoder: Open Settings"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "prole-coder.chatParticipant",
+        "name": "prole",
+        "fullName": "ProleCoder",
+        "description": "Use ProleCoder from the native VS Code Chat sidebar.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "edit",
+            "description": "Ask ProleCoder to make workspace changes."
+          },
+          {
+            "name": "ask",
+            "description": "Ask about the workspace without editing."
+          },
+          {
+            "name": "plan",
+            "description": "Plan a change before editing."
+          },
+          {
+            "name": "review",
+            "description": "Review the current code."
+          }
+        ]
       }
     ],
     "viewsContainers": {
