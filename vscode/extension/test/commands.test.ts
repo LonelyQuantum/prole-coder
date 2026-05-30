@@ -3,10 +3,7 @@ import test from "node:test";
 
 import {
   APPROVAL_APPROVE_LABEL,
-  APPROVAL_APPROVE_ONCE_LABEL,
   APPROVAL_APPROVE_SELECTED_HUNKS_LABEL,
-  APPROVAL_APPROVE_SESSION_LABEL,
-  APPROVAL_APPROVE_WORKSPACE_LABEL,
   APPROVAL_DISMISSED_REASON,
   APPROVAL_REJECTED_REASON,
   APPROVAL_REJECT_LABEL,
@@ -71,10 +68,11 @@ test("open chat command asks for a workspace when RPC server is unavailable", ()
   assert.ok(message?.includes("trusted workspace"));
 });
 
-test("open chat command starts the RPC server and reports readiness", async () => {
+test("open chat command opens chat and starts the RPC server without a success toast", async () => {
   let callback: (() => unknown) | undefined;
   let message: string | undefined;
   let chatOpened = false;
+  let started = false;
 
   const commands: CommandRegistry = {
     registerCommand(_command, registeredCallback) {
@@ -95,6 +93,7 @@ test("open chat command starts the RPC server and reports readiness", async () =
     {
       status: "stopped",
       async start() {
+        started = true;
         return {
           server: {
             name: "prole-coder-agent-rpc",
@@ -114,8 +113,8 @@ test("open chat command starts the RPC server and reports readiness", async () =
   await callback();
 
   assert.equal(chatOpened, true);
-  assert.ok(message?.includes("RPC server ready"));
-  assert.ok(message?.includes("prole-coder-agent-rpc"));
+  assert.equal(started, true);
+  assert.equal(message, undefined);
 });
 
 test("open chat command reports RPC startup failures with warning messages", async () => {
@@ -264,53 +263,40 @@ test("open chat command falls back to information messages for non-Error startup
   assert.ok(info?.includes("plain failure"));
 });
 
-test("requestApproval maps VS Code approve choices to approval params", async () => {
-  const approvals = [
-    APPROVAL_APPROVE_ONCE_LABEL,
-    APPROVAL_APPROVE_SESSION_LABEL,
-    APPROVAL_APPROVE_WORKSPACE_LABEL,
-  ] as const;
+test("requestApproval maps the simple approve choice to one-shot approval", async () => {
+  let message: string | undefined;
+  let modal: boolean | undefined;
+  let items: readonly string[] = [];
+  const window: ApprovalWindowMessenger = {
+    showWarningMessage(value, options, ...choices) {
+      message = value;
+      modal = options.modal;
+      items = choices;
+      return APPROVAL_APPROVE_LABEL;
+    },
+  };
 
-  for (const selected of approvals) {
-    let message: string | undefined;
-    let modal: boolean | undefined;
-    let items: readonly string[] = [];
-    const window: ApprovalWindowMessenger = {
-      showWarningMessage(value, options, ...choices) {
-        message = value;
-        modal = options.modal;
-        items = choices;
-        return selected;
-      },
-    };
+  const decision = await requestApproval(window, sampleApprovalRequest(true));
 
-    const decision = await requestApproval(window, sampleApprovalRequest(true));
-
-    assert.equal(decision.kind, "approve");
-    assert.equal(decision.approvalId, "approval_1");
-    assert.equal(
-      decision.persist,
-      selected === APPROVAL_APPROVE_SESSION_LABEL
-        ? "session"
-        : selected === APPROVAL_APPROVE_WORKSPACE_LABEL
-          ? "workspace"
-          : "never",
-    );
-    assert.equal(modal, true);
-    assert.ok(message?.includes("Command: cargo test"));
-    assert.ok(message?.includes("Cwd: crates/cli"));
-    assert.ok(message?.includes("Output: last run passed"));
-    assert.ok(items.includes(APPROVAL_REJECT_LABEL));
-  }
+  assert.deepEqual(decision, {
+    kind: "approve",
+    approvalId: "approval_1",
+    persist: "never",
+  });
+  assert.equal(modal, true);
+  assert.ok(message?.includes("Command: cargo test"));
+  assert.ok(message?.includes("Cwd: crates/cli"));
+  assert.ok(message?.includes("Output: last run passed"));
+  assert.deepEqual(items, [APPROVAL_APPROVE_LABEL, APPROVAL_REJECT_LABEL]);
 });
 
-test("requestApproval omits persistent choices for network and destructive risks", async () => {
-  for (const risk of ["network", "destructive"] as const) {
+test("requestApproval keeps the modal choices simple for all risks", async () => {
+  for (const risk of ["exec", "network", "destructive"] as const) {
     let items: readonly string[] = [];
     const window: ApprovalWindowMessenger = {
       showWarningMessage(_message, _options, ...choices) {
         items = choices;
-        return APPROVAL_APPROVE_ONCE_LABEL;
+        return APPROVAL_APPROVE_LABEL;
       },
     };
 
@@ -320,7 +306,7 @@ test("requestApproval omits persistent choices for network and destructive risks
     });
 
     assert.equal(decision.kind, "approve");
-    assert.deepEqual(items, [APPROVAL_APPROVE_ONCE_LABEL, APPROVAL_REJECT_LABEL]);
+    assert.deepEqual(items, [APPROVAL_APPROVE_LABEL, APPROVAL_REJECT_LABEL]);
   }
 });
 
