@@ -13,6 +13,7 @@ export async function run(): Promise<void> {
   assert.ok(extension, `${extensionId} should be installed in the test host`);
   await extension.activate();
   assert.equal(extension.isActive, true);
+  assert.equal(contributesProleChatParticipant(extension.packageJSON), true);
   assert.equal(vscode.workspace.isTrusted, true);
   assert.equal(vscode.workspace.getConfiguration("prole-coder.rpc").get("autoStart"), false);
 
@@ -23,6 +24,7 @@ export async function run(): Promise<void> {
   assert.equal(commands.includes("prole-coder.openChat"), true);
   assert.equal(commands.includes(TEST_CHAT_MESSAGE_COMMAND), true);
   assert.equal(commands.includes(TEST_CHAT_STATE_COMMAND), true);
+  await vscode.commands.executeCommand("prole-coder.openChat");
 
   await exerciseChatSendTurnDiagnosticsAndApproval();
   await exerciseChatCancel();
@@ -215,6 +217,30 @@ function workspaceFolder(): vscode.WorkspaceFolder {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+function contributesProleChatParticipant(packageJson: unknown): boolean {
+  if (!isRecord(packageJson)) {
+    return false;
+  }
+  const contributes = packageJson["contributes"];
+  if (!isRecord(contributes)) {
+    return false;
+  }
+  const chatParticipants = contributes["chatParticipants"];
+  return (
+    Array.isArray(chatParticipants) &&
+    chatParticipants.some(
+      (participant) =>
+        isRecord(participant) &&
+        participant["id"] === "prole-coder.chatParticipant" &&
+        participant["name"] === "prole",
+    )
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 interface ChatState {
