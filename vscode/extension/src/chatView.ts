@@ -14,6 +14,10 @@ import type {
   "resolution-mode": "import",
 };
 
+import {
+  automaticContextAttachmentFromTimeline,
+  mergeTurnAttachments,
+} from "./automaticContext";
 import { CHAT_RUN_MODES, DEFAULT_CHAT_MODE, parseChatTurnSubmission, sendTurnParams } from "./chatInput";
 import { ChatEventTimeline, type ChatTimelineSnapshot } from "./chatEvents";
 import {
@@ -249,8 +253,13 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     this.setContextViz(emptyContextViz());
 
     try {
+      const automaticContext = automaticContextAttachmentFromTimeline(this.timeline.snapshot());
+      const attachments = mergeTurnAttachments(
+        automaticContext,
+        this.collectDiagnosticAttachments(),
+      );
       const result = await this.rpcClient.sendTurn(
-        sendTurnParams(parsed.value, this.collectDiagnosticAttachments()),
+        sendTurnParams(parsed.value, attachments),
       );
       void this.refreshRuns("Refreshing runs...");
       const terminal = this.terminalRuns.get(result.runId);
