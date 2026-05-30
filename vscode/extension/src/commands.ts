@@ -3,10 +3,7 @@ export const OPEN_SETTINGS_COMMAND = "prole-coder.openSettings";
 export const OPEN_CHAT_NO_WORKSPACE_MESSAGE =
   "Open a trusted workspace before starting the prole-coder RPC server.";
 export const APPROVAL_APPROVE_LABEL = "Approve";
-export const APPROVAL_APPROVE_ONCE_LABEL = "Approve Once";
-export const APPROVAL_APPROVE_SESSION_LABEL = "Approve For Session";
-export const APPROVAL_APPROVE_WORKSPACE_LABEL = "Approve For Workspace";
-export const APPROVAL_APPROVE_SELECTED_HUNKS_LABEL = "Approve Selected Hunks";
+export const APPROVAL_APPROVE_SELECTED_HUNKS_LABEL = "Select Hunks";
 export const APPROVAL_REJECT_LABEL = "Reject";
 export const APPROVAL_DISMISSED_REASON = "approval prompt dismissed";
 export const APPROVAL_REJECTED_REASON = "rejected in VS Code";
@@ -158,11 +155,7 @@ export function registerOpenChatCommand(
 
     return rpcServer
       .start()
-      .then((ready) =>
-        window.showInformationMessage(
-          `prole-coder RPC server ready: ${ready.server.name} ${ready.server.version}`,
-        ),
-      )
+      .then(() => undefined)
       .catch((error: unknown) => {
         const message = `prole-coder RPC server failed to start: ${errorMessage(error)}`;
         if (window.showWarningMessage !== undefined) {
@@ -252,19 +245,11 @@ export async function requestApproval(
     ...choices,
   );
 
-  if (selected === APPROVAL_APPROVE_LABEL || selected === APPROVAL_APPROVE_ONCE_LABEL) {
+  if (selected === APPROVAL_APPROVE_LABEL) {
     return {
       kind: "approve",
       approvalId: request.approvalId,
       persist: "never",
-    };
-  }
-
-  if (selected === APPROVAL_APPROVE_SESSION_LABEL) {
-    return {
-      kind: "approve",
-      approvalId: request.approvalId,
-      persist: "session",
     };
   }
 
@@ -285,14 +270,6 @@ export async function requestApproval(
       kind: "reject",
       approvalId: request.approvalId,
       reason: APPROVAL_DISMISSED_REASON,
-    };
-  }
-
-  if (selected === APPROVAL_APPROVE_WORKSPACE_LABEL) {
-    return {
-      kind: "approve",
-      approvalId: request.approvalId,
-      persist: "workspace",
     };
   }
 
@@ -317,21 +294,7 @@ function approvalChoices(request: ApprovalPromptRequest): string[] {
       ? [APPROVAL_APPROVE_SELECTED_HUNKS_LABEL]
       : [];
 
-  if (!request.persistable) {
-    return [APPROVAL_APPROVE_LABEL, ...hunkChoices, APPROVAL_REJECT_LABEL];
-  }
-
-  if (request.risk === "network" || request.risk === "destructive") {
-    return [APPROVAL_APPROVE_ONCE_LABEL, ...hunkChoices, APPROVAL_REJECT_LABEL];
-  }
-
-  return [
-    APPROVAL_APPROVE_ONCE_LABEL,
-    ...hunkChoices,
-    APPROVAL_APPROVE_SESSION_LABEL,
-    APPROVAL_APPROVE_WORKSPACE_LABEL,
-    APPROVAL_REJECT_LABEL,
-  ];
+  return [APPROVAL_APPROVE_LABEL, ...hunkChoices, APPROVAL_REJECT_LABEL];
 }
 
 async function requestSelectedHunks(
