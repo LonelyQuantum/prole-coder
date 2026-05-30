@@ -1,8 +1,13 @@
 import * as vscode from "vscode";
 
 import { ApprovalEventController, type ApprovalRequester } from "./approvalFlow";
+import { registerProleChatParticipant } from "./chatParticipant";
 import { CHAT_VIEW_ID, ProleChatViewProvider } from "./chatView";
-import { registerOpenChatCommand, registerOpenSettingsCommand } from "./commands";
+import {
+  type ChatViewOpener,
+  registerOpenChatCommand,
+  registerOpenSettingsCommand,
+} from "./commands";
 import { createPatchDiffPreviewController } from "./diffPreview";
 import { registerFimInlineCompletionProvider } from "./fimPreviewVscode";
 import { RpcServerManager, readRpcServerLaunchConfig } from "./rpcServer";
@@ -11,7 +16,13 @@ export function activate(context: vscode.ExtensionContext): void {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   const rpcServer = createRpcServerManager(context);
   const chatView = new ProleChatViewProvider(context.extensionUri, rpcServer, workspaceRoot);
-  const openChat = registerOpenChatCommand(vscode.commands, vscode.window, rpcServer, chatView);
+  const chatParticipant = registerProleChatParticipant(context, rpcServer, workspaceRoot);
+  const openChat = registerOpenChatCommand(
+    vscode.commands,
+    vscode.window,
+    rpcServer,
+    nativeChatOpener(chatView),
+  );
   const openSettings = registerOpenSettingsCommand(
     vscode.commands,
     {
@@ -33,7 +44,7 @@ export function activate(context: vscode.ExtensionContext): void {
     },
   });
 
-  context.subscriptions.push(openChat, openSettings, chatView, chatViewRegistration);
+  context.subscriptions.push(openChat, openSettings, chatView, chatViewRegistration, chatParticipant);
   registerTestCommands(context, chatView);
   if (rpcServer !== undefined && workspaceRoot !== undefined) {
     const patchDiffPreviewController = createPatchDiffPreviewController(context, rpcServer, workspaceRoot);
@@ -96,6 +107,21 @@ function extensionVersion(context: vscode.ExtensionContext): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function nativeChatOpener(fallback: ChatViewOpener): ChatViewOpener {
+  return {
+    async openChatView() {
+      try {
+        return await vscode.commands.executeCommand("workbench.action.chat.open", {
+          query: "@prole ",
+          isPartialQuery: true,
+        });
+      } catch {
+        return fallback.openChatView();
+      }
+    },
+  };
 }
 
 function registerTestCommands(context: vscode.ExtensionContext, chatView: ProleChatViewProvider): void {
