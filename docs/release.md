@@ -40,7 +40,7 @@ Phase 4 P4-1 已提供 VSIX 打包烟测入口：
 pnpm run vsix:smoke
 ```
 
-该命令会构建 `@prole-coder/protocol` 与 `prole-coder-vscode`，在 `target/` 下临时生成 VSIX，检查 `.vscodeignore`、`workspace:*` 依赖是否只停留在开发期、`media/prole-coder-view.svg`、compiled `out/`、activationEvents 和包内排除规则，然后清理临时产物。
+该命令会构建 `@prole-coder/protocol` 与 `prole-coder-vscode`，在 `target/` 下临时生成 VSIX，检查 `.vscodeignore`、`workspace:*` 依赖是否只停留在开发期、`media/prole-coder-view.svg`、compiled `out/`、activationEvents、`@prole` Chat Participant 贡献点和包内排除规则，然后清理临时产物。
 
 此 smoke 使用 dry-run 口径，允许缺少 repository 和发布许可证文件，并禁用依赖探测以避免把 workspace 开发依赖写入运行时包。它只验证打包基础设施，不代表 P4-13 的 alpha / pre-release VSIX 安装交付已经完成。
 
@@ -59,7 +59,7 @@ target/vsix/prole-coder-vscode-0.1.0-alpha.vsix
 target/vsix/prole-coder-vscode-0.1.0-alpha.vsix.sha256
 ```
 
-`vscode/extension/scripts/packageAlphaVsix.mjs` 使用 `@vscode/vsce` 的 `preRelease: true` 打包选项，保留 `package.json` 中的稳定版本号，并通过文件名中的 `alpha` 标识渠道。脚本会校验 VSIX manifest 中的 VS Code pre-release 标记、publisher/name/version 一致性，并写出 SHA-256 校验和。产物位于被忽略的 `target/vsix/`，不提交到仓库。
+`vscode/extension/scripts/packageAlphaVsix.mjs` 使用 `@vscode/vsce` 的 `preRelease: true` 打包选项，保留 `package.json` 中的稳定版本号，并通过文件名中的 `alpha` 标识渠道。脚本会校验 VSIX manifest 中的 VS Code pre-release 标记、publisher/name/version 一致性、`onChatParticipant:prole-coder.chatParticipant` activation event 和 `@prole` Chat Participant 贡献点，并写出 SHA-256 校验和。产物位于被忽略的 `target/vsix/`，不提交到仓库。
 
 当前 alpha VSIX 用于本地安装和 clean 环境验收，不等同于 Marketplace / Open VSX 发布。正式对外发布前仍需在 Phase 6 补齐 `LICENSE` 文件、源码获取说明、发布 notes、公开 release checksum 和可复现构建说明。
 
@@ -87,8 +87,8 @@ code --user-data-dir $userDataDir --extensions-dir $extensionsDir .
 验收时确认：
 
 - `code --user-data-dir $userDataDir --extensions-dir $extensionsDir --list-extensions` 能看到 `prole-coder.prole-coder-vscode`。
-- 打开仓库后 ProleCoder Activity Bar 和 Chat view 可见。
-- `ProleCoder: Open Chat` 能聚焦 Chat view，并在受信任 workspace 中按配置启动或复用 RPC server。
+- 打开仓库后 ProleCoder Activity Bar 高级面板可见，VS Code 原生 Chat 中可用 `@prole` Chat Participant。
+- `ProleCoder: Open Chat` 优先打开 VS Code 原生 Chat 侧栏并填入 `@prole`，同时在受信任 workspace 中按配置静默启动或复用 RPC server。
 - `ProleCoder: Open Settings` 能打开扩展设置；API Key 不写入 VS Code settings，只通过 RPC server 的环境变量或被忽略的本地密钥文件读取。
 - 完成验收后可删除 `target/vscode-clean-user-data` 和 `target/vscode-clean-extensions`。
 

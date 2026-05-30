@@ -114,6 +114,6 @@ pending
 
 - 扩展 RPC 审批队列到多 active run、跨进程恢复和前端断连后的自动取消；当前实现只支持单 active run 的内存等待队列。
 - 扩展 patch 的动态风险升级；`shell` 的动态风险升级已覆盖下载依赖、访问网络、删除文件、发布和远程 git 操作，`apply_patch` 已支持 hunk 级批准。
-- 扩展持久批准的可审计 metadata、清理入口和 UI 管理；`network` 和 `destructive` 仍不允许持久化。
+- 扩展持久批准的可审计 metadata、清理入口和高级 UI 管理；`network` 和 `destructive` 仍不允许持久化，VS Code 主审批弹窗不重新暴露 session/workspace 选项。
 - 继续增强 TUI 的真实 RPC pending 队列接入；VS Code 已能消费 `tool.approvalRequired` 并发送 `agent.approve` / `agent.reject`。
-- 增加跨前端一致性测试，确保同一工具请求在 CLI、TUI 和 VS Code 中展示的风险、路径、命令、风险原因和持久化选项一致。
+- 增加跨前端一致性测试，确保同一工具请求在 CLI、TUI 和 VS Code 中展示的风险、路径、命令、风险原因和持久化能力语义一致；VS Code 主审批弹窗保持简化的 Approve / Reject。
