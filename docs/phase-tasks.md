@@ -1,6 +1,6 @@
 # 详细任务索引
 
-状态：Phase 1、Phase 2、Phase 3、Phase 4、Phase 5 已完成；Phase 4 保留 14 项 VS Code 深度集成能力，Phase 5 单独记录 VS Code 插件 UX 体验优化。
+状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成；Phase 5 正在进行中。Phase 4 保留 14 项 VS Code 深度集成能力，Phase 5 记录 VS Code Codex-like UX 与开发工作流。
 
 本文档是详细设计文档里的任务账本。README 保留高层开发计划；这里把各模块文档中出现的“已实现、尚未实现、后续增强、下一步”收敛为可勾选任务，避免后续工作只散落在说明文字里。
 
@@ -107,7 +107,9 @@
 | [x] | P4-12：FIM completion preview | `README.md`、`docs/deepseek-api-adapter.md`、`docs/vscode-extension.md` | 已完成：新增 `agent.previewFim` RPC 类型、Rust request loop 分发、CLI provider factory FIM preview、DeepSeek beta `/completions` FIM adapter、fixture provider 预览和 VS Code 原生 inline completion provider；前端模型选择只使用 P4-3 capability data 的 `supportsFim`，不靠模型名称推断。验收：`cargo test -p prole-coder-agent-rpc request_loop_handles_fim_preview_requests`、`cargo test -p prole-coder-cli fixture_rpc_provider_factory_returns_fim_preview`、`pnpm -r typecheck`、`pnpm -r test`。 |
 | [x] | P4-13：VSIX alpha / pre-release 打包与安装说明 | `docs/release.md`、`docs/vscode-extension.md` | 已完成：新增 `pnpm run vsix:alpha` / `vscode/extension/scripts/packageAlphaVsix.mjs`，构建 protocol 与 extension 后在 `target/vsix/` 保留可安装 pre-release VSIX，并生成 SHA-256 校验和；脚本校验 VSIX manifest 的 pre-release 标记与 publisher/name/version 一致性，`docs/release.md` 记录 clean user-data/extensions 目录安装验收步骤。验收：`pnpm run vsix:alpha`。 |
 | [x] | P4-14：补齐 end-to-end 集成测试覆盖 | `README.md`、`docs/vscode-extension.md`、`docs/testing.md` | 已完成：`pnpm run vscode:test-electron` 在隔离 user-data/extensions profile 中启动 VS Code test host，并通过 `vscode/extension/test/fixtures/rpcFixtureServer.mjs` 本地 JSON-RPC fixture 覆盖 extension activation、Chat sendTurn、Problems diagnostic attachments、自动审批回传、Cancel、Run List / resume 和 Chat timeline/submission/context 状态；VSIX 安装后的 clean 环境基础交互继续按 `docs/release.md` 的可重复手动路径验收。 |
-## Phase 5：VS Code 插件 UX 体验优化
+## Phase 5：VS Code Codex-like UX 与开发工作流
+
+状态：进行中。P5-1 到 P5-5 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收和 Output Channel；P5-6 起根据第十轮讨论补齐 API key 配置、错误恢复和 GitLens-like commit / PR 文案生成工作流。Phase 5 只有本节全部条目都标记 `[x]` 后，README 才能写整阶段完成。
 
 | 状态 | 任务 | 来源 | 说明 |
 | --- | --- | --- | --- |
@@ -116,6 +118,12 @@
 | [x] | P5-3：自动上下文压缩 | `README.md`、`docs/context-capsule.md`、`docs/json-rpc-protocol.md` | 已完成：Sidebar Chat 和原生 Chat Participant 从历史对话/事件流生成受限长度的 `explicit_content` attachment，交给已有 Context Capsule 处理，让连续对话自然承接上下文；Sidebar timeline 单条消息会先限长，避免极端长流式输出造成过大的中间文本。验收：`automaticContext.test.ts` 和 `chatParticipantCore.test.ts` 覆盖压缩、预算裁剪、单条 timeline 消息限长、attachment 合并和 turn runner 注入。 |
 | [x] | P5-4：UX 收敛测试与打包验收 | `README.md`、`docs/testing.md`、`docs/release.md` | 已完成：覆盖自动上下文压缩、原生 Chat Participant turn runner、简化审批 choices、extension-host E2E、VSIX smoke/alpha 打包和文档一致性，并补充 Chat Participant 早到 terminal event 缓冲回归测试。验收：`pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke`、`pnpm run vsix:alpha`、`git diff --check` 和敏感信息扫描。 |
 | [x] | P5-5：VS Code Output Channel 错误诊断 | `README.md`、`docs/vscode-extension.md`、`docs/testing.md` | 已完成：插件创建 `ProleCoder` Output Channel，Sidebar Chat 的 sendTurn、Run List refresh/resume/cancel 失败、原生 `@prole` Chat Participant turn 失败以及 RPC 启动/运行 warning 会写入完整日志；activation 层使用统一 notifier 分发 Output Channel 日志与 VS Code toast；侧边栏保留短状态并通过 title 暴露完整文本。验收：`logging.test.ts` 覆盖日志格式与输出分发，`chatParticipantCore.test.ts` 覆盖 RPC 失败写入 logger。 |
+| [ ] | P5-6：DeepSeek API key SecretStorage 与 provider status | `README.md`、`docs/vscode-extension.md`、`docs/testing.md` | 计划：新增 `ProleCoder: Configure DeepSeek API Key` / `Clear DeepSeek API Key` / provider status 入口；SecretStorage 优先、process env fallback、missing 明确展示；RPC child env 继承 `process.env` 后覆盖 `DEEPSEEK_API_KEY`，不改变 CLI env 路径。 |
+| [ ] | P5-7：统一 redaction 与 API key 错误恢复 UX | `docs/vscode-extension.md`、`docs/testing.md`、`docs/security-model.md` | 计划：在 notifier/logger 边界统一脱敏 SecretStorage/env 中的 key，覆盖 Output Channel、toast 和 RPC startup failure；API key 配置/清除后 idle 状态自动重启 RPC，active run 场景提示当前回合结束后生效。 |
+| [ ] | P5-8：Git context 只读采集与大 diff attachment 管线 | `docs/vscode-extension.md`、`docs/testing.md`、`docs/context-capsule.md` | 计划：优先使用 VS Code Git API 采集 repository、branch/upstream、staged/unstaged diff、status 和 commit summary；git CLI 仅作受控 fallback，cwd 必须来自 repository root；大 diff 通过 Context Capsule 预算和 omitted source 可观察。 |
+| [ ] | P5-9：Generate Commit Message 写入 Source Control inputBox | `README.md`、`docs/vscode-extension.md`、`docs/testing.md` | 计划：新增命令从 staged diff 生成 Conventional Commit 风格候选 message，并写入 `repository.inputBox.value`；staged 为空时才询问是否使用 unstaged context；不自动 commit。 |
+| [ ] | P5-10：Generate PR Description markdown 生成 | `README.md`、`docs/vscode-extension.md`、`docs/testing.md` | 计划：基于 upstream tracking branch、`main`、`master` 或用户选择确定 base，采集 branch diff/stat/commit summary/test summary，生成 PR title/body markdown；首版提供预览/复制/打开入口，不自动创建 PR。 |
+| [ ] | P5-11：Phase 5 UX 工作流验收与文档收敛 | `README.md`、`docs/roadmap.md`、`docs/testing.md` | 计划：补齐 P5-6 到 P5-10 的单元测试、extension-host 验收、VSIX smoke/alpha 验证和文档一致性检查；明确 G4 自动 commit / push / create PR 为后续增强，需要接入审批模型后再做。 |
 
 ## Phase 6：TUI 与生态扩展
 

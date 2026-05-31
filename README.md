@@ -568,7 +568,7 @@ extension.ts
 
 ## 开发计划
 
-当前进度：Phase 1 Agent Core MVP 功能闭环、Phase 2 的 1M Context Capsule 核心收敛、Phase 3 的 VS Code 插件核心与共享 RPC 交互管线、Phase 4 的 VS Code 深度集成以及 Phase 5 的 VS Code 插件 UX 体验优化均已完成。Phase 4 保留 14 项深度集成能力；Phase 5 单独收敛 Codex-like UX 与诊断体验：默认使用 VS Code 原生 Chat 右侧入口、简化审批 UX、保持连续会话心智、自动压缩历史上下文，并把完整错误写入 `ProleCoder` Output Channel。DeepSeek provider、基础工具执行、Context Builder、Run Log、Turn Loop、CLI、RPC、审批、取消、真实 DeepSeek streaming/tool-call 验收、本地 fixture smoke、进程级 CLI smoke、小型真实仓库 CLI 联网验收、合并前测试收敛、Context Capsule、manifest、token estimator、attachments、provider summary、Run Log 体积控制、tool call JSON Schema 校验、200K/500K/900K 离线大上下文验收入口和 Phase 2e 展示型 demo 扩展均已完成；VS Code RPC server 启动监管、JSON-RPC request client、RPC 全双工 reader/writer 与事件发送队列、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、命令风险动态升级、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、命令子进程树清理、VSIX alpha 打包、extension-host 端到端验收、原生 `@prole` Chat Participant、自动上下文压缩、简化审批 UX 和 Output Channel 错误诊断均已完成。之后进入 Phase 6：TUI 与生态扩展。
+当前进度：Phase 1 Agent Core MVP 功能闭环、Phase 2 的 1M Context Capsule 核心收敛、Phase 3 的 VS Code 插件核心与共享 RPC 交互管线以及 Phase 4 的 VS Code 深度集成均已完成；Phase 5：VS Code Codex-like UX 与开发工作流正在进行中。Phase 4 保留 14 项深度集成能力；Phase 5 的 P5-1 到 P5-5 已完成原生 `@prole` Chat Participant、默认右侧 Chat 入口、简化审批 UX、自动上下文压缩、UX 验收和 `ProleCoder` Output Channel 错误诊断。接下来 Phase 5 继续补齐插件内 SecretStorage 配置 DeepSeek API key、统一 redaction 与错误恢复、只读 Git context、commit message 写入 SCM inputBox 和 PR markdown 生成。DeepSeek provider、基础工具执行、Context Builder、Run Log、Turn Loop、CLI、RPC、审批、取消、真实 DeepSeek streaming/tool-call 验收、本地 fixture smoke、进程级 CLI smoke、小型真实仓库 CLI 联网验收、合并前测试收敛、Context Capsule、manifest、token estimator、attachments、provider summary、Run Log 体积控制、tool call JSON Schema 校验、200K/500K/900K 离线大上下文验收入口和 Phase 2e 展示型 demo 扩展均已完成；VS Code RPC server 启动监管、JSON-RPC request client、RPC 全双工 reader/writer 与事件发送队列、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、命令风险动态升级、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、命令子进程树清理、VSIX alpha 打包、extension-host 端到端验收、原生 `@prole` Chat Participant、自动上下文压缩、简化审批 UX 和 Output Channel 错误诊断均已完成。Phase 5 全部完成后再进入 Phase 6：TUI 与生态扩展。
 
 阶段完成口径：README 中某个 Phase 只有在 `docs/phase-tasks.md` 对应 Phase 下的所有任务都标记为 `[x]` 后，才能在高层开发计划中表述为“全部完成”。如果某阶段核心功能已完成但仍有 P1/P2 增强或发布/文档验收项未完成，README 必须继续把该阶段表述为进行中，并列出剩余任务。
 
@@ -692,13 +692,19 @@ extension.ts
 - 配置界面不保存 API Key，只管理非敏感配置。
 - `docs/phase-tasks.md` 的 Phase 4 条目已全部标记为 `[x]`，README 可以把 Phase 4 表述为整阶段完成。
 
-### Phase 5：VS Code 插件 UX 体验优化
+### Phase 5：VS Code Codex-like UX 与开发工作流
 
 - [x] P5-1：原生 VS Code Chat Participant `@prole`，让常规入口默认打开 VS Code Chat 侧栏体验；保留 Activity Bar Webview 作为 Run List / Context Capsule / diff 等高级面板。
 - [x] P5-2：简化审批 UX，主审批动作收敛为 Approve / Reject，`apply_patch` 多 hunk 时保留 Select Hunks 边界；持久化策略继续由后端策略控制，不在主弹窗里暴露复杂选项。
 - [x] P5-3：Sidebar Chat 和原生 Chat Participant 自动注入压缩后的对话历史，作为 `explicit_content` attachment 进入已有 Context Capsule 管线，让连续对话自然承接上下文；Sidebar timeline 单条消息会先限长，避免极端长流式输出造成过大的中间文本。
 - [x] P5-4：补齐 UX 收敛单元测试、extension-host E2E、VSIX smoke/alpha 打包验证和文档说明；已通过 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke` 和 `pnpm run vsix:alpha`，并补充 Chat Participant 早到 terminal event 缓冲回归测试。
 - [x] P5-5：VS Code Output Channel 错误诊断：插件创建 `ProleCoder` Output Channel，Sidebar Chat、Run List、原生 `@prole` Chat Participant 和 RPC 启动/运行 warning 的完整错误会写入 Output；activation 层使用统一 notifier 分发日志与 VS Code toast；侧边栏继续显示短状态并通过 hover title 暴露完整文本。
+- [ ] P5-6：DeepSeek API key SecretStorage 与 provider status：插件提供 Configure/Clear API Key 和 provider status 入口；SecretStorage 优先、process env fallback，RPC child env 继承 `process.env` 后覆盖 `DEEPSEEK_API_KEY`。
+- [ ] P5-7：统一 redaction 与 API key 错误恢复 UX：notifier/logger 统一脱敏 SecretStorage/env key，覆盖 Output Channel、toast 和 RPC startup failure；配置/清除 key 后 idle 状态自动重启 RPC，active run 保守提示稍后生效。
+- [ ] P5-8：Git context 只读采集与大 diff attachment 管线：优先使用 VS Code Git API 采集 branch/upstream、status、staged/unstaged diff 和 commit summary；git CLI 只作受控 fallback，cwd 必须来自 repository root。
+- [ ] P5-9：Generate Commit Message 写入 Source Control inputBox：基于 staged diff 生成 Conventional Commit 风格候选 message 并写入 `repository.inputBox.value`；staged 为空时才询问是否使用 unstaged context，不自动 commit。
+- [ ] P5-10：Generate PR Description markdown 生成：基于 upstream/main/master/用户选择的 base 采集 branch diff/stat/commit/test summary，生成 PR title/body markdown；首版只预览/复制/打开入口，不自动创建 PR。
+- [ ] P5-11：Phase 5 UX 工作流验收与文档收敛：补齐 P5-6 到 P5-10 的单元测试、extension-host 验收、VSIX smoke/alpha 验证和文档一致性检查；G4 自动 commit / push / create PR 留作后续增强并需接入审批模型。
 
 验收标准：
 
@@ -706,7 +712,7 @@ extension.ts
 - 原生 Chat 和 Sidebar Chat 都通过真实 `agent.sendTurn` 驱动回合，并继续复用 Problems diagnostics、审批回传、Cancel、Run Log 和 Context Capsule。
 - 连续对话会自动生成可审计、受限长度的上下文压缩 attachment；不会在 UI 文案里要求用户手动重开对话来延续上下文。
 - 主审批弹窗保持简单；完整错误诊断可在 `Output > ProleCoder` 查看。
-- `docs/phase-tasks.md` 的 Phase 5 条目已全部标记为 `[x]`，README 可以把 Phase 5 表述为整阶段完成。
+- `docs/phase-tasks.md` 的 Phase 5 条目尚未全部标记为 `[x]`，README 不得把 Phase 5 表述为整阶段完成。
 
 ### Phase 6：TUI 与生态扩展
 

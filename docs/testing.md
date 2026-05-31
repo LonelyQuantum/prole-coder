@@ -74,9 +74,19 @@ Phase 5 P5-1 到 P5-5 的 Codex-like UX 与诊断收敛继续复用 Phase 4 exte
 - `automaticContext.test.ts` 覆盖历史对话压缩、字符预算裁剪、空历史跳过、Sidebar timeline 转换、单条 timeline 消息限长和 attachment 上限合并。
 - `chatParticipantCore.test.ts` 覆盖原生 `@prole` Chat Participant turn runner、命令到 run mode 的映射、sendTurn response 前早到事件缓冲、assistant delta streaming、缺少 RPC client 的错误和自动上下文进度提示。
 - `logging.test.ts` 覆盖 `ProleCoder` Output Channel 日志格式与输出分发；`chatParticipantCore.test.ts` 还覆盖 RPC turn 失败写入 logger，确保完整错误可在 Output 面板诊断。
+
 - `commands.test.ts` 覆盖简化后的审批 choices：主弹窗只暴露 `Approve` / `Reject`，`Approve` 映射一次性批准，`apply_patch` 多 hunk 走 `Select Hunks`。
 - `test/electron/index.ts` 覆盖 VS Code manifest 中的 `contributes.chatParticipants`，并通过 `ProleCoder: Open Chat` 入口验证原生 Chat 入口不会依赖手动拖动 Activity Bar view。
 - `pnpm run vsix:smoke` 和 `pnpm run vsix:alpha` 会校验 VSIX manifest 中的 `onChatParticipant:prole-coder.chatParticipant` activation event 以及 `@prole` Chat Participant 贡献点。
+
+Phase 5 P5-6 到 P5-11 的 API key 与 Git 工作流需要继续补齐以下确定性覆盖：
+
+- provider secret 纯逻辑测试：SecretStorage 优先、process env fallback、missing status、child env 继承 `process.env` 后覆盖 `DEEPSEEK_API_KEY`。
+- notifier/redaction 测试：Output Channel、toast message 和 RPC startup failure 都必须统一脱敏 SecretStorage/env key。
+- API key 配置 UX 测试：Configure/Clear 命令、provider status、idle 状态 RPC restart、active run 场景提示稍后生效。
+- Git context 测试：无仓库、多仓库、staged diff、unstaged fallback、base branch 选择和大 diff attachment 预算/omitted source。
+- commit/PR 生成测试：Generate Commit Message 写入 `repository.inputBox.value` 且不自动 commit；Generate PR Description 输出 markdown 且不自动创建 PR。
+- 文档/打包验收：P5-6 到 P5-10 完成前继续运行 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke`、`pnpm run vsix:alpha`、`git diff --check` 和敏感信息扫描。
 
 ## 新增测试的协作要求
 
