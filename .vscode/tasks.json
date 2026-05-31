@@ -1,0 +1,44 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ProleCoder: build debug dependencies",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "ProleCoder: build CLI",
+        "ProleCoder: build VS Code extension"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ProleCoder: build CLI",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "build",
+        "-p",
+        "prole-coder-cli"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "ProleCoder: build VS Code extension",
+      "type": "shell",
+      "command": "pnpm",
+      "args": [
+        "--filter",
+        "prole-coder-vscode",
+        "build"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": "$tsc"
+    }
+  ]
+}

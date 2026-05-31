@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "ProleCoder: Extension Development Host",
+      "type": "extensionHost",
+      "request": "launch",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/vscode/extension",
+        "${workspaceFolder}"
+      ],
+      "env": {
+        "PATH": "${workspaceFolder}/target/debug${pathSeparator}${env:PATH}",
+        "Path": "${workspaceFolder}/target/debug${pathSeparator}${env:Path}"
+      },
+      "outFiles": [
+        "${workspaceFolder}/vscode/extension/out/**/*.js"
+      ],
+      "preLaunchTask": "ProleCoder: build debug dependencies"
+    }
+  ]
+}
