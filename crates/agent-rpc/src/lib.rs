@@ -3690,9 +3690,9 @@ mod tests {
 
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "run.completed"
-                    && line["params"]["runId"] == "run_real_rpc"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.completed" && event["runId"] == "run_real_rpc"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -3730,12 +3730,12 @@ mod tests {
         assert_eq!(lines[1]["result"]["turnId"], "turn_1");
         let turn_response_index = line_index(&lines, |line| line["id"] == "turn_1");
         let run_started_index = line_index(&lines, |line| {
-            line["method"] == "agent.event" && line["params"]["type"] == "run.started"
+            line_has_agent_event(line, |event| event["type"] == "run.started")
         });
         assert!(turn_response_index < run_started_index);
-        assert!(lines.iter().any(|line| line["method"] == "agent.event"
-            && line["params"]["type"] == "run.completed"
-            && line["params"]["payload"]["summary"] == "RPC final answer"));
+        let events = agent_event_values(&lines);
+        assert!(events.iter().any(|event| event["type"] == "run.completed"
+            && event["payload"]["summary"] == "RPC final answer"));
         assert!(lines.iter().any(|line| {
             line["id"] == "resume_1"
                 && line["result"]["nextSeq"]
@@ -3807,18 +3807,18 @@ mod tests {
 
         output.wait_for_line(|line| line["id"] == "turn_1", RPC_TEST_TIMEOUT);
         assert!(
-            !output.lines().iter().any(|line| {
-                line["method"] == "agent.event" && line["params"]["type"] == "run.completed"
-            }),
+            !agent_event_values(&output.lines())
+                .iter()
+                .any(|event| event["type"] == "run.completed"),
             "sendTurn response must be written before the blocked provider completes"
         );
 
         gate.release();
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "run.completed"
-                    && line["params"]["runId"] == "run_rpc_early_accept"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.completed" && event["runId"] == "run_rpc_early_accept"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -3858,9 +3858,9 @@ mod tests {
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "tool.approvalRequired"
-                    && line["params"]["runId"] == "run_rpc_approval"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "tool.approvalRequired" && event["runId"] == "run_rpc_approval"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -3878,9 +3878,9 @@ mod tests {
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "run.completed"
-                    && line["params"]["runId"] == "run_rpc_approval"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.completed" && event["runId"] == "run_rpc_approval"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -3891,19 +3891,24 @@ mod tests {
 
         assert_eq!(workspace.read("README.md"), "new\n");
         let lines = output.lines();
+        let events = agent_event_values(&lines);
         let approval_required_index = line_index(&lines, |line| {
-            line["method"] == "agent.event" && line["params"]["type"] == "tool.approvalRequired"
+            line_has_agent_event(line, |event| event["type"] == "tool.approvalRequired")
         });
         let approve_response_index = line_index(&lines, |line| line["id"] == "approve_1");
         let approval_resolved_index = line_index(&lines, |line| {
-            line["method"] == "agent.event"
-                && line["params"]["type"] == "tool.approvalResolved"
-                && line["params"]["payload"]["decision"] == "approved"
+            line_has_agent_event(line, |event| {
+                event["type"] == "tool.approvalResolved"
+                    && event["payload"]["decision"] == "approved"
+            })
         });
 
         assert!(approval_required_index < approve_response_index);
         assert!(approve_response_index < approval_resolved_index);
-        let approval_payload = &lines[approval_required_index]["params"]["payload"];
+        let approval_payload = &events
+            .iter()
+            .find(|event| event["type"] == "tool.approvalRequired")
+            .expect("approval required event should exist")["payload"];
         assert_eq!(approval_payload["approvalId"], "approval_1_1");
         assert_eq!(approval_payload["toolCallId"], "call_patch");
         assert_eq!(approval_payload["toolName"], "apply_patch");
@@ -3918,10 +3923,9 @@ mod tests {
             lines[approve_response_index]["result"]["persist"],
             "session"
         );
-        assert!(lines.iter().any(|line| {
-            line["method"] == "agent.event"
-                && line["params"]["type"] == "run.completed"
-                && line["params"]["payload"]["changedFiles"] == json!(["README.md"])
+        assert!(events.iter().any(|event| {
+            event["type"] == "run.completed"
+                && event["payload"]["changedFiles"] == json!(["README.md"])
         }));
     }
 
@@ -3955,9 +3959,10 @@ mod tests {
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "tool.approvalRequired"
-                    && line["params"]["runId"] == "run_rpc_rejected_approval"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "tool.approvalRequired"
+                        && event["runId"] == "run_rpc_rejected_approval"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -3975,9 +3980,9 @@ mod tests {
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "run.failed"
-                    && line["params"]["runId"] == "run_rpc_rejected_approval"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.failed" && event["runId"] == "run_rpc_rejected_approval"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -3988,20 +3993,15 @@ mod tests {
 
         assert_eq!(workspace.read("README.md"), "old\n");
         let lines = output.lines();
+        let events = agent_event_values(&lines);
         let reject_response_index = line_index(&lines, |line| line["id"] == "reject_1");
         assert_eq!(lines[reject_response_index]["result"]["state"], "rejected");
         assert_eq!(lines[reject_response_index]["result"]["reason"], "not now");
-        assert!(lines.iter().any(|line| {
-            line["method"] == "agent.event"
-                && line["params"]["type"] == "tool.approvalResolved"
-                && line["params"]["payload"]["decision"] == "rejected"
+        assert!(events.iter().any(|event| {
+            event["type"] == "tool.approvalResolved" && event["payload"]["decision"] == "rejected"
         }));
-        assert!(lines.iter().any(|line| {
-            line["method"] == "agent.event" && line["params"]["type"] == "run.failed"
-        }));
-        assert!(!lines.iter().any(|line| {
-            line["method"] == "agent.event" && line["params"]["type"] == "tool.started"
-        }));
+        assert!(events.iter().any(|event| event["type"] == "run.failed"));
+        assert!(!events.iter().any(|event| event["type"] == "tool.started"));
     }
 
     #[test]
@@ -4034,9 +4034,10 @@ mod tests {
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "tool.approvalRequired"
-                    && line["params"]["runId"] == "run_rpc_canceled_approval"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "tool.approvalRequired"
+                        && event["runId"] == "run_rpc_canceled_approval"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -4054,9 +4055,9 @@ mod tests {
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "run.canceled"
-                    && line["params"]["runId"] == "run_rpc_canceled_approval"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.canceled" && event["runId"] == "run_rpc_canceled_approval"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -4158,9 +4159,10 @@ mod tests {
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "tool.approvalRequired"
-                    && line["params"]["runId"] == "run_rpc_active_disconnect"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "tool.approvalRequired"
+                        && event["runId"] == "run_rpc_active_disconnect"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -4626,6 +4628,20 @@ mod tests {
             }
         }
         events
+    }
+
+    fn line_has_agent_event(line: &Value, predicate: impl Fn(&Value) -> bool) -> bool {
+        if line["method"] == "agent.event" {
+            return predicate(&line["params"]);
+        }
+
+        if line["method"] == "agent.eventBatch"
+            && let Some(events) = line["params"]["events"].as_array()
+        {
+            return events.iter().any(predicate);
+        }
+
+        false
     }
 
     fn line_index(lines: &[Value], predicate: impl Fn(&Value) -> bool) -> usize {
