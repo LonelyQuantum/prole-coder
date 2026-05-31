@@ -14,6 +14,7 @@ import {
 } from "./automaticContext";
 import { DEFAULT_CHAT_MODE, sendTurnParams } from "./chatInput";
 import type { ProleLogger } from "./logging";
+import type { MessageRedactor } from "./redaction";
 import type { AgentEventEnvelope, DisposableLike } from "./rpcServer";
 
 export const CHAT_PARTICIPANT_ID = "prole-coder.chatParticipant";
@@ -55,6 +56,7 @@ export interface ChatParticipantTurnOptions {
   readonly request: ChatParticipantTurnRequest;
   readonly response: ChatParticipantResponseStream;
   readonly logger?: ProleLogger;
+  readonly redactor?: MessageRedactor;
   readonly token?: CancellationTokenLike;
 }
 
@@ -115,7 +117,7 @@ export async function runChatParticipantTurn(
       return;
     }
 
-    handleParticipantEvent(event, options.response, finish);
+    handleParticipantEvent(event, options.response, finish, options.redactor);
   });
   const cancellationSubscription = options.token?.onCancellationRequested(() => {
     cancellationState.requested = true;
@@ -135,7 +137,7 @@ export async function runChatParticipantTurn(
 
     for (const event of bufferedEvents) {
       if (event.runId === runId) {
-        handleParticipantEvent(event, options.response, finish);
+        handleParticipantEvent(event, options.response, finish, options.redactor);
       }
     }
 
@@ -153,7 +155,10 @@ export async function runChatParticipantTurn(
 
     return await terminalPromise;
   } catch (error) {
-    const message = `ProleCoder turn failed: ${errorMessage(error)}`;
+    const message = redactMessage(
+      `ProleCoder turn failed: ${errorMessage(error)}`,
+      options.redactor,
+    );
     options.logger?.error(message);
     return errorResult(message, runId);
   } finally {
@@ -183,6 +188,7 @@ function handleParticipantEvent(
   event: AgentEventEnvelope,
   response: ChatParticipantResponseStream,
   finish: (result: ChatParticipantResult) => void,
+  redactor?: MessageRedactor,
 ): void {
   const payload = record(event.payload);
   switch (event.type) {
@@ -213,7 +219,7 @@ function handleParticipantEvent(
       });
       return;
     case "run.failed": {
-      const message = terminalMessage(payload, "Run failed.");
+      const message = redactMessage(terminalMessage(payload, "Run failed."), redactor);
       response.markdown(`\n\n${message}`);
       finish(errorResult(message, event.runId));
       return;
@@ -273,6 +279,10 @@ function errorResult(message: string, runId?: string): ChatParticipantResult {
       ...(runId === undefined ? {} : { runId }),
     },
   };
+}
+
+function redactMessage(message: string, redactor: MessageRedactor | undefined): string {
+  return redactor?.redact(message) ?? message;
 }
 
 function canceledResult(runId?: string): ChatParticipantResult {
