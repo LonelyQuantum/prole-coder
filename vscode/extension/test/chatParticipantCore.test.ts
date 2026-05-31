@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { SendTurnParams } from "@prole-coder/protocol" with {
+import type { SendTurnParams, SendTurnResult } from "@prole-coder/protocol" with {
   "resolution-mode": "import",
 };
 
@@ -113,6 +113,25 @@ test("runChatParticipantTurn handles terminal events buffered before sendTurn re
   });
 });
 
+test("runChatParticipantTurn logs RPC failures before returning chat errors", async () => {
+  const rpc = new RejectingChatParticipantRpcClient(
+    new Error("DeepSeek provider configuration failed: DEEPSEEK_API_KEY is required"),
+  );
+  const response = new FakeChatResponseStream();
+  const logger = new FakeLogger();
+  const result = await runChatParticipantTurn({
+    rpcClient: rpc,
+    request: {
+      prompt: "hello",
+    },
+    response,
+    logger,
+  });
+
+  assert.ok(result.errorDetails?.message.includes("DEEPSEEK_API_KEY is required"));
+  assert.deepEqual(logger.errors, [result.errorDetails?.message]);
+});
+
 test("runChatParticipantTurn returns chat errors without an RPC client", async () => {
   const response = new FakeChatResponseStream();
   const result = await runChatParticipantTurn({
@@ -168,7 +187,7 @@ class FakeChatParticipantRpcClient implements ChatParticipantRpcClient {
 }
 
 class EarlyTerminalChatParticipantRpcClient extends FakeChatParticipantRpcClient {
-  override async sendTurn(params: SendTurnParams) {
+  override async sendTurn(params: SendTurnParams): Promise<SendTurnResult> {
     this.sendTurns.push(params);
     this.emit(agentEvent(1, "assistant.delta", { text: "early" }));
     this.emit(agentEvent(2, "run.completed", { summary: "done" }));
@@ -177,6 +196,17 @@ class EarlyTerminalChatParticipantRpcClient extends FakeChatParticipantRpcClient
       turnId: "turn_chat_1",
       accepted: true as const,
     };
+  }
+}
+
+class RejectingChatParticipantRpcClient extends FakeChatParticipantRpcClient {
+  constructor(private readonly error: Error) {
+    super();
+  }
+
+  override async sendTurn(params: SendTurnParams): Promise<SendTurnResult> {
+    this.sendTurns.push(params);
+    throw this.error;
   }
 }
 
@@ -190,6 +220,24 @@ class FakeChatResponseStream implements ChatParticipantResponseStream {
 
   progress(value: string): void {
     this.progressParts.push(value);
+  }
+}
+
+class FakeLogger {
+  readonly errors: string[] = [];
+  readonly infos: string[] = [];
+  readonly warnings: string[] = [];
+
+  error(message: string): void {
+    this.errors.push(message);
+  }
+
+  info(message: string): void {
+    this.infos.push(message);
+  }
+
+  warn(message: string): void {
+    this.warnings.push(message);
   }
 }
 
