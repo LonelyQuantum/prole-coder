@@ -10,19 +10,41 @@ import {
 } from "./commands";
 import { createPatchDiffPreviewController } from "./diffPreview";
 import { registerFimInlineCompletionProvider } from "./fimPreviewVscode";
-import { createOutputLogger, type ProleLogger } from "./logging";
+import {
+  GENERATE_COMMIT_MESSAGE_COMMAND,
+  GENERATE_PR_DESCRIPTION_COMMAND,
+  generateCommitMessage,
+  generatePrDescription,
+} from "./gitWorkflow";
+import { createVscodeGitRepositoryProvider, createVscodeMarkdownSink } from "./gitWorkflowVscode";
+import { createOutputLogger } from "./logging";
+import { createExtensionNotifier, type ExtensionNotifier } from "./notifier";
+import { registerProviderSecretCommands } from "./providerSecretCommands";
+import {
+  DEEPSEEK_API_KEY_SECRET_ID,
+  deepSeekEnvOverride,
+  providerSecretRedactionValues,
+  resolveDeepSeekApiKey,
+} from "./providerSecrets";
+import { MutableSecretRedactor } from "./redaction";
 import { RpcServerManager, readRpcServerLaunchConfig } from "./rpcServer";
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   const outputChannel = vscode.window.createOutputChannel("ProleCoder");
   const logger = createOutputLogger(outputChannel);
-  const notifier = createExtensionNotifier(logger);
+  const secretRedactor = new MutableSecretRedactor();
+  const initialSecretStatus = resolveDeepSeekApiKey({
+    secretValue: await context.secrets.get(DEEPSEEK_API_KEY_SECRET_ID),
+    processEnv: process.env,
+  });
+  secretRedactor.update(providerSecretRedactionValues(initialSecretStatus));
+  const notifier = createExtensionNotifier(logger, vscode.window, secretRedactor);
   context.subscriptions.push(outputChannel);
 
-  const rpcServer = createRpcServerManager(context, notifier);
-  const chatView = new ProleChatViewProvider(context.extensionUri, rpcServer, workspaceRoot, logger);
-  const chatParticipant = registerProleChatParticipant(context, rpcServer, workspaceRoot, logger);
+  const rpcServer = createRpcServerManager(context, notifier, deepSeekEnvOverride(initialSecretStatus));
+  const chatView = new ProleChatViewProvider(context.extensionUri, rpcServer, workspaceRoot, logger, secretRedactor);
+  const chatParticipant = registerProleChatParticipant(context, rpcServer, workspaceRoot, logger, secretRedactor);
   const openChat = registerOpenChatCommand(
     vscode.commands,
     vscode.window,
@@ -49,8 +71,46 @@ export function activate(context: vscode.ExtensionContext): void {
       retainContextWhenHidden: true,
     },
   });
+  const providerSecretCommands = registerProviderSecretCommands({
+    commands: vscode.commands,
+    window: vscode.window,
+    secrets: context.secrets,
+    processEnv: process.env,
+    redactor: secretRedactor,
+    rpcServer,
+    isRpcIdle: () => chatView.isIdle(),
+  });
+  const gitRepositoryProvider = createVscodeGitRepositoryProvider();
+  const markdownSink = createVscodeMarkdownSink();
+  const gitWorkflowCommands = [
+    vscode.commands.registerCommand(GENERATE_COMMIT_MESSAGE_COMMAND, () =>
+      generateCommitMessage({
+        repositories: gitRepositoryProvider,
+        window: vscode.window,
+        agent: rpcServer,
+        redactor: secretRedactor,
+      }),
+    ),
+    vscode.commands.registerCommand(GENERATE_PR_DESCRIPTION_COMMAND, () =>
+      generatePrDescription({
+        repositories: gitRepositoryProvider,
+        window: vscode.window,
+        agent: rpcServer,
+        markdownSink,
+        redactor: secretRedactor,
+      }),
+    ),
+  ];
 
-  context.subscriptions.push(openChat, openSettings, chatView, chatViewRegistration, chatParticipant);
+  context.subscriptions.push(
+    openChat,
+    openSettings,
+    chatView,
+    chatViewRegistration,
+    chatParticipant,
+    ...providerSecretCommands,
+    ...gitWorkflowCommands,
+  );
   registerTestCommands(context, chatView);
   if (rpcServer !== undefined && workspaceRoot !== undefined) {
     const patchDiffPreviewController = createPatchDiffPreviewController(context, rpcServer, workspaceRoot);
@@ -80,6 +140,7 @@ export function deactivate(): void {
 function createRpcServerManager(
   context: vscode.ExtensionContext,
   notifier: ExtensionNotifier,
+  processEnv: Record<string, string | undefined>,
 ): RpcServerManager | undefined {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceRoot === undefined) {
@@ -93,31 +154,9 @@ function createRpcServerManager(
       trusted: vscode.workspace.isTrusted,
     },
     extensionVersion: extensionVersion(context),
+    processEnv,
     notifier,
   });
-}
-
-interface ExtensionNotifier {
-  info(message: string): unknown;
-  warn(message: string): unknown;
-  error(message: string): unknown;
-}
-
-function createExtensionNotifier(logger: ProleLogger): ExtensionNotifier {
-  return {
-    info(message) {
-      logger.info(message);
-      return vscode.window.showInformationMessage(message);
-    },
-    warn(message) {
-      logger.warn(message);
-      return vscode.window.showWarningMessage(message);
-    },
-    error(message) {
-      logger.error(message);
-      return vscode.window.showWarningMessage(message);
-    },
-  };
 }
 
 function extensionVersion(context: vscode.ExtensionContext): string {
