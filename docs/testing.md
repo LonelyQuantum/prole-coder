@@ -79,13 +79,13 @@ Phase 5 P5-1 到 P5-5 的 Codex-like UX 与诊断收敛继续复用 Phase 4 exte
 - `test/electron/index.ts` 覆盖 VS Code manifest 中的 `contributes.chatParticipants`，并通过 `ProleCoder: Open Chat` 入口验证原生 Chat 入口不会依赖手动拖动 Activity Bar view。
 - `pnpm run vsix:smoke` 和 `pnpm run vsix:alpha` 会校验 VSIX manifest 中的 `onChatParticipant:prole-coder.chatParticipant` activation event 以及 `@prole` Chat Participant 贡献点。
 
-Phase 5 P5-6 到 P5-11 的 API key 与 Git 工作流已补齐以下确定性覆盖：
+Phase 5 P5-6 到 P5-11 的 API key/model 与 Git 工作流已补齐以下确定性覆盖：
 
-- `providerSecrets.test.ts` 覆盖 SecretStorage 优先、process env fallback、missing status、child env 覆盖值和 redaction source。
+- `providerSecrets.test.ts` 覆盖 SecretStorage 优先、process env fallback、missing status、child env 覆盖值、model 配置优先级、`DEEPSEEK_MODEL` 注入和 redaction source。
 - `notifier.test.ts` 覆盖 Output Channel/toast message 统一脱敏 SecretStorage/env key。
-- `providerSecretCommands.test.ts` 覆盖 Configure/Clear 命令、provider status、idle 状态 RPC restart、active run 场景提示稍后生效。
+- `providerSecretCommands.test.ts` 覆盖 Configure/Clear API key、Select DeepSeek Model、含 model 的 provider status、idle 状态 RPC restart、active run 场景提示稍后生效。
 - `gitWorkflow.test.ts` 覆盖 staged diff、unstaged fallback、upstream/main base 选择、Generate Commit Message 写入 `repository.inputBox.value` 且不自动 commit、agent 重复 terminal event 只采纳首个终态、Generate PR Description 输出 markdown 且不自动创建 PR。
-- `rpcServer.test.ts` 覆盖 RPC child env 注入和 key 轮换后重启使用新 env；`test/electron/index.ts` 覆盖新增命令在 VS Code test host 中注册。
+- `rpcServer.test.ts` 覆盖 RPC child env 注入和 key 轮换后重启使用新 env；`providerSecretCommands.test.ts` 覆盖 model 切换后的 env 更新与 idle restart；`test/electron/index.ts` 覆盖新增命令在 VS Code test host 中注册。
 - 文档/打包验收已运行 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke`、`pnpm run vsix:alpha`、`git diff --check` 和敏感信息扫描。
 
 ## 新增测试的协作要求

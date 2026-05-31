@@ -1,6 +1,6 @@
 # 编辑器插件（VS Code Extension）
 
-状态：Phase 3 VS Code 插件核心体验已完成；Phase 4 VS Code 深度集成已完成 14 项深度集成能力；Phase 5 VS Code Codex-like UX 与开发工作流已完成。基础命令、审批弹窗 adapter、RPC server 启动监管、初始化握手、JSON-RPC request client、VS Code/protocol TypeScript 类型共享、RPC/commands 边界测试、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、共享 RPC 全双工事件管线、命令风险动态升级展示、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、VSIX alpha 打包、extension-host E2E、原生 `@prole` Chat Participant、简化审批 UX、自动上下文压缩、`ProleCoder` Output Channel 错误诊断、API key 配置、统一 redaction 和 Git 工作流均已实现。
+状态：Phase 3 VS Code 插件核心体验已完成；Phase 4 VS Code 深度集成已完成 14 项深度集成能力；Phase 5 VS Code Codex-like UX 与开发工作流进行中。基础命令、审批弹窗 adapter、RPC server 启动监管、初始化握手、JSON-RPC request client、VS Code/protocol TypeScript 类型共享、RPC/commands 边界测试、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、共享 RPC 全双工事件管线、命令风险动态升级展示、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、VSIX alpha 打包、extension-host E2E、原生 `@prole` Chat Participant、简化审批 UX、自动上下文压缩、`ProleCoder` Output Channel 错误诊断、API key/model 配置、统一 redaction 和 Git 工作流均已实现；P5-12 结构化 provider 配置错误码与恢复动作仍未完成。
 
 VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server 复用 Rust Agent Core，而不是在 TypeScript 侧重新实现 agent loop、context builder、provider 调用或 tool execution。
 
@@ -69,7 +69,8 @@ VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server
 {
   "prole-coder.rpc.autoStart": true,
   "prole-coder.rpc.command": "prole",
-  "prole-coder.rpc.args": ["rpc"]
+  "prole-coder.rpc.args": ["rpc"],
+  "prole-coder.provider.model": "deepseek-v4-pro"
 }
 ```
 
@@ -82,7 +83,7 @@ VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server
 }
 ```
 
-配置不保存 API Key。DeepSeek API Key 仍应由 Rust CLI/RPC server 按既有规则从环境变量或被忽略的本地 `.secrets/` 文件读取。
+配置不保存 API Key。DeepSeek API Key 由插件命令写入 VS Code SecretStorage，或由 CLI/RPC server 继续按既有规则从环境变量读取；DeepSeek model ID 是非敏感配置，可通过 `prole-coder.provider.model` 或 Sidebar 的 Model 按钮选择。
 
 ## MVP 分层
 
@@ -114,7 +115,7 @@ Phase 3 P0 验收标准：
 - `tool.approvalRequired` 触发 VS Code modal，approve/reject 能回传到 `agent.approve` / `agent.reject`。已完成真实 RPC pending queue 接入；`apply_patch` 首版支持 selected hunk quick pick 并通过 `agent.approve.hunks` 回传。
 - Sidebar Chat 能通过 `agent.listRuns` 展示最近 run，并用 `agent.resume` 回放历史事件。已完成首版 Run List / resume 接入。
 - Sidebar Chat 能把 `context.built` 渲染为 Context Capsule 面板，展示 token 分段、来源和 manifest/cache/estimator metadata。已完成首版 Context Capsule 可视化。
-- `ProleCoder: Open Settings` 能打开 VS Code 设置，并显示 server capability、模型预算、审批策略、RPC command/state；扩展配置不保存 API Key。
+- `ProleCoder: Open Settings` 能打开 VS Code 设置，并显示 server capability、模型预算、审批策略、RPC command/state；扩展配置不保存 API Key，DeepSeek model ID 作为非敏感配置保存。
 - Inline completion 首版通过 `agent.previewFim` 请求 RPC server 的 FIM preview，只有 server capability 明确标记 `supportsFim` 的模型会被使用。
 
 Phase 4 深度集成权威清单与 `docs/phase-tasks.md` 对齐：
@@ -140,12 +141,13 @@ Phase 5 Codex-like UX 与开发工作流清单与 `docs/phase-tasks.md` 对齐�
 3. P5-3：自动上下文压缩，已完成：Sidebar Chat 和原生 Chat Participant 会把历史对话/事件摘要压缩为 `explicit_content` attachment，交给 Context Capsule 处理，让连续对话自然承接上下文。
 4. P5-4：UX 收敛测试与打包验收，已完成：已覆盖 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke` 和 `pnpm run vsix:alpha`。
 5. P5-5：VS Code Output Channel 错误诊断，已完成：创建 `ProleCoder` Output Channel，记录 Sidebar Chat、Run List、原生 Chat Participant 和 RPC 启动/运行 warning 的完整错误；activation 层使用统一 notifier 分发日志与 VS Code toast，避免侧边栏短状态截断关键诊断。
-6. P5-6：DeepSeek API key SecretStorage 与 provider status，已完成：插件内配置/清除 key 与查看 provider status；SecretStorage 优先、process env fallback，RPC child env 继承 `process.env` 后覆盖 `DEEPSEEK_API_KEY`。
-7. P5-7：统一 redaction 与 API key 错误恢复 UX，已完成：notifier/logger 统一脱敏 SecretStorage/env key，API key 配置后 idle 状态自动重启 RPC，active run 场景保守提示稍后生效。
+6. P5-6：DeepSeek API key SecretStorage、model selector 与 provider status，已完成：插件内配置/清除 key、选择 DeepSeek model 与查看 provider status，provider status 同时显示 key 来源与当前 model；Sidebar composer 常驻 Key/Model 按钮；SecretStorage 优先、process env fallback，RPC child env 继承 `process.env` 后覆盖 `DEEPSEEK_API_KEY` 与选中的 `DEEPSEEK_MODEL`。
+7. P5-7：统一 redaction 与 API key 错误恢复 UX，已完成：notifier/logger 统一脱敏 SecretStorage/env key；缺少 `DEEPSEEK_API_KEY` 时 Sidebar/原生 Chat 自动打开配置入口，Sidebar 错误状态保留 Configure API Key 修复按钮；API key 配置或 model 切换后 idle 状态自动重启 RPC，active run 场景保守提示稍后生效。
 8. P5-8：Git context 只读采集与大 diff attachment 管线，已完成：优先使用 VS Code Git API，git CLI 仅作受控 fallback，commit/PR 命令把 diff context 作为 `explicit_content` attachment 进入 Context Capsule 管线。
 9. P5-9：Generate Commit Message，已完成：从 staged diff 生成候选 commit message 并写入 Source Control inputBox，不自动 commit；staged 为空时才询问是否使用 unstaged diff。
 10. P5-10：Generate PR Description，已完成：根据 upstream/main/master/用户选择的 base、diff/stat 和 commit summary 生成 PR title/body markdown，用带标题的 untitled markdown 预览承载结果，不自动创建 PR。
 11. P5-11：Phase 5 UX 工作流验收，已完成：补齐 P5-6 到 P5-10 的测试、VSIX 验证和文档收敛；Git workflow agent 终态事件已补幂等保护，G4 自动 commit / push / create PR 留作后续增强并接入审批模型。
+12. P5-12：结构化 provider 配置错误码与恢复动作，未完成：将缺少 API key 等 provider 配置失败从前端字符串匹配升级为 RPC 结构化错误码，Sidebar/原生 Chat 和后续 TUI 依据错误码展示配置入口。
 
 在这些能力稳定前，不在插件侧重复实现 context builder、tool execution 或 provider 调用。
 
