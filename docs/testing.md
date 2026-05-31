@@ -69,10 +69,11 @@ pnpm run vscode:test-electron
 
 test-only command 和 auto approval 同时要求 VS Code `ExtensionMode.Test` 以及 `PROLE_CODER_VSCODE_TEST=1` / `PROLE_CODER_VSCODE_TEST_AUTO_APPROVE=1` 环境变量，普通扩展激活不会注册这些测试入口。
 
-P4-15 到 P4-18 的 Codex-like UX 收敛继续复用这条 extension-host 入口，并补齐以下确定性覆盖：
+Phase 5 P5-1 到 P5-5 的 Codex-like UX 与诊断收敛继续复用 Phase 4 extension-host 入口，并补齐以下确定性覆盖：
 
 - `automaticContext.test.ts` 覆盖历史对话压缩、字符预算裁剪、空历史跳过、Sidebar timeline 转换、单条 timeline 消息限长和 attachment 上限合并。
 - `chatParticipantCore.test.ts` 覆盖原生 `@prole` Chat Participant turn runner、命令到 run mode 的映射、sendTurn response 前早到事件缓冲、assistant delta streaming、缺少 RPC client 的错误和自动上下文进度提示。
+- `logging.test.ts` 覆盖 `ProleCoder` Output Channel 日志格式与输出分发；`chatParticipantCore.test.ts` 还覆盖 RPC turn 失败写入 logger，确保完整错误可在 Output 面板诊断。
 - `commands.test.ts` 覆盖简化后的审批 choices：主弹窗只暴露 `Approve` / `Reject`，`Approve` 映射一次性批准，`apply_patch` 多 hunk 走 `Select Hunks`。
 - `test/electron/index.ts` 覆盖 VS Code manifest 中的 `contributes.chatParticipants`，并通过 `ProleCoder: Open Chat` 入口验证原生 Chat 入口不会依赖手动拖动 Activity Bar view。
 - `pnpm run vsix:smoke` 和 `pnpm run vsix:alpha` 会校验 VSIX manifest 中的 `onChatParticipant:prole-coder.chatParticipant` activation event 以及 `@prole` Chat Participant 贡献点。

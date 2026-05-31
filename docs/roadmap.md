@@ -1,6 +1,6 @@
 # 路线图
 
-状态：草案，Phase 1 Agent Core MVP、合并主线前离线最终验收、Phase 2 的 1M Context Capsule 核心收敛、Phase 2e 展示型 demo 扩展、Phase 3 VS Code 插件核心与共享 RPC 事件队列、Phase 4 VS Code 深度集成与 Codex-like UX 收敛均已完成。
+状态：草案，Phase 1 Agent Core MVP、合并主线前离线最终验收、Phase 2 的 1M Context Capsule 核心收敛、Phase 2e 展示型 demo 扩展、Phase 3 VS Code 插件核心与共享 RPC 事件队列、Phase 4 VS Code 深度集成和 Phase 5 VS Code 插件 UX 体验优化均已完成。
 
 本文档把 README 中的大阶段拆成更可执行的优先级。README 保留项目入口和高层计划；这里记录跨模块的落地顺序、取舍和验收重点。具体任务的阶段、状态和来源统一登记在 `docs/phase-tasks.md`，阶段条目标记完成前应同步检查并更新该索引。
 
@@ -86,8 +86,8 @@ Phase 1 收官后优化池：
 P0 不追求：
 
 - 完整 VS Code Sidebar：已移入 Phase 3。
-- 完整 TUI：已移入 Phase 5。
-- VS Code/TUI 真实前端 UI 接入：Phase 3 优先 VS Code，Phase 5 再补齐 TUI。
+- 完整 TUI：已移入 Phase 6。
+- VS Code/TUI 真实前端 UI 接入：Phase 3 优先 VS Code，Phase 6 再补齐 TUI。
 - MCP 生态。
 - 多 provider UI。
 - 大仓库 1M token 基准。
@@ -105,17 +105,17 @@ P0 不追求：
 
 目标：让 VS Code 插件成为 Agent Core 的薄前端，而不是第二套 Agent。
 
-Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 18 项 VS Code 深度集成任务，在不推翻现有 Sidebar Chat 的前提下补齐 Codex-like 原生 Chat 入口、简化审批和自动上下文压缩；TUI 随后进入 Phase 5，与生态扩展一起推进。Marketplace 发布不阻塞 Phase 4，当前已具备可安装 VSIX alpha / pre-release 产物和安装说明。Phase 2e 展示型 demo 已经给 VS Code Context Viz / Approval / Run Log UI 提供可观察样本。
+Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 深度集成任务；Phase 5 已单独完成 Codex-like 原生 Chat 入口、简化审批、自动上下文压缩和 Output Channel 错误诊断。TUI 随后进入 Phase 6，与生态扩展一起推进。Marketplace 发布不阻塞 Phase 4/5，当前已具备可安装 VSIX alpha / pre-release 产物和安装说明。Phase 2e 展示型 demo 已经给 VS Code Context Viz / Approval / Run Log UI 提供可观察样本。
 
 优先事项：
 
 - VSIX dry-run packaging smoke 和 `@vscode/test-electron` 最小 harness 已完成，已提前验证打包、activation、trusted workspace 和 Chat view 基础加载。
-- Phase 4 新增 P4-15 到 P4-18 的 Codex-like UX 收敛已完成：原生 `@prole` Chat Participant、`Open Chat` 右侧 Chat 入口、简化审批 choices 和自动上下文压缩 attachment。
+- Phase 5 新增 P5-1 到 P5-5 的 Codex-like UX 与诊断收敛已完成：原生 `@prole` Chat Participant、`Open Chat` 右侧 Chat 入口、简化审批 choices、自动上下文压缩 attachment 和 Output Channel 错误诊断。
 - Provider capability model data contract 已完成，首版通过 `agent.initialize` 暴露给前端，不引入 heavy trait。
 - 事件 payload schema、协议 fixture 与 RPC 高频事件批量发送已完成，batch 不改变 Run Log `seq` 和 replay 语义。
 - `agent.cancel` 类型化 helper 与 Chat Cancel UI 已接入，并与 Terminal approval 做轻量 composer UX review。
 - Problems 面板诊断已通过 diagnostic attachments 进入 Context Builder，插件不新增独立 diagnostics 状态同步 RPC。
-- Terminal command approval 已支持命令、cwd、风险等级、风险原因、输出摘要字段和持久化语义；P4-16 后 VS Code 主审批弹窗保持 Approve / Reject。
+- Terminal command approval 已支持命令、cwd、风险等级、风险原因、输出摘要字段和持久化语义；P5-2 后 VS Code 主审批弹窗保持 Approve / Reject。
 - 审批持久化存储已支持 session/workspace，继续禁止 network/destructive 风险持久化。
 - 配置界面依赖 Provider capability model；provider、model、预算、审批策略和 RPC 命令配置都不得保存 API Key。
 - 真实 hunk 级 patch 审批首版限定 `apply_patch`，再扩展 Core/RPC 审批决策和 Run Log 记录。
@@ -131,7 +131,7 @@ Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 18 项 VS Code 
 
 已完成的验收重点：
 
-- Phase 4 的 18 个条目已全部在 `docs/phase-tasks.md` 标记 `[x]`，README 可以写 Phase 4 全部完成。
+- Phase 4 的 14 个条目与 Phase 5 的 5 个 UX 条目已全部在 `docs/phase-tasks.md` 标记 `[x]`，README 可以分别写 Phase 4 和 Phase 5 全部完成。
 - VS Code 插件可通过 VSIX 安装到 clean 环境。
 - fixture provider 下 Chat sendTurn、Cancel、Problems diagnostics、审批和 Run List / resume 至少有一条 extension-host 或可重复手动验收路径。
 - CLI 与 VS Code 对同一 fixture task 的关键 Run Log event type 顺序一致。
