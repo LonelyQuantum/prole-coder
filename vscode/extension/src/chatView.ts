@@ -26,6 +26,7 @@ import {
   type ContextVizSnapshot,
 } from "./contextViz";
 import { diagnosticAttachmentsFromProblems } from "./diagnostics";
+import type { ProleLogger } from "./logging";
 import type { AgentEventEnvelope, DisposableLike } from "./rpcServer";
 import {
   RUN_LIST_LIMIT,
@@ -126,6 +127,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     private readonly extensionUri: vscode.Uri,
     rpcClient?: ChatRpcClient,
     private readonly workspaceRoot?: string,
+    private readonly logger?: ProleLogger,
   ) {
     this.rpcClient = rpcClient;
     this.rpcSubscription = rpcClient?.onEvent((event) => {
@@ -276,6 +278,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       );
     } catch (error) {
       const messageText = `Failed to send turn: ${errorMessage(error)}`;
+      this.logger?.error(messageText);
       this.setSubmission({
         ...idleSubmission(),
         status: "failed",
@@ -345,7 +348,9 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       const result = await this.rpcClient.listRuns({ limit: RUN_LIST_LIMIT });
       this.setRunList(readyRunList(result, this.runList.selectedRunId));
     } catch (error) {
-      this.setRunList(failedRunList(`Failed to load runs: ${errorMessage(error)}`, this.runList));
+      const messageText = `Failed to load runs: ${errorMessage(error)}`;
+      this.logger?.error(messageText);
+      this.setRunList(failedRunList(messageText, this.runList));
     }
   }
 
@@ -374,7 +379,9 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
         : `No events to replay for ${result.runId}.`;
       this.setRunList(readyRunList({ runs: this.runList.runs }, result.runId, message));
     } catch (error) {
-      this.setRunList(failedRunList(`Failed to resume run: ${errorMessage(error)}`, this.runList));
+      const messageText = `Failed to resume run: ${errorMessage(error)}`;
+      this.logger?.error(messageText);
+      this.setRunList(failedRunList(messageText, this.runList));
     }
   }
 
@@ -415,6 +422,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       });
     } catch (error) {
       const messageText = `Failed to cancel turn: ${errorMessage(error)}`;
+      this.logger?.error(messageText);
       this.setSubmission({
         ...this.submission,
         message: messageText,
@@ -1126,7 +1134,9 @@ function renderChatViewHtml(
       const loading = status === "loading";
       refreshRunsButton.disabled = loading;
       runMessageRoot.className = "run-message " + status;
-      runMessageRoot.textContent = typeof state.message === "string" ? state.message : "";
+      const runMessage = typeof state.message === "string" ? state.message : "";
+      runMessageRoot.textContent = runMessage;
+      runMessageRoot.title = runMessage;
       runListRoot.replaceChildren();
 
       if (runs.length === 0) {
@@ -1423,7 +1433,9 @@ function renderChatViewHtml(
       setComposerBusy(busy, cancelable);
       cancelButton.dataset.runId = runId;
       submissionRoot.className = "submission " + status;
-      submissionRoot.textContent = typeof state.message === "string" ? state.message : "";
+      const submissionMessage = typeof state.message === "string" ? state.message : "";
+      submissionRoot.textContent = submissionMessage;
+      submissionRoot.title = typeof state.error === "string" ? state.error : submissionMessage;
       if (status === "running") {
         promptInput.value = "";
       }

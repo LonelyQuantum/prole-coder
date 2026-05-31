@@ -13,6 +13,7 @@ import {
   type ConversationContextMessage,
 } from "./automaticContext";
 import { DEFAULT_CHAT_MODE, sendTurnParams } from "./chatInput";
+import type { ProleLogger } from "./logging";
 import type { AgentEventEnvelope, DisposableLike } from "./rpcServer";
 
 export const CHAT_PARTICIPANT_ID = "prole-coder.chatParticipant";
@@ -53,6 +54,7 @@ export interface ChatParticipantTurnOptions {
   readonly rpcClient?: ChatParticipantRpcClient;
   readonly request: ChatParticipantTurnRequest;
   readonly response: ChatParticipantResponseStream;
+  readonly logger?: ProleLogger;
   readonly token?: CancellationTokenLike;
 }
 
@@ -151,7 +153,9 @@ export async function runChatParticipantTurn(
 
     return await terminalPromise;
   } catch (error) {
-    return errorResult(`ProleCoder turn failed: ${errorMessage(error)}`, runId);
+    const message = `ProleCoder turn failed: ${errorMessage(error)}`;
+    options.logger?.error(message);
+    return errorResult(message, runId);
   } finally {
     eventSubscription.dispose();
     cancellationSubscription?.dispose();

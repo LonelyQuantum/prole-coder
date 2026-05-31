@@ -15,11 +15,13 @@ import {
   type ChatParticipantRpcClient,
 } from "./chatParticipantCore";
 import { diagnosticAttachmentsFromProblems } from "./diagnostics";
+import type { ProleLogger } from "./logging";
 
 export function registerProleChatParticipant(
   context: vscode.ExtensionContext,
   rpcClient: ChatParticipantRpcClient | undefined,
   workspaceRoot: string | undefined,
+  logger?: ProleLogger,
 ): vscode.Disposable {
   const participant = vscode.chat.createChatParticipant(
     CHAT_PARTICIPANT_ID,
@@ -37,6 +39,7 @@ export function registerProleChatParticipant(
           ...(attachments.length === 0 ? {} : { attachments }),
         },
         response,
+        ...(logger === undefined ? {} : { logger }),
         token,
       });
     },

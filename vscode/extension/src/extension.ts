@@ -10,13 +10,19 @@ import {
 } from "./commands";
 import { createPatchDiffPreviewController } from "./diffPreview";
 import { registerFimInlineCompletionProvider } from "./fimPreviewVscode";
+import { createOutputLogger, type ProleLogger } from "./logging";
 import { RpcServerManager, readRpcServerLaunchConfig } from "./rpcServer";
 
 export function activate(context: vscode.ExtensionContext): void {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  const rpcServer = createRpcServerManager(context);
-  const chatView = new ProleChatViewProvider(context.extensionUri, rpcServer, workspaceRoot);
-  const chatParticipant = registerProleChatParticipant(context, rpcServer, workspaceRoot);
+  const outputChannel = vscode.window.createOutputChannel("ProleCoder");
+  const logger = createOutputLogger(outputChannel);
+  const notifier = createExtensionNotifier(logger);
+  context.subscriptions.push(outputChannel);
+
+  const rpcServer = createRpcServerManager(context, notifier);
+  const chatView = new ProleChatViewProvider(context.extensionUri, rpcServer, workspaceRoot, logger);
+  const chatParticipant = registerProleChatParticipant(context, rpcServer, workspaceRoot, logger);
   const openChat = registerOpenChatCommand(
     vscode.commands,
     vscode.window,
@@ -27,10 +33,10 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands,
     {
       showInformationMessage(message) {
-        return vscode.window.showInformationMessage(message);
+        return notifier.info(message);
       },
       showWarningMessage(message) {
-        return vscode.window.showWarningMessage(message);
+        return notifier.warn(message);
       },
       openSettings(query) {
         return vscode.commands.executeCommand("workbench.action.openSettings", query);
@@ -51,11 +57,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const approvalController = new ApprovalEventController(
       rpcServer,
       vscode.window,
-      {
-        warn(message) {
-          return vscode.window.showWarningMessage(message);
-        },
-      },
+      notifier,
       testApprovalRequester(context),
       patchDiffPreviewController,
     );
@@ -64,9 +66,8 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(rpcServer);
     if (rpcServer.autoStart) {
       void rpcServer.start().catch((error: unknown) => {
-        void vscode.window.showWarningMessage(
-          `prole-coder RPC server failed to start: ${errorMessage(error)}`,
-        );
+        const message = `prole-coder RPC server failed to start: ${errorMessage(error)}`;
+        void notifier.error(message);
       });
     }
   }
@@ -76,7 +77,10 @@ export function deactivate(): void {
   // VS Code disposes context subscriptions, including the RPC server manager.
 }
 
-function createRpcServerManager(context: vscode.ExtensionContext): RpcServerManager | undefined {
+function createRpcServerManager(
+  context: vscode.ExtensionContext,
+  notifier: ExtensionNotifier,
+): RpcServerManager | undefined {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceRoot === undefined) {
     return undefined;
@@ -89,15 +93,31 @@ function createRpcServerManager(context: vscode.ExtensionContext): RpcServerMana
       trusted: vscode.workspace.isTrusted,
     },
     extensionVersion: extensionVersion(context),
-    notifier: {
-      info(message) {
-        return vscode.window.showInformationMessage(message);
-      },
-      warn(message) {
-        return vscode.window.showWarningMessage(message);
-      },
-    },
+    notifier,
   });
+}
+
+interface ExtensionNotifier {
+  info(message: string): unknown;
+  warn(message: string): unknown;
+  error(message: string): unknown;
+}
+
+function createExtensionNotifier(logger: ProleLogger): ExtensionNotifier {
+  return {
+    info(message) {
+      logger.info(message);
+      return vscode.window.showInformationMessage(message);
+    },
+    warn(message) {
+      logger.warn(message);
+      return vscode.window.showWarningMessage(message);
+    },
+    error(message) {
+      logger.error(message);
+      return vscode.window.showWarningMessage(message);
+    },
+  };
 }
 
 function extensionVersion(context: vscode.ExtensionContext): string {
