@@ -535,6 +535,10 @@ impl WorkspaceToolExecutor {
     fn resolve_workspace_path(&self, relative: &str) -> Result<PathBuf, ToolExecutionError> {
         let normalized = normalize_workspace_relative_path(relative)?;
         reject_sensitive_path(&normalized)?;
+        if normalized == "." {
+            return Ok(self.root.clone());
+        }
+
         let path = self.root.join(Path::new(&normalized));
         let parent = path.parent().unwrap_or(&self.root);
         let canonical_parent =
@@ -556,6 +560,10 @@ impl WorkspaceToolExecutor {
         relative: &str,
     ) -> Result<PathBuf, ToolExecutionError> {
         let path = self.resolve_workspace_path(relative)?;
+        if path == self.root {
+            return Ok(self.root.clone());
+        }
+
         let canonical = fs::canonicalize(&path).map_err(|source| ToolExecutionError::Io {
             path: path.clone(),
             source,
@@ -1955,6 +1963,28 @@ mod tests {
                 timeout_ms: Some(10_000),
             })
             .expect("shell should run");
+
+        assert_eq!(result.status, ToolStatus::Ok);
+        assert!(result.stdout.contains("hello"));
+    }
+
+    #[test]
+    fn shell_accepts_dot_cwd_as_workspace_root() {
+        let workspace = TestWorkspace::new("tool-execution");
+        let tools = WorkspaceToolExecutor::new(workspace.path()).expect("workspace should open");
+
+        #[cfg(windows)]
+        let command = "Write-Output hello";
+        #[cfg(not(windows))]
+        let command = "printf hello";
+
+        let result = tools
+            .shell(ShellArgs {
+                command: command.to_owned(),
+                cwd: Some(".".to_owned()),
+                timeout_ms: Some(10_000),
+            })
+            .expect("dot cwd should resolve to the workspace root");
 
         assert_eq!(result.status, ToolStatus::Ok);
         assert!(result.stdout.contains("hello"));
