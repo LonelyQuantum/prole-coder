@@ -15,6 +15,7 @@
 # Node / pnpm / TypeScript
 node_modules/
 .pnpm-store/
+.vscode-test/
 dist/
 out/
 dist-test/

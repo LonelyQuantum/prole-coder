@@ -34,6 +34,34 @@ test("approval controller sends approve decisions to the RPC pending queue", asy
   assert.deepEqual(rpc.rejections, []);
 });
 
+test("approval controller sends hunk approvals to the RPC pending queue", async () => {
+  const rpc = new FakeApprovalRpcClient();
+  const controller = new ApprovalEventController(rpc, fakeWindow, fakeNotifier(), async (_window, request) => {
+    assert.equal(request.hunks?.length, 2);
+    return {
+      kind: "approve",
+      approvalId: request.approvalId,
+      persist: "never",
+      hunks: {
+        approved: ["README.md#2:old5+2:new5+3"],
+      },
+    };
+  });
+
+  rpc.emit(approvalEvent({ toolName: "apply_patch", hunks: true }));
+  await controller.whenIdle();
+
+  assert.deepEqual(rpc.approvals, [
+    {
+      approvalId: "approval_1",
+      persist: "never",
+      hunks: {
+        approved: ["README.md#2:old5+2:new5+3"],
+      },
+    },
+  ]);
+});
+
 test("approval controller sends reject decisions to the RPC pending queue", async () => {
   const rpc = new FakeApprovalRpcClient();
   const controller = new ApprovalEventController(rpc, fakeWindow, fakeNotifier(), async (_window, request) => ({
@@ -205,7 +233,7 @@ test("approval controller reports malformed approval events without prompting", 
 });
 
 test("approvalPromptRequestFromEvent maps protocol payloads to modal requests", () => {
-  const request = approvalPromptRequestFromEvent(approvalEvent());
+  const request = approvalPromptRequestFromEvent(approvalEvent({ hunks: true }));
 
   assert.deepEqual(request, {
     approvalId: "approval_1",
@@ -216,7 +244,30 @@ test("approvalPromptRequestFromEvent maps protocol payloads to modal requests", 
     detail: "Run verification",
     persistable: true,
     command: "cargo test",
+    cwd: ".",
+    outputSummary: "last output summary",
     paths: ["crates/cli/src/lib.rs"],
+    hunks: [
+      {
+        id: "README.md#1:old1+3:new1+3",
+        filePath: "README.md",
+        hunkIndex: 0,
+        oldStart: 1,
+        oldCount: 3,
+        newStart: 1,
+        newCount: 3,
+      },
+      {
+        id: "README.md#2:old5+2:new5+3",
+        filePath: "README.md",
+        hunkIndex: 1,
+        oldStart: 5,
+        oldCount: 2,
+        newStart: 5,
+        newCount: 3,
+        section: "next block",
+      },
+    ],
     riskReasons: ["dependency install/update"],
   });
 });
@@ -233,7 +284,9 @@ function fakeNotifier(): { warn(message: string): unknown } {
   };
 }
 
-function approvalEvent(options: { readonly runId?: string; readonly toolName?: string } = {}): AgentEventEnvelope {
+function approvalEvent(
+  options: { readonly runId?: string; readonly toolName?: string; readonly hunks?: boolean } = {},
+): AgentEventEnvelope {
   return {
     seq: 1,
     time: "1970-01-01T00:00:00.000Z",
@@ -248,7 +301,36 @@ function approvalEvent(options: { readonly runId?: string; readonly toolName?: s
       title: "Execute shell command",
       detail: "Run verification",
       command: "cargo test",
+      cwd: ".",
+      outputSummary: "last output summary",
       paths: ["crates/cli/src/lib.rs"],
+      ...(options.hunks === true
+        ? {
+            hunks: [
+              {
+                id: "README.md#1:old1+3:new1+3",
+                filePath: "README.md",
+                fileIndex: 0,
+                hunkIndex: 0,
+                oldStart: 1,
+                oldCount: 3,
+                newStart: 1,
+                newCount: 3,
+              },
+              {
+                id: "README.md#2:old5+2:new5+3",
+                filePath: "README.md",
+                fileIndex: 0,
+                hunkIndex: 1,
+                oldStart: 5,
+                oldCount: 2,
+                newStart: 5,
+                newCount: 3,
+                section: "next block",
+              },
+            ],
+          }
+        : {}),
       riskReasons: ["dependency install/update"],
       persistable: true,
     },
@@ -256,7 +338,11 @@ function approvalEvent(options: { readonly runId?: string; readonly toolName?: s
 }
 
 class FakeApprovalRpcClient implements ApprovalRpcClient {
-  readonly approvals: Array<{ readonly approvalId: string; readonly persist?: string }> = [];
+  readonly approvals: Array<{
+    readonly approvalId: string;
+    readonly persist?: string;
+    readonly hunks?: { readonly approved: readonly string[] };
+  }> = [];
   readonly rejections: Array<{ readonly approvalId: string; readonly reason?: string }> = [];
   private readonly handlers = new Set<(event: AgentEventEnvelope) => void>();
 
@@ -275,16 +361,22 @@ class FakeApprovalRpcClient implements ApprovalRpcClient {
     }
   }
 
-  async approve(params: { readonly approvalId: string; readonly persist?: string }): Promise<{
+  async approve(params: {
+    readonly approvalId: string;
+    readonly persist?: string;
+    readonly hunks?: { readonly approved: readonly string[] };
+  }): Promise<{
     readonly approvalId: string;
     readonly state: "approved";
     readonly persist: "never" | "session" | "workspace";
+    readonly hunks?: { readonly approved: readonly string[] };
   }> {
     this.approvals.push(params);
     return {
       approvalId: params.approvalId,
       state: "approved",
       persist: params.persist === "session" || params.persist === "workspace" ? params.persist : "never",
+      ...(params.hunks === undefined ? {} : { hunks: params.hunks }),
     };
   }
 

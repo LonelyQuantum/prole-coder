@@ -5,8 +5,11 @@ import {
   DEFAULT_RPC_ARGS,
   DEFAULT_RPC_COMMAND,
   RPC_APPROVE_METHOD,
+  RPC_CANCEL_METHOD,
+  RPC_EVENT_BATCH_METHOD,
   RPC_INITIALIZE_METHOD,
   RPC_LIST_RUNS_METHOD,
+  RPC_PREVIEW_FIM_METHOD,
   RPC_PROTOCOL_VERSION,
   RPC_REJECT_METHOD,
   RPC_RESUME_METHOD,
@@ -56,6 +59,8 @@ test("RPC server manager spawns the configured command and initializes the works
 
   assert.equal(manager.status, "ready");
   assert.equal(ready.server.name, "prole-coder-agent-rpc");
+  assert.equal(ready.capabilities.provider.defaultModel, "deepseek-v4-pro");
+  assert.equal(ready.capabilities.supportsEventBatching, true);
 });
 
 test("RPC server manager forwards agent.event notifications", async () => {
@@ -111,6 +116,84 @@ test("RPC server manager ignores malformed agent.event notifications", async () 
       time: "1970-01-01T00:00:00.000Z",
       type: "run.started",
       payload: { mode: "ask" },
+    },
+  });
+
+  assert.deepEqual(received, []);
+});
+
+test("RPC server manager forwards agent.eventBatch notifications in order", async () => {
+  const factory = new FakeProcessFactory();
+  const manager = rpcManagerWithFactory(factory);
+  const received: unknown[] = [];
+  manager.onEvent((event) => received.push(event));
+
+  const readyPromise = manager.start();
+  const child = factory.lastChild();
+  child.stdout.pushJson(initializeResponse(child.initializeRequest().id));
+  await readyPromise;
+
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    method: RPC_EVENT_BATCH_METHOD,
+    params: {
+      events: [
+        {
+          seq: 2,
+          time: "1970-01-01T00:00:00.001Z",
+          type: "assistant.delta",
+          runId: "run_1",
+          turnId: "turn_1",
+          payload: { text: "hello" },
+        },
+        {
+          seq: 3,
+          time: "1970-01-01T00:00:00.002Z",
+          type: "assistant.delta",
+          runId: "run_1",
+          turnId: "turn_1",
+          payload: { text: " world" },
+        },
+      ],
+      firstSeq: 2,
+      lastSeq: 3,
+      count: 2,
+    },
+  });
+
+  assert.deepEqual(
+    received.map((event) => (event as { seq: number }).seq),
+    [2, 3],
+  );
+});
+
+test("RPC server manager ignores malformed agent.eventBatch notifications", async () => {
+  const factory = new FakeProcessFactory();
+  const manager = rpcManagerWithFactory(factory);
+  const received: unknown[] = [];
+  manager.onEvent((event) => received.push(event));
+
+  const readyPromise = manager.start();
+  const child = factory.lastChild();
+  child.stdout.pushJson(initializeResponse(child.initializeRequest().id));
+  await readyPromise;
+
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    method: RPC_EVENT_BATCH_METHOD,
+    params: {
+      events: [
+        {
+          seq: 2,
+          time: "1970-01-01T00:00:00.001Z",
+          type: "assistant.delta",
+          runId: "run_1",
+          payload: { text: "hello" },
+        },
+      ],
+      firstSeq: 2,
+      lastSeq: 2,
+      count: 2,
     },
   });
 
@@ -273,14 +356,20 @@ test("RPC server manager sends typed approval requests", async () => {
 
   const approvePromise = manager.approve({
     approvalId: "approval_1",
-    persist: "session",
+    persist: "never",
+    hunks: {
+      approved: ["README.md#1:old1+3:new1+3"],
+    },
   });
   await flushMicrotasks();
   const approveRequest = child.requestAt(1);
   assert.equal(approveRequest.method, RPC_APPROVE_METHOD);
   assert.deepEqual(approveRequest.params, {
     approvalId: "approval_1",
-    persist: "session",
+    persist: "never",
+    hunks: {
+      approved: ["README.md#1:old1+3:new1+3"],
+    },
   });
   child.stdout.pushJson({
     jsonrpc: "2.0",
@@ -288,13 +377,19 @@ test("RPC server manager sends typed approval requests", async () => {
     result: {
       approvalId: "approval_1",
       state: "approved",
-      persist: "session",
+      persist: "never",
+      hunks: {
+        approved: ["README.md#1:old1+3:new1+3"],
+      },
     },
   });
   assert.deepEqual(await approvePromise, {
     approvalId: "approval_1",
     state: "approved",
-    persist: "session",
+    persist: "never",
+    hunks: {
+      approved: ["README.md#1:old1+3:new1+3"],
+    },
   });
 
   const rejectPromise = manager.reject({
@@ -321,6 +416,86 @@ test("RPC server manager sends typed approval requests", async () => {
     approvalId: "approval_2",
     state: "rejected",
     reason: "not now",
+  });
+});
+
+test("RPC server manager sends typed cancel requests", async () => {
+  const factory = new FakeProcessFactory();
+  const manager = rpcManagerWithFactory(factory);
+  const readyPromise = manager.start();
+  const child = factory.lastChild();
+  child.stdout.pushJson(initializeResponse(child.initializeRequest().id));
+  await readyPromise;
+
+  const cancelPromise = manager.cancel({
+    runId: "run_1",
+    reason: "user canceled",
+  });
+  await flushMicrotasks();
+  const cancelRequest = child.requestAt(1);
+  assert.equal(cancelRequest.method, RPC_CANCEL_METHOD);
+  assert.deepEqual(cancelRequest.params, {
+    runId: "run_1",
+    reason: "user canceled",
+  });
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    id: cancelRequest.id,
+    result: {
+      runId: "run_1",
+      state: "canceled",
+      reason: "user canceled",
+    },
+  });
+
+  assert.deepEqual(await cancelPromise, {
+    runId: "run_1",
+    state: "canceled",
+    reason: "user canceled",
+  });
+});
+
+test("RPC server manager sends typed FIM preview requests", async () => {
+  const factory = new FakeProcessFactory();
+  const manager = rpcManagerWithFactory(factory);
+  const readyPromise = manager.start();
+  const child = factory.lastChild();
+  child.stdout.pushJson(initializeResponse(child.initializeRequest().id));
+  await readyPromise;
+
+  const previewPromise = manager.previewFim({
+    prefix: "fn main() {",
+    suffix: "}",
+    path: "src/main.rs",
+    languageId: "rust",
+    model: "deepseek-v4-pro",
+    maxTokens: 32,
+  });
+  await flushMicrotasks();
+  const previewRequest = child.requestAt(1);
+  assert.equal(previewRequest.method, RPC_PREVIEW_FIM_METHOD);
+  assert.deepEqual(previewRequest.params, {
+    prefix: "fn main() {",
+    suffix: "}",
+    path: "src/main.rs",
+    languageId: "rust",
+    model: "deepseek-v4-pro",
+    maxTokens: 32,
+  });
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    id: previewRequest.id,
+    result: {
+      text: " println!(\"hi\");",
+      model: "deepseek-v4-pro",
+      finishReason: "stop",
+    },
+  });
+
+  assert.deepEqual(await previewPromise, {
+    text: " println!(\"hi\");",
+    model: "deepseek-v4-pro",
+    finishReason: "stop",
   });
 });
 
@@ -437,6 +612,53 @@ test("RPC server manager fails startup on process error", async () => {
 
   await assert.rejects(readyPromise, /process launch failed/);
   assert.equal(manager.status, "failed");
+});
+
+test("RPC server manager warns clearly on protocol mismatch startup errors", async () => {
+  const factory = new FakeProcessFactory();
+  const warnings: string[] = [];
+  const manager = new RpcServerManager({
+    launch: {
+      command: "prole",
+      args: ["rpc"],
+      autoStart: true,
+    },
+    workspace: {
+      root: "C:/workspace/project",
+      trusted: true,
+    },
+    extensionVersion: "0.1.0",
+    processFactory: factory,
+    notifier: {
+      info: () => undefined,
+      warn(message) {
+        warnings.push(message);
+      },
+    },
+  });
+
+  const readyPromise = manager.start();
+  const child = factory.lastChild();
+  const request = child.initializeRequest();
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    id: request.id,
+    error: {
+      code: -32001,
+      message: "unsupported protocol version `9.9.9`, expected `0.1.0`",
+      data: {
+        clientProtocolVersion: "9.9.9",
+        serverProtocolVersion: RPC_PROTOCOL_VERSION,
+      },
+    },
+  });
+
+  await assert.rejects(readyPromise, /protocol mismatch/i);
+  assert.equal(manager.status, "failed");
+  assert.equal(child.killed, true);
+  assert.equal(warnings.length, 1);
+  assert.ok(warnings[0]?.includes("9.9.9"));
+  assert.ok(warnings[0]?.includes(RPC_PROTOCOL_VERSION));
 });
 
 test("RPC server manager stop rejects pending startup", async () => {
@@ -593,8 +815,27 @@ function initializeResponse(id: unknown): unknown {
         protocolVersion: RPC_PROTOCOL_VERSION,
         supportsRunResume: true,
         supportsPatchApproval: true,
-        supportsPersistentApprovals: false,
+        supportsPersistentApprovals: true,
+        supportsEventBatching: true,
         supportedRiskLevels: ["read", "write", "exec", "network", "destructive"],
+        provider: {
+          provider: "deepseek",
+          defaultModel: "deepseek-v4-pro",
+          models: [
+            {
+              id: "deepseek-v4-pro",
+              displayName: "DeepSeek V4 Pro",
+              contextWindowTokens: 1_048_576,
+              maxOutputTokens: 393_216,
+              supportsThinking: true,
+              supportsToolCalls: true,
+              supportsToolChoice: false,
+              supportsFim: true,
+              supportsStreaming: true,
+              reportsCacheUsage: true,
+            },
+          ],
+        },
       },
       stateDir: ".prole-coder",
     },

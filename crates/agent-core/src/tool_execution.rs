@@ -603,7 +603,7 @@ pub struct WorkspaceManifestArgs {
     pub max_entries: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceManifestResult {
     pub status: ToolStatus,
@@ -673,6 +673,21 @@ pub struct SearchResult {
 pub struct ApplyPatchArgs {
     pub unified_diff: String,
     pub expected_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PatchApprovalHunk {
+    pub id: String,
+    pub file_path: String,
+    pub file_index: usize,
+    pub hunk_index: usize,
+    pub old_start: usize,
+    pub old_count: usize,
+    pub new_start: usize,
+    pub new_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1130,6 +1145,72 @@ struct ParsedPatch {
 }
 
 impl ParsedPatch {
+    fn to_unified_diff(&self) -> String {
+        let mut output = String::new();
+        for file in &self.files {
+            output.push_str(&format!(
+                "--- {}\n+++ {}\n",
+                file.format_old_path(),
+                file.format_new_path()
+            ));
+            for hunk in &file.hunks {
+                output.push_str(&format!(
+                    "@@ -{}{} +{}{} @@{}\n",
+                    hunk.old_start,
+                    format_count(hunk.old_count),
+                    hunk.new_start,
+                    format_count(hunk.new_count),
+                    hunk.section
+                ));
+                for line in &hunk.lines {
+                    match line {
+                        PatchLine::Context(text) => {
+                            output.push(' ');
+                            output.push_str(text);
+                            output.push('\n');
+                        }
+                        PatchLine::Remove(text) => {
+                            output.push('-');
+                            output.push_str(text);
+                            output.push('\n');
+                        }
+                        PatchLine::Add(text) => {
+                            output.push('+');
+                            output.push_str(text);
+                            output.push('\n');
+                        }
+                    }
+                }
+            }
+        }
+        output
+    }
+
+    fn approval_hunks(&self) -> Result<Vec<PatchApprovalHunk>, ToolExecutionError> {
+        let mut hunks = Vec::new();
+        for (file_index, file) in self.files.iter().enumerate() {
+            let file_path = file.target_path()?;
+            for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+                hunks.push(PatchApprovalHunk {
+                    id: patch_hunk_id(&file_path, hunk_index, hunk),
+                    file_path: file_path.clone(),
+                    file_index,
+                    hunk_index,
+                    old_start: hunk.old_start,
+                    old_count: hunk.old_count,
+                    new_start: hunk.new_start,
+                    new_count: hunk.new_count,
+                    section: if hunk.section.trim().is_empty() {
+                        None
+                    } else {
+                        Some(hunk.section.trim().to_owned())
+                    },
+                });
+            }
+        }
+        Ok(hunks)
+    }
+
     fn reverse_patch(&self) -> String {
         let mut output = String::new();
         for file in &self.files {
@@ -1315,6 +1396,94 @@ fn parse_unified_diff(diff: &str) -> Result<ParsedPatch, ToolExecutionError> {
     Ok(ParsedPatch { files })
 }
 
+pub fn patch_approval_hunks(diff: &str) -> Result<Vec<PatchApprovalHunk>, ToolExecutionError> {
+    let parsed = parse_unified_diff(diff)?;
+    parsed.approval_hunks()
+}
+
+pub fn filter_apply_patch_hunks(
+    args: ApplyPatchArgs,
+    approved_hunk_ids: &[String],
+) -> Result<ApplyPatchArgs, ToolExecutionError> {
+    if approved_hunk_ids.is_empty() {
+        return Err(ToolExecutionError::InvalidPatch(
+            "hunk approval must include at least one hunk id".to_owned(),
+        ));
+    }
+
+    let approved: BTreeSet<&str> = approved_hunk_ids.iter().map(String::as_str).collect();
+    let parsed = parse_unified_diff(&args.unified_diff)?;
+    let mut seen = BTreeSet::new();
+    let mut selected_files = Vec::new();
+    let mut expected_files = BTreeSet::new();
+
+    for file in parsed.files {
+        let mut selected_hunks = Vec::new();
+        let hunk_count = file.hunks.len();
+        let file_path = file.target_path()?;
+        let mut all_delta: isize = 0;
+        let mut selected_delta: isize = 0;
+        for (hunk_index, hunk) in file.hunks.into_iter().enumerate() {
+            let id = patch_hunk_id(&file_path, hunk_index, &hunk);
+            if approved.contains(id.as_str()) {
+                seen.insert(id);
+                let omitted_delta = all_delta - selected_delta;
+                let mut selected_hunk = hunk.clone();
+                selected_hunk.new_start =
+                    adjusted_hunk_start(selected_hunk.new_start, omitted_delta)?;
+                selected_delta += hunk.new_count as isize - hunk.old_count as isize;
+                selected_hunks.push(selected_hunk);
+            }
+            all_delta += hunk.new_count as isize - hunk.old_count as isize;
+        }
+
+        if selected_hunks.is_empty() {
+            continue;
+        }
+
+        if selected_hunks.len() != hunk_count
+            && (file.old_path.is_none() || file.new_path.is_none())
+        {
+            return Err(ToolExecutionError::InvalidPatch(format!(
+                "hunk approval for file creation or deletion must include every hunk in `{file_path}`"
+            )));
+        }
+
+        expected_files.insert(file_path);
+        selected_files.push(FilePatch {
+            old_path: file.old_path,
+            new_path: file.new_path,
+            hunks: selected_hunks,
+        });
+    }
+
+    let missing: Vec<String> = approved
+        .into_iter()
+        .filter(|id| !seen.contains(*id))
+        .map(str::to_owned)
+        .collect();
+    if !missing.is_empty() {
+        return Err(ToolExecutionError::InvalidPatch(format!(
+            "approved hunk id(s) were not present in the patch: {}",
+            missing.join(", ")
+        )));
+    }
+
+    if selected_files.is_empty() {
+        return Err(ToolExecutionError::InvalidPatch(
+            "hunk approval did not select any patch hunks".to_owned(),
+        ));
+    }
+
+    let filtered = ParsedPatch {
+        files: selected_files,
+    };
+    Ok(ApplyPatchArgs {
+        unified_diff: filtered.to_unified_diff(),
+        expected_files: expected_files.into_iter().collect(),
+    })
+}
+
 fn parse_patch_path(path: &str) -> Result<Option<String>, ToolExecutionError> {
     let path = path.split('\t').next().unwrap_or(path);
     if path == "/dev/null" {
@@ -1378,6 +1547,28 @@ fn format_count(count: usize) -> String {
     } else {
         format!(",{count}")
     }
+}
+
+fn patch_hunk_id(file_path: &str, hunk_index: usize, hunk: &PatchHunk) -> String {
+    format!(
+        "{}#{}:old{}+{}:new{}+{}",
+        file_path,
+        hunk_index + 1,
+        hunk.old_start,
+        hunk.old_count,
+        hunk.new_start,
+        hunk.new_count
+    )
+}
+
+fn adjusted_hunk_start(start: usize, omitted_delta: isize) -> Result<usize, ToolExecutionError> {
+    let adjusted = start as isize - omitted_delta;
+    if adjusted < 0 {
+        return Err(ToolExecutionError::InvalidPatch(
+            "selected patch hunk line numbers underflow after filtering".to_owned(),
+        ));
+    }
+    Ok(adjusted as usize)
 }
 
 fn apply_file_patch(original: &str, patch: &FilePatch) -> Result<String, ToolExecutionError> {
@@ -1623,6 +1814,46 @@ mod tests {
         assert_eq!(workspace.read("README.md"), "new\n");
         assert!(result.reverse_patch.contains("-new"));
         assert!(result.reverse_patch.contains("+old"));
+    }
+
+    #[test]
+    fn filter_apply_patch_hunks_keeps_only_selected_hunks() {
+        let args = ApplyPatchArgs {
+            unified_diff: concat!(
+                "--- a/README.md\n",
+                "+++ b/README.md\n",
+                "@@ -1,3 +1,4 @@\n",
+                " one\n",
+                "+intro\n",
+                "-old\n",
+                "+new\n",
+                " three\n",
+                "@@ -5,2 +6,3 @@\n",
+                " keep\n",
+                "+insert\n",
+                " remove\n",
+            )
+            .to_owned(),
+            expected_files: vec!["README.md".to_owned()],
+        };
+
+        let hunks = super::patch_approval_hunks(&args.unified_diff)
+            .expect("patch should expose approval hunks");
+        let filtered = super::filter_apply_patch_hunks(args, &[hunks[1].id.clone()])
+            .expect("selected hunk should filter patch");
+
+        assert_eq!(
+            filtered.unified_diff,
+            concat!(
+                "--- a/README.md\n",
+                "+++ b/README.md\n",
+                "@@ -5,2 +5,3 @@\n",
+                " keep\n",
+                "+insert\n",
+                " remove\n",
+            )
+        );
+        assert_eq!(filtered.expected_files, vec!["README.md"]);
     }
 
     #[test]

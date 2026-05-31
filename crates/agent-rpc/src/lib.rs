@@ -1,9 +1,10 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
+    fs,
     io::{self, BufRead, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, mpsc},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -55,7 +56,9 @@ pub const REJECT_METHOD: RpcMethod = RpcMethod::new("reject");
 pub const CANCEL_METHOD: RpcMethod = RpcMethod::new("cancel");
 pub const RESUME_METHOD: RpcMethod = RpcMethod::new("resume");
 pub const LIST_RUNS_METHOD: RpcMethod = RpcMethod::new("listRuns");
+pub const FIM_PREVIEW_METHOD: RpcMethod = RpcMethod::new("previewFim");
 pub const EVENT_METHOD: RpcMethod = RpcMethod::new("event");
+pub const EVENT_BATCH_METHOD: RpcMethod = RpcMethod::new("eventBatch");
 
 pub const JSON_RPC_PARSE_ERROR: i64 = -32700;
 pub const JSON_RPC_INVALID_REQUEST: i64 = -32600;
@@ -79,6 +82,9 @@ pub const RPC_INTERNAL_INVARIANT: i64 = -32060;
 pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 const RPC_LOOP_QUEUE_BOUND: usize = 256;
 const RPC_LIVE_EVENT_QUEUE_BOUND: usize = 256;
+const RPC_LIVE_EVENT_BATCH_MAX: usize = 64;
+const APPROVAL_PERSISTENCE_FILE: &str = "approvals.v1.json";
+const APPROVAL_PERSISTENCE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JsonRpcRequest<TParams = Value> {
@@ -180,12 +186,73 @@ pub struct ServerInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProviderModelCapabilities {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub context_window_tokens: u64,
+    pub max_output_tokens: u64,
+    pub supports_thinking: bool,
+    pub supports_tool_calls: bool,
+    pub supports_tool_choice: bool,
+    pub supports_fim: bool,
+    pub supports_streaming: bool,
+    pub reports_cache_usage: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCapabilities {
+    pub provider: String,
+    pub default_model: String,
+    pub models: Vec<ProviderModelCapabilities>,
+}
+
+impl Default for ProviderCapabilities {
+    fn default() -> Self {
+        Self {
+            provider: "deepseek".to_owned(),
+            default_model: "deepseek-v4-pro".to_owned(),
+            models: vec![
+                ProviderModelCapabilities {
+                    id: "deepseek-v4-flash".to_owned(),
+                    display_name: Some("DeepSeek V4 Flash".to_owned()),
+                    context_window_tokens: 1_048_576,
+                    max_output_tokens: 393_216,
+                    supports_thinking: true,
+                    supports_tool_calls: true,
+                    supports_tool_choice: false,
+                    supports_fim: true,
+                    supports_streaming: true,
+                    reports_cache_usage: true,
+                },
+                ProviderModelCapabilities {
+                    id: "deepseek-v4-pro".to_owned(),
+                    display_name: Some("DeepSeek V4 Pro".to_owned()),
+                    context_window_tokens: 1_048_576,
+                    max_output_tokens: 393_216,
+                    supports_thinking: true,
+                    supports_tool_calls: true,
+                    supports_tool_choice: false,
+                    supports_fim: true,
+                    supports_streaming: true,
+                    reports_cache_usage: true,
+                },
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerCapabilities {
     pub protocol_version: String,
     pub supports_run_resume: bool,
     pub supports_patch_approval: bool,
     pub supports_persistent_approvals: bool,
+    pub supports_event_batching: bool,
     pub supported_risk_levels: Vec<String>,
+    pub provider: ProviderCapabilities,
 }
 
 impl Default for ServerCapabilities {
@@ -194,11 +261,13 @@ impl Default for ServerCapabilities {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             supports_run_resume: true,
             supports_patch_approval: true,
-            supports_persistent_approvals: false,
+            supports_persistent_approvals: true,
+            supports_event_batching: true,
             supported_risk_levels: ALL_RISK_LEVELS
                 .iter()
                 .map(|risk| risk.as_str().to_owned())
                 .collect(),
+            provider: ProviderCapabilities::default(),
         }
     }
 }
@@ -403,6 +472,14 @@ pub struct ApproveParams {
     pub approval_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub persist: Option<RpcApprovalPersistence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hunks: Option<RpcApprovedHunks>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcApprovedHunks {
+    pub approved: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,6 +488,8 @@ pub struct ApproveResult {
     pub approval_id: String,
     pub state: RpcApprovalState,
     pub persist: RpcApprovalPersistence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hunks: Option<RpcApprovedHunks>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,6 +524,31 @@ pub struct CancelResult {
     pub state: RpcRunState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FimPreviewParams {
+    pub prefix: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FimPreviewResult {
+    pub text: String,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -541,6 +645,11 @@ pub trait AgentRpcRequestHandler {
         params: ListRunsParams,
     ) -> Result<AgentRpcHandlerOutput<ListRunsResult>, AgentRpcHandlerError>;
 
+    fn preview_fim(
+        &mut self,
+        params: FimPreviewParams,
+    ) -> Result<AgentRpcHandlerOutput<FimPreviewResult>, AgentRpcHandlerError>;
+
     fn shutdown(&mut self) -> Result<Vec<RunLogEvent>, AgentRpcHandlerError> {
         Ok(Vec::new())
     }
@@ -553,6 +662,16 @@ pub trait RpcTurnProviderFactory {
         &mut self,
         params: &SendTurnParams,
     ) -> Result<Self::Provider, AgentRpcHandlerError>;
+
+    fn preview_fim(
+        &mut self,
+        _params: &FimPreviewParams,
+    ) -> Result<FimPreviewResult, AgentRpcHandlerError> {
+        Err(AgentRpcHandlerError::new(
+            RPC_PROVIDER_ERROR,
+            "FIM preview is not supported by this RPC provider",
+        ))
+    }
 }
 
 impl<F, P> RpcTurnProviderFactory for F
@@ -644,6 +763,8 @@ where
         }
 
         let store = RunLogStore::new(&params.workspace_root).map_err(map_run_log_error)?;
+        self.approval_queue
+            .configure_workspace_persistence(store.workspace_root())?;
         let result = AgentInitializeResult::default();
         self.workspace = Some(RpcWorkspace { store });
         Ok(result)
@@ -716,7 +837,11 @@ where
         params: ApproveParams,
     ) -> Result<AgentRpcHandlerOutput<ApproveResult>, AgentRpcHandlerError> {
         let persist = params.persist.unwrap_or(RpcApprovalPersistence::Never);
-        if let Err(error) = self.approval_queue.approve(&params.approval_id, persist) {
+        let hunks = params.hunks.clone();
+        if let Err(error) = self
+            .approval_queue
+            .approve(&params.approval_id, persist, params.hunks)
+        {
             self.drain_ready_active_run_events()?;
             return Err(error);
         }
@@ -730,6 +855,7 @@ where
             approval_id: params.approval_id,
             state: RpcApprovalState::Approved,
             persist,
+            hunks,
         })
         .with_events(events))
     }
@@ -865,6 +991,14 @@ where
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(AgentRpcHandlerOutput::new(ListRunsResult { runs }))
+    }
+
+    fn preview_fim(
+        &mut self,
+        params: FimPreviewParams,
+    ) -> Result<AgentRpcHandlerOutput<FimPreviewResult>, AgentRpcHandlerError> {
+        let result = self.provider_factory.preview_fim(&params)?;
+        Ok(AgentRpcHandlerOutput::new(result))
     }
 
     fn shutdown(&mut self) -> Result<Vec<RunLogEvent>, AgentRpcHandlerError> {
@@ -1107,7 +1241,22 @@ impl Default for RpcApprovalQueue {
 struct RpcApprovalQueueInner {
     approval_timeout: Duration,
     pending: Mutex<HashMap<String, PendingApproval>>,
+    persistence: Mutex<RpcApprovalPersistenceState>,
     changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct RpcApprovalPersistenceState {
+    session_keys: HashSet<String>,
+    workspace_keys: HashSet<String>,
+    workspace_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RpcApprovalPersistenceFile {
+    version: u32,
+    approvals: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1124,9 +1273,25 @@ impl RpcApprovalQueue {
             inner: Arc::new(RpcApprovalQueueInner {
                 approval_timeout,
                 pending: Mutex::new(HashMap::new()),
+                persistence: Mutex::new(RpcApprovalPersistenceState::default()),
                 changed: Condvar::new(),
             }),
         }
+    }
+
+    fn configure_workspace_persistence(
+        &self,
+        workspace_root: &Path,
+    ) -> Result<(), AgentRpcHandlerError> {
+        let path = workspace_root
+            .join(AGENT_METADATA.state_dir)
+            .join(APPROVAL_PERSISTENCE_FILE);
+        let workspace_keys = load_workspace_approvals(&path)?;
+        let mut persistence = self.lock_persistence()?;
+        persistence.session_keys.clear();
+        persistence.workspace_path = Some(path);
+        persistence.workspace_keys = workspace_keys;
+        Ok(())
     }
 
     fn register(
@@ -1166,8 +1331,15 @@ impl RpcApprovalQueue {
         &self,
         approval_id: &str,
         persist: RpcApprovalPersistence,
+        hunks: Option<RpcApprovedHunks>,
     ) -> Result<(), AgentRpcHandlerError> {
-        self.resolve(approval_id, ApprovalDecision::Approved, Some(persist))
+        let decision = match hunks {
+            Some(hunks) => ApprovalDecision::ApprovedHunks {
+                hunk_ids: hunks.approved,
+            },
+            None => ApprovalDecision::Approved,
+        };
+        self.resolve(approval_id, decision, Some(persist))
     }
 
     fn reject(&self, approval_id: &str, reason: String) -> Result<(), AgentRpcHandlerError> {
@@ -1205,6 +1377,12 @@ impl RpcApprovalQueue {
                         pending.remove(&request.approval_id);
                         self.inner.changed.notify_all();
                         return Ok(decision);
+                    }
+
+                    if self.is_persistently_approved(&entry.request)? {
+                        pending.remove(&request.approval_id);
+                        self.inner.changed.notify_all();
+                        return Ok(ApprovalDecision::Approved);
                     }
 
                     if Instant::now() >= entry.expires_at {
@@ -1249,6 +1427,65 @@ impl RpcApprovalQueue {
         decision: ApprovalDecision,
         persist: Option<RpcApprovalPersistence>,
     ) -> Result<(), AgentRpcHandlerError> {
+        let request_to_persist = {
+            let pending = self.lock_pending()?;
+            let entry = pending.get(approval_id).ok_or_else(|| {
+                AgentRpcHandlerError::new(
+                    RPC_APPROVAL_NOT_FOUND,
+                    format!("approval `{approval_id}` is not pending in the current RPC handler"),
+                )
+            })?;
+
+            if entry.decision.is_some() {
+                return Err(AgentRpcHandlerError::new(
+                    RPC_APPROVAL_NOT_FOUND,
+                    format!("approval `{approval_id}` has already been resolved"),
+                ));
+            }
+
+            if Instant::now() >= entry.expires_at {
+                return Err(AgentRpcHandlerError::new(
+                    RPC_APPROVAL_NOT_FOUND,
+                    format!("approval `{approval_id}` expired before it could be resolved"),
+                ));
+            }
+
+            validate_approval_decision(&entry.request, &decision, persist)?;
+
+            if matches!(
+                persist,
+                Some(RpcApprovalPersistence::Session | RpcApprovalPersistence::Workspace)
+            ) && !approval_request_allows_persistence(&entry.request)
+            {
+                return Err(AgentRpcHandlerError::new(
+                    RPC_APPROVAL_DENIED,
+                    format!("approval `{approval_id}` does not allow persistent decisions"),
+                ));
+            }
+
+            if matches!(decision, ApprovalDecision::Approved)
+                && matches!(
+                    persist,
+                    Some(RpcApprovalPersistence::Session | RpcApprovalPersistence::Workspace)
+                )
+            {
+                Some(entry.request.clone())
+            } else {
+                None
+            }
+        };
+
+        let persistence_key = request_to_persist
+            .as_ref()
+            .map(approval_persistence_key)
+            .transpose()?
+            .flatten();
+        if let (Some(key), Some(RpcApprovalPersistence::Workspace)) =
+            (persistence_key.as_ref(), persist)
+        {
+            self.write_workspace_approval_key(key)?;
+        }
+
         let mut pending = self.lock_pending()?;
         let entry = pending.get_mut(approval_id).ok_or_else(|| {
             AgentRpcHandlerError::new(
@@ -1275,20 +1512,61 @@ impl RpcApprovalQueue {
             ));
         }
 
-        if matches!(
-            persist,
-            Some(RpcApprovalPersistence::Session | RpcApprovalPersistence::Workspace)
-        ) && !entry.request.persistable
-        {
-            return Err(AgentRpcHandlerError::new(
-                RPC_APPROVAL_DENIED,
-                format!("approval `{approval_id}` does not allow persistent decisions"),
-            ));
-        }
-
         entry.decision = Some(decision);
         self.inner.changed.notify_all();
+        drop(pending);
+        if let (Some(key), Some(persist)) = (persistence_key, persist) {
+            self.remember_persistent_key(key, persist)?;
+        }
         Ok(())
+    }
+
+    fn is_persistently_approved(
+        &self,
+        request: &TurnApprovalRequest,
+    ) -> Result<bool, AgentRpcHandlerError> {
+        let Some(key) = approval_persistence_key(request)? else {
+            return Ok(false);
+        };
+        let persistence = self.lock_persistence()?;
+        Ok(persistence.session_keys.contains(&key) || persistence.workspace_keys.contains(&key))
+    }
+
+    fn write_workspace_approval_key(&self, key: &str) -> Result<(), AgentRpcHandlerError> {
+        let (path, keys) = {
+            let persistence = self.lock_persistence()?;
+            let mut keys = persistence.workspace_keys.clone();
+            keys.insert(key.to_owned());
+            let path = persistence.workspace_path.clone().ok_or_else(|| {
+                AgentRpcHandlerError::new(
+                    RPC_INTERNAL_INVARIANT,
+                    "workspace approval persistence was not configured",
+                )
+            })?;
+            (path, keys)
+        };
+
+        write_workspace_approvals(&path, &keys)
+    }
+
+    fn remember_persistent_key(
+        &self,
+        key: String,
+        persist: RpcApprovalPersistence,
+    ) -> Result<(), AgentRpcHandlerError> {
+        match persist {
+            RpcApprovalPersistence::Never => Ok(()),
+            RpcApprovalPersistence::Session => {
+                let mut persistence = self.lock_persistence()?;
+                persistence.session_keys.insert(key);
+                Ok(())
+            }
+            RpcApprovalPersistence::Workspace => {
+                let mut persistence = self.lock_persistence()?;
+                persistence.workspace_keys.insert(key);
+                Ok(())
+            }
+        }
     }
 
     fn lock_pending(
@@ -1297,6 +1575,17 @@ impl RpcApprovalQueue {
     {
         self.inner.pending.lock().map_err(|_| {
             AgentRpcHandlerError::new(RPC_INTERNAL_INVARIANT, "approval queue lock was poisoned")
+        })
+    }
+
+    fn lock_persistence(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, RpcApprovalPersistenceState>, AgentRpcHandlerError> {
+        self.inner.persistence.lock().map_err(|_| {
+            AgentRpcHandlerError::new(
+                RPC_INTERNAL_INVARIANT,
+                "approval persistence lock was poisoned",
+            )
         })
     }
 }
@@ -1308,6 +1597,160 @@ fn approval_expires_at(timeout: Duration) -> Instant {
 
 fn approval_expired_reason(approval_id: &str) -> String {
     format!("approval `{approval_id}` expired before a decision was received")
+}
+
+fn validate_approval_decision(
+    request: &TurnApprovalRequest,
+    decision: &ApprovalDecision,
+    persist: Option<RpcApprovalPersistence>,
+) -> Result<(), AgentRpcHandlerError> {
+    let ApprovalDecision::ApprovedHunks { hunk_ids } = decision else {
+        return Ok(());
+    };
+
+    if matches!(
+        persist,
+        Some(RpcApprovalPersistence::Session | RpcApprovalPersistence::Workspace)
+    ) {
+        return Err(AgentRpcHandlerError::new(
+            RPC_APPROVAL_DENIED,
+            format!(
+                "approval `{}` cannot persist a hunk-level patch decision",
+                request.approval_id
+            ),
+        ));
+    }
+
+    if hunk_ids.is_empty() {
+        return Err(AgentRpcHandlerError::new(
+            RPC_APPROVAL_DENIED,
+            format!(
+                "approval `{}` must include at least one approved hunk",
+                request.approval_id
+            ),
+        ));
+    }
+
+    let Some(available_hunks) = &request.hunks else {
+        return Err(AgentRpcHandlerError::new(
+            RPC_APPROVAL_DENIED,
+            format!(
+                "approval `{}` does not support hunk-level decisions",
+                request.approval_id
+            ),
+        ));
+    };
+
+    let mut available = HashSet::new();
+    for hunk in available_hunks {
+        available.insert(hunk.id.as_str());
+    }
+
+    let mut seen = HashSet::new();
+    for hunk_id in hunk_ids {
+        if !seen.insert(hunk_id.as_str()) {
+            return Err(AgentRpcHandlerError::new(
+                RPC_APPROVAL_DENIED,
+                format!(
+                    "approval `{}` contains duplicate hunk id `{hunk_id}`",
+                    request.approval_id
+                ),
+            ));
+        }
+        if !available.contains(hunk_id.as_str()) {
+            return Err(AgentRpcHandlerError::new(
+                RPC_APPROVAL_DENIED,
+                format!(
+                    "approval `{}` does not contain hunk id `{hunk_id}`",
+                    request.approval_id
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn approval_request_allows_persistence(request: &TurnApprovalRequest) -> bool {
+    request.persistable && !matches!(request.risk, RiskLevel::Network | RiskLevel::Destructive)
+}
+
+fn approval_persistence_key(
+    request: &TurnApprovalRequest,
+) -> Result<Option<String>, AgentRpcHandlerError> {
+    if !approval_request_allows_persistence(request) {
+        return Ok(None);
+    }
+
+    let mut paths = request.paths.clone().unwrap_or_default();
+    paths.sort_unstable();
+    paths.dedup();
+    serde_json::to_string(&json!({
+        "toolName": request.tool_name.as_str(),
+        "risk": request.risk.as_str(),
+        "command": request.command.as_deref(),
+        "cwd": request.cwd.as_deref(),
+        "paths": paths,
+    }))
+    .map(Some)
+    .map_err(|source| {
+        AgentRpcHandlerError::new(
+            RPC_INTERNAL_INVARIANT,
+            format!("approval persistence key could not be serialized: {source}"),
+        )
+    })
+}
+
+fn load_workspace_approvals(path: &Path) -> Result<HashSet<String>, AgentRpcHandlerError> {
+    if !path.exists() {
+        return Ok(HashSet::new());
+    }
+
+    let bytes = fs::read(path).map_err(map_io_error)?;
+    let file: RpcApprovalPersistenceFile = serde_json::from_slice(&bytes).map_err(|source| {
+        AgentRpcHandlerError::new(
+            RPC_INTERNAL_INVARIANT,
+            format!("approval persistence file is malformed: {source}"),
+        )
+    })?;
+    if file.version != APPROVAL_PERSISTENCE_VERSION {
+        return Err(AgentRpcHandlerError::new(
+            RPC_INTERNAL_INVARIANT,
+            format!(
+                "unsupported approval persistence version {}, expected {}",
+                file.version, APPROVAL_PERSISTENCE_VERSION
+            ),
+        ));
+    }
+
+    Ok(file.approvals.into_iter().collect())
+}
+
+fn write_workspace_approvals(
+    path: &Path,
+    keys: &HashSet<String>,
+) -> Result<(), AgentRpcHandlerError> {
+    let parent = path.parent().ok_or_else(|| {
+        AgentRpcHandlerError::new(
+            RPC_INTERNAL_INVARIANT,
+            "approval persistence path has no parent directory",
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(map_io_error)?;
+
+    let mut approvals = keys.iter().cloned().collect::<Vec<_>>();
+    approvals.sort_unstable();
+    let file = RpcApprovalPersistenceFile {
+        version: APPROVAL_PERSISTENCE_VERSION,
+        approvals,
+    };
+    let bytes = serde_json::to_vec_pretty(&file).map_err(|source| {
+        AgentRpcHandlerError::new(
+            RPC_INTERNAL_INVARIANT,
+            format!("approval persistence file could not be serialized: {source}"),
+        )
+    })?;
+    fs::write(path, bytes).map_err(map_io_error)
 }
 
 #[derive(Debug, Clone)]
@@ -1524,7 +1967,10 @@ fn approval_request_from_event(
         title: payload.title,
         detail: payload.detail,
         command: payload.command,
+        cwd: payload.cwd,
+        output_summary: payload.output_summary,
         paths: payload.paths,
+        hunks: payload.hunks,
         risk_reasons: payload.risk_reasons,
         persistable: payload.persistable,
     })
@@ -1540,7 +1986,10 @@ struct ApprovalRequiredPayload {
     title: String,
     detail: String,
     command: Option<String>,
+    cwd: Option<String>,
+    output_summary: Option<String>,
     paths: Option<Vec<String>>,
+    hunks: Option<Vec<prole_coder_agent_core::tool_execution::PatchApprovalHunk>>,
     #[serde(default)]
     risk_reasons: Vec<String>,
     persistable: bool,
@@ -1653,6 +2102,7 @@ impl<TParams> JsonRpcNotification<TParams> {
 }
 
 pub type AgentEventNotification = JsonRpcNotification<AgentEventEnvelope>;
+pub type AgentEventBatchNotification = JsonRpcNotification<AgentEventBatchParams>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1665,6 +2115,15 @@ pub struct AgentEventEnvelope {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     pub payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEventBatchParams {
+    pub events: Vec<AgentEventEnvelope>,
+    pub first_seq: u64,
+    pub last_seq: u64,
+    pub count: usize,
 }
 
 pub fn run_log_event_to_envelope(event: &RunLogEvent) -> Result<AgentEventEnvelope, AgentRpcError> {
@@ -1684,6 +2143,28 @@ pub fn run_log_event_to_notification(
     Ok(JsonRpcNotification::new(
         EVENT_METHOD,
         run_log_event_to_envelope(event)?,
+    ))
+}
+
+pub fn run_log_events_to_batch_notification(
+    events: &[RunLogEvent],
+) -> Result<AgentEventBatchNotification, AgentRpcError> {
+    let envelopes = events
+        .iter()
+        .map(run_log_event_to_envelope)
+        .collect::<Result<Vec<_>, _>>()?;
+    let first_seq = envelopes.first().map_or(0, |event| event.seq);
+    let last_seq = envelopes.last().map_or(0, |event| event.seq);
+    let count = envelopes.len();
+
+    Ok(JsonRpcNotification::new(
+        EVENT_BATCH_METHOD,
+        AgentEventBatchParams {
+            events: envelopes,
+            first_seq,
+            last_seq,
+            count,
+        },
     ))
 }
 
@@ -1821,6 +2302,9 @@ where
             }
             method if method == LIST_RUNS_METHOD.qualified_name() => {
                 self.handle_list_runs(id, message.params, writer)
+            }
+            method if method == FIM_PREVIEW_METHOD.qualified_name() => {
+                self.handle_preview_fim(id, message.params, writer)
             }
             method => write_error(
                 writer,
@@ -2047,6 +2531,32 @@ where
             Err(error) => write_error(writer, id, error.into_error_object()),
         }
     }
+
+    fn handle_preview_fim<W>(
+        &mut self,
+        id: Value,
+        params: Option<Value>,
+        writer: &mut W,
+    ) -> Result<(), AgentRpcError>
+    where
+        W: Write,
+    {
+        let params = match parse_params::<FimPreviewParams>(
+            params,
+            FIM_PREVIEW_METHOD.qualified_name().as_str(),
+        ) {
+            Ok(params) => params,
+            Err(error) => return write_error(writer, id, error),
+        };
+
+        match self.handler.preview_fim(params) {
+            Ok(output) => {
+                write_json_line(writer, &JsonRpcResponse::new(id, output.result))?;
+                emit_run_log_events(writer, &output.events)
+            }
+            Err(error) => write_error(writer, id, error.into_error_object()),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -2098,7 +2608,16 @@ where
 
         let mut shutdown_started = false;
         let mut pending_error = None;
-        while let Ok(message) = loop_rx.recv() {
+        let mut pending_messages = VecDeque::new();
+        loop {
+            let message = match pending_messages.pop_front() {
+                Some(message) => message,
+                None => match loop_rx.recv() {
+                    Ok(message) => message,
+                    Err(_) => break,
+                },
+            };
+
             match message {
                 RpcLoopMessage::InputLine(Ok(line)) if !shutdown_started => {
                     let result = server.handle_line(&line, writer);
@@ -2118,7 +2637,20 @@ where
                     detach_stdio_loop_handler(&mut server);
                 }
                 RpcLoopMessage::RunEvent(event) => {
-                    let result = emit_run_log_events(writer, std::slice::from_ref(&event));
+                    let mut events = vec![event];
+                    while events.len() < RPC_LIVE_EVENT_BATCH_MAX {
+                        match loop_rx.try_recv() {
+                            Ok(RpcLoopMessage::RunEvent(event)) => events.push(event),
+                            Ok(other) => {
+                                pending_messages.push_back(other);
+                                break;
+                            }
+                            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {
+                                break;
+                            }
+                        }
+                    }
+                    let result = emit_live_run_log_events(writer, &events);
                     handle_stdio_write_result(&mut server, result, &disconnect_handle)?;
                 }
                 RpcLoopMessage::InputLine(_) | RpcLoopMessage::ReaderEof => {}
@@ -2202,6 +2734,18 @@ where
     }
 
     Ok(())
+}
+
+fn emit_live_run_log_events<W>(writer: &mut W, events: &[RunLogEvent]) -> Result<(), AgentRpcError>
+where
+    W: Write,
+{
+    if events.len() <= 1 {
+        return emit_run_log_events(writer, events);
+    }
+
+    let notification = run_log_events_to_batch_notification(events)?;
+    write_json_line(writer, &notification)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2352,18 +2896,20 @@ mod tests {
     const RPC_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
     use prole_coder_agent_core::{
+        approval::RiskLevel,
         provider::deepseek_api::ChatToolCall,
         run_log::{RunLogEvent, RunLogStore},
         test_helpers::TestWorkspace,
         turn_loop::{
-            AgentTurnInput, AgentTurnLoopConfig, TurnEventSink, TurnProvider, TurnProviderError,
-            TurnProviderFuture, TurnProviderRequest, TurnProviderResponse,
-            turn_provider_response_stream,
+            AgentTurnInput, AgentTurnLoopConfig, ApprovalDecision, TurnApprovalRequest,
+            TurnEventSink, TurnProvider, TurnProviderError, TurnProviderFuture,
+            TurnProviderRequest, TurnProviderResponse, turn_provider_response_stream,
         },
     };
+    use serde::Deserialize;
     use serde_json::{Value, json};
     use std::{
-        collections::VecDeque,
+        collections::{HashMap, VecDeque},
         io::{self, Cursor, Read, Write},
         sync::{Arc, Condvar, Mutex, mpsc},
         thread,
@@ -2374,17 +2920,19 @@ mod tests {
         APPROVE_METHOD, ActiveRunSpawn, AgentInitializeParams, AgentInitializeResult,
         AgentRpcError, AgentRpcHandlerError, AgentRpcHandlerOutput, AgentRpcRequestHandler,
         AgentTurnLoopRpcHandler, ApproveParams, ApproveResult, CANCEL_METHOD, CancelParams,
-        CancelResult, EVENT_METHOD, INITIALIZE_METHOD, JSON_RPC_INTERNAL_ERROR,
-        JSON_RPC_INVALID_PARAMS, JSON_RPC_INVALID_REQUEST, JSON_RPC_METHOD_NOT_FOUND,
-        JSON_RPC_PARSE_ERROR, LIST_RUNS_METHOD, ListRunsParams, ListRunsResult, PROTOCOL_VERSION,
-        REJECT_METHOD, RESUME_METHOD, RPC_APPROVAL_DENIED, RPC_APPROVAL_NOT_FOUND,
-        RPC_CONTEXT_BUDGET_EXCEEDED, RPC_INTERNAL_INVARIANT, RPC_INVALID_TOOL_ARGUMENTS,
-        RPC_PROVIDER_ERROR, RPC_RUN_ALREADY_ACTIVE, RPC_RUN_CANCELED, RPC_RUN_NOT_FOUND,
-        RPC_TOOL_EXECUTION_FAILED, RPC_UNSUPPORTED_PROTOCOL, RPC_WORKSPACE_UNTRUSTED, RejectParams,
-        RejectResult, ResumeParams, ResumeResult, RpcApprovalPersistence, RpcApprovalQueue,
-        RpcApprovalState, RpcRunState, RpcRunSummary, RpcRunSummaryStatus, RpcWorkspace,
-        SEND_TURN_METHOD, SendTurnParams, SendTurnResult, StdioEventBridge, format_unix_millis,
-        run_log_event_to_notification, run_stdio_request_loop, spawn_active_run,
+        CancelResult, EVENT_BATCH_METHOD, EVENT_METHOD, FIM_PREVIEW_METHOD, FimPreviewParams,
+        FimPreviewResult, INITIALIZE_METHOD, JSON_RPC_INTERNAL_ERROR, JSON_RPC_INVALID_PARAMS,
+        JSON_RPC_INVALID_REQUEST, JSON_RPC_METHOD_NOT_FOUND, JSON_RPC_PARSE_ERROR,
+        LIST_RUNS_METHOD, ListRunsParams, ListRunsResult, PROTOCOL_VERSION, REJECT_METHOD,
+        RESUME_METHOD, RPC_APPROVAL_DENIED, RPC_APPROVAL_NOT_FOUND, RPC_CONTEXT_BUDGET_EXCEEDED,
+        RPC_INTERNAL_INVARIANT, RPC_INVALID_TOOL_ARGUMENTS, RPC_PROVIDER_ERROR,
+        RPC_RUN_ALREADY_ACTIVE, RPC_RUN_CANCELED, RPC_RUN_NOT_FOUND, RPC_TOOL_EXECUTION_FAILED,
+        RPC_UNSUPPORTED_PROTOCOL, RPC_WORKSPACE_UNTRUSTED, RejectParams, RejectResult,
+        ResumeParams, ResumeResult, RpcApprovalPersistence, RpcApprovalQueue, RpcApprovalState,
+        RpcApprovedHunks, RpcRunState, RpcRunSummary, RpcRunSummaryStatus, RpcWorkspace,
+        SEND_TURN_METHOD, SendTurnParams, SendTurnResult, StdioEventBridge,
+        emit_live_run_log_events, format_unix_millis, run_log_event_to_notification,
+        run_log_events_to_batch_notification, run_stdio_request_loop, spawn_active_run,
     };
 
     #[test]
@@ -2396,7 +2944,9 @@ mod tests {
         assert_eq!(CANCEL_METHOD.qualified_name(), "agent.cancel");
         assert_eq!(RESUME_METHOD.qualified_name(), "agent.resume");
         assert_eq!(LIST_RUNS_METHOD.qualified_name(), "agent.listRuns");
+        assert_eq!(FIM_PREVIEW_METHOD.qualified_name(), "agent.previewFim");
         assert_eq!(EVENT_METHOD.qualified_name(), "agent.event");
+        assert_eq!(EVENT_BATCH_METHOD.qualified_name(), "agent.eventBatch");
     }
 
     #[test]
@@ -2452,6 +3002,210 @@ mod tests {
         assert_eq!(notification.params.run_id, "run_01");
         assert_eq!(notification.params.turn_id.as_deref(), Some("turn_01"));
         assert_eq!(notification.params.payload["text"], "hello");
+    }
+
+    #[test]
+    fn default_initialize_result_exposes_provider_capabilities() {
+        let result = AgentInitializeResult::default();
+        let value = serde_json::to_value(&result).expect("initialize result should serialize");
+
+        assert_eq!(value["capabilities"]["supportsEventBatching"], true);
+        assert_eq!(
+            value["capabilities"]["provider"]["defaultModel"],
+            "deepseek-v4-pro"
+        );
+        assert_eq!(
+            value["capabilities"]["provider"]["models"][0]["contextWindowTokens"],
+            1_048_576
+        );
+        assert_eq!(
+            value["capabilities"]["provider"]["models"][1]["maxOutputTokens"],
+            393_216
+        );
+    }
+
+    #[test]
+    fn run_log_events_convert_to_agent_event_batch_notification() {
+        let events = vec![
+            run_log_event(
+                10,
+                "assistant.delta",
+                "run_01",
+                Some("turn_01"),
+                json!({ "text": "hello" }),
+            ),
+            run_log_event(
+                11,
+                "assistant.delta",
+                "run_01",
+                Some("turn_01"),
+                json!({ "text": " world" }),
+            ),
+        ];
+
+        let notification = run_log_events_to_batch_notification(&events)
+            .expect("batch notification should convert");
+
+        assert_eq!(notification.jsonrpc, "2.0");
+        assert_eq!(notification.method, "agent.eventBatch");
+        assert_eq!(notification.params.first_seq, 10);
+        assert_eq!(notification.params.last_seq, 11);
+        assert_eq!(notification.params.count, 2);
+        assert_eq!(notification.params.events[0].seq, 10);
+        assert_eq!(notification.params.events[1].payload["text"], " world");
+    }
+
+    #[test]
+    fn live_event_emission_batches_multiple_queued_events() {
+        let events = vec![
+            run_log_event(
+                1,
+                "assistant.delta",
+                "run_01",
+                Some("turn_01"),
+                json!({ "text": "a" }),
+            ),
+            run_log_event(
+                2,
+                "assistant.delta",
+                "run_01",
+                Some("turn_01"),
+                json!({ "text": "b" }),
+            ),
+        ];
+        let mut output = Vec::new();
+
+        emit_live_run_log_events(&mut output, &events)
+            .expect("live events should be emitted as one batch");
+
+        let lines = output_lines(output);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["method"], "agent.eventBatch");
+        assert_eq!(lines[0]["params"]["firstSeq"], 1);
+        assert_eq!(lines[0]["params"]["lastSeq"], 2);
+        assert_eq!(lines[0]["params"]["count"], 2);
+    }
+
+    #[test]
+    fn live_event_emission_keeps_single_event_wire_compatible() {
+        let event = run_log_event(
+            1,
+            "assistant.delta",
+            "run_01",
+            Some("turn_01"),
+            json!({ "text": "hello" }),
+        );
+        let mut output = Vec::new();
+
+        emit_live_run_log_events(&mut output, &[event]).expect("single live event should emit");
+
+        let lines = output_lines(output);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["method"], "agent.event");
+        assert_eq!(lines[0]["params"]["seq"], 1);
+    }
+
+    #[test]
+    fn event_payload_fixture_matches_rust_payload_samples() {
+        #[derive(Deserialize)]
+        struct EventPayloadFixture {
+            version: String,
+            events: Vec<EventPayloadFixtureEntry>,
+        }
+
+        #[derive(Deserialize)]
+        struct EventPayloadFixtureEntry {
+            #[serde(rename = "type")]
+            event_type: String,
+            required: Vec<String>,
+        }
+
+        let fixture: EventPayloadFixture = serde_json::from_str(include_str!(
+            "../../../docs/protocol/event-payloads.v1.json"
+        ))
+        .expect("event payload fixture should parse");
+        let samples = HashMap::from([
+            (
+                "provider.requested",
+                json!({
+                    "iteration": 1,
+                    "messageCount": 4,
+                    "reasoningState": { "status": "active" }
+                }),
+            ),
+            (
+                "tool.completed",
+                json!({
+                    "toolCallId": "call_1",
+                    "name": "shell",
+                    "status": "ok",
+                    "summary": "Command completed.",
+                    "result": { "exitCode": 0 }
+                }),
+            ),
+            (
+                "run.completed",
+                json!({
+                    "summary": "Updated the workspace.",
+                    "changedFiles": ["README.md"],
+                    "verificationStatus": "passed"
+                }),
+            ),
+            (
+                "tool.approvalRequired",
+                json!({
+                    "approvalId": "approval_1",
+                    "toolCallId": "call_patch",
+                    "toolName": "apply_patch",
+                    "risk": "write",
+                    "title": "Apply patch",
+                    "detail": "Modify README.md",
+                    "paths": ["README.md"],
+                    "hunks": [{
+                        "id": "README.md#1:old1+3:new1+3",
+                        "filePath": "README.md",
+                        "fileIndex": 0,
+                        "hunkIndex": 0,
+                        "oldStart": 1,
+                        "oldCount": 3,
+                        "newStart": 1,
+                        "newCount": 3
+                    }],
+                    "persistable": true
+                }),
+            ),
+            (
+                "tool.approvalResolved",
+                json!({
+                    "approvalId": "approval_1",
+                    "toolCallId": "call_patch",
+                    "toolName": "apply_patch",
+                    "decision": "approved",
+                    "hunks": {
+                        "scope": "selected",
+                        "approved": ["README.md#1:old1+3:new1+3"]
+                    }
+                }),
+            ),
+        ]);
+
+        assert_eq!(fixture.version, PROTOCOL_VERSION);
+        for event in fixture.events {
+            let sample = samples
+                .get(event.event_type.as_str())
+                .unwrap_or_else(|| panic!("missing sample for {}", event.event_type));
+            let object = sample
+                .as_object()
+                .expect("sample payload must be an object");
+            for field in event.required {
+                assert!(
+                    object.contains_key(&field),
+                    "{} must include required field {}",
+                    event.event_type,
+                    field
+                );
+            }
+        }
     }
 
     #[test]
@@ -2721,6 +3475,48 @@ mod tests {
             lines[1]["result"]["runs"][0]["verificationStatus"],
             "skipped"
         );
+    }
+
+    #[test]
+    fn request_loop_handles_fim_preview_requests() {
+        let input = [
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init_1",
+                "method": "agent.initialize",
+                "params": initialize_params()
+            })
+            .to_string(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "fim_1",
+                "method": "agent.previewFim",
+                "params": {
+                    "prefix": "fn main() {",
+                    "suffix": "}",
+                    "path": "src/main.rs",
+                    "languageId": "rust",
+                    "model": "fixture-fim",
+                    "maxTokens": 32
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+        let mut output = Vec::new();
+
+        let handler =
+            run_stdio_request_loop(Cursor::new(input), &mut output, TestHandler::default())
+                .expect("request loop should complete");
+
+        assert_eq!(handler.fim_previews.len(), 1);
+        assert_eq!(handler.fim_previews[0].language_id.as_deref(), Some("rust"));
+        assert_eq!(handler.fim_previews[0].max_tokens, Some(32));
+        let lines = output_lines(output);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1]["id"], "fim_1");
+        assert_eq!(lines[1]["result"]["text"], "fixture completion");
+        assert_eq!(lines[1]["result"]["model"], "fixture-fim");
     }
 
     #[test]
@@ -3271,25 +4067,20 @@ mod tests {
 
         assert_eq!(workspace.read("README.md"), "old\n");
         let lines = output.lines();
+        let events = agent_event_values(&lines);
         let cancel_response_index = line_index(&lines, |line| line["id"] == "cancel_1");
         assert_eq!(lines[cancel_response_index]["result"]["state"], "canceled");
         assert_eq!(
             lines[cancel_response_index]["result"]["reason"],
             "user changed their mind"
         );
-        assert!(lines.iter().any(|line| {
-            line["method"] == "agent.event"
-                && line["params"]["type"] == "tool.approvalResolved"
-                && line["params"]["payload"]["decision"] == "canceled"
+        assert!(events.iter().any(|event| {
+            event["type"] == "tool.approvalResolved" && event["payload"]["decision"] == "canceled"
         }));
-        assert!(lines.iter().any(|line| {
-            line["method"] == "agent.event"
-                && line["params"]["type"] == "run.canceled"
-                && line["params"]["payload"]["code"] == "E_APPROVAL_CANCELED"
+        assert!(events.iter().any(|event| {
+            event["type"] == "run.canceled" && event["payload"]["code"] == "E_APPROVAL_CANCELED"
         }));
-        assert!(!lines.iter().any(|line| {
-            line["method"] == "agent.event" && line["params"]["type"] == "tool.started"
-        }));
+        assert!(!events.iter().any(|event| event["type"] == "tool.started"));
     }
 
     #[test]
@@ -3399,6 +4190,7 @@ mod tests {
             "EOF shutdown should finish the active run"
         );
         let lines = output.lines();
+        let events = agent_event_values(&lines);
         let first_turn_response_index = line_index(&lines, |line| line["id"] == "turn_1");
         assert_eq!(
             lines[first_turn_response_index]["result"]["runId"],
@@ -3410,18 +4202,16 @@ mod tests {
             lines[second_turn_error_index]["error"]["code"],
             RPC_RUN_ALREADY_ACTIVE
         );
-        assert!(lines.iter().any(|line| {
-            line["method"] == "agent.event"
-                && line["params"]["type"] == "tool.approvalResolved"
-                && line["params"]["runId"] == "run_rpc_active_disconnect"
-                && line["params"]["payload"]["decision"] == "canceled"
-                && line["params"]["payload"]["reason"] == "RPC client disconnected"
+        assert!(events.iter().any(|event| {
+            event["type"] == "tool.approvalResolved"
+                && event["runId"] == "run_rpc_active_disconnect"
+                && event["payload"]["decision"] == "canceled"
+                && event["payload"]["reason"] == "RPC client disconnected"
         }));
-        assert!(lines.iter().any(|line| {
-            line["method"] == "agent.event"
-                && line["params"]["type"] == "run.canceled"
-                && line["params"]["runId"] == "run_rpc_active_disconnect"
-                && line["params"]["payload"]["code"] == "E_APPROVAL_CANCELED"
+        assert!(events.iter().any(|event| {
+            event["type"] == "run.canceled"
+                && event["runId"] == "run_rpc_active_disconnect"
+                && event["payload"]["code"] == "E_APPROVAL_CANCELED"
         }));
     }
 
@@ -3533,9 +4323,140 @@ mod tests {
             .approve(ApproveParams {
                 approval_id: "approval_missing".to_owned(),
                 persist: None,
+                hunks: None,
             })
             .expect_err("missing approval should be rejected");
         assert_eq!(approval_error.code, RPC_APPROVAL_NOT_FOUND);
+    }
+
+    #[test]
+    fn approval_queue_reuses_session_persistent_approval() {
+        let queue = RpcApprovalQueue::new(Duration::from_secs(60));
+        let first = sample_turn_approval_request("approval_1", RiskLevel::Exec, true);
+        queue
+            .register("run_1".to_owned(), first.clone())
+            .expect("approval should register");
+        queue
+            .approve("approval_1", RpcApprovalPersistence::Session, None)
+            .expect("session approval should resolve");
+        assert_eq!(
+            queue
+                .wait_for_decision(&first)
+                .expect("first approval should resolve"),
+            ApprovalDecision::Approved
+        );
+
+        let second = sample_turn_approval_request("approval_2", RiskLevel::Exec, true);
+        queue
+            .register("run_2".to_owned(), second.clone())
+            .expect("second approval should register");
+        assert_eq!(
+            queue
+                .wait_for_decision(&second)
+                .expect("second approval should be auto-approved"),
+            ApprovalDecision::Approved
+        );
+    }
+
+    #[test]
+    fn approval_queue_reuses_workspace_persistent_approval_after_reload() {
+        let workspace = TestWorkspace::new("rpc-approval-persistence");
+        let queue = RpcApprovalQueue::new(Duration::from_secs(60));
+        queue
+            .configure_workspace_persistence(workspace.path())
+            .expect("workspace persistence should configure");
+        let first = sample_turn_approval_request("approval_1", RiskLevel::Exec, true);
+        queue
+            .register("run_1".to_owned(), first.clone())
+            .expect("approval should register");
+        queue
+            .approve("approval_1", RpcApprovalPersistence::Workspace, None)
+            .expect("workspace approval should resolve");
+        assert_eq!(
+            queue
+                .wait_for_decision(&first)
+                .expect("first approval should resolve"),
+            ApprovalDecision::Approved
+        );
+
+        let reloaded = RpcApprovalQueue::new(Duration::from_secs(60));
+        reloaded
+            .configure_workspace_persistence(workspace.path())
+            .expect("workspace persistence should reload");
+        let second = sample_turn_approval_request("approval_2", RiskLevel::Exec, true);
+        reloaded
+            .register("run_2".to_owned(), second.clone())
+            .expect("second approval should register");
+        assert_eq!(
+            reloaded
+                .wait_for_decision(&second)
+                .expect("workspace approval should be auto-approved"),
+            ApprovalDecision::Approved
+        );
+    }
+
+    #[test]
+    fn approval_queue_rejects_persistence_for_network_and_destructive_risks() {
+        for risk in [RiskLevel::Network, RiskLevel::Destructive] {
+            let queue = RpcApprovalQueue::new(Duration::from_secs(60));
+            let request = sample_turn_approval_request("approval_1", risk, true);
+            queue
+                .register("run_1".to_owned(), request)
+                .expect("approval should register");
+            let error = queue
+                .approve("approval_1", RpcApprovalPersistence::Session, None)
+                .expect_err("high-risk approvals must not be persisted");
+
+            assert_eq!(error.code, RPC_APPROVAL_DENIED);
+        }
+    }
+
+    #[test]
+    fn approval_queue_resolves_hunk_level_patch_decisions() {
+        let queue = RpcApprovalQueue::new(Duration::from_secs(60));
+        let request = sample_patch_turn_approval_request("approval_1");
+        queue
+            .register("run_1".to_owned(), request.clone())
+            .expect("approval should register");
+        queue
+            .approve(
+                "approval_1",
+                RpcApprovalPersistence::Never,
+                Some(RpcApprovedHunks {
+                    approved: vec!["README.md#2:old5+2:new5+3".to_owned()],
+                }),
+            )
+            .expect("hunk approval should resolve");
+
+        assert_eq!(
+            queue
+                .wait_for_decision(&request)
+                .expect("hunk approval should be returned"),
+            ApprovalDecision::ApprovedHunks {
+                hunk_ids: vec!["README.md#2:old5+2:new5+3".to_owned()]
+            }
+        );
+    }
+
+    #[test]
+    fn approval_queue_rejects_hunk_decisions_for_non_patch_approvals() {
+        let queue = RpcApprovalQueue::new(Duration::from_secs(60));
+        let request = sample_turn_approval_request("approval_1", RiskLevel::Exec, true);
+        queue
+            .register("run_1".to_owned(), request)
+            .expect("approval should register");
+
+        let error = queue
+            .approve(
+                "approval_1",
+                RpcApprovalPersistence::Never,
+                Some(RpcApprovedHunks {
+                    approved: vec!["README.md#1:old1+1:new1+1".to_owned()],
+                }),
+            )
+            .expect_err("non-patch hunk approvals should be rejected");
+
+        assert_eq!(error.code, RPC_APPROVAL_DENIED);
     }
 
     #[test]
@@ -3552,6 +4473,8 @@ mod tests {
                 "risk": "write",
                 "title": "Apply patch",
                 "detail": "Modify README.md",
+                "cwd": ".",
+                "outputSummary": "previous command output summary",
                 "paths": ["README.md"],
                 "riskReasons": ["file deletion"],
                 "persistable": true
@@ -3569,6 +4492,11 @@ mod tests {
             prole_coder_agent_core::approval::RiskLevel::Write
         );
         assert_eq!(request.paths, Some(vec!["README.md".to_owned()]));
+        assert_eq!(request.cwd, Some(".".to_owned()));
+        assert_eq!(
+            request.output_summary,
+            Some("previous command output summary".to_owned())
+        );
         assert_eq!(request.risk_reasons, vec!["file deletion".to_owned()]);
         assert!(request.persistable);
     }
@@ -3596,6 +4524,69 @@ mod tests {
         assert_eq!(error.code, RPC_INTERNAL_INVARIANT);
     }
 
+    fn sample_turn_approval_request(
+        approval_id: &str,
+        risk: RiskLevel,
+        persistable: bool,
+    ) -> TurnApprovalRequest {
+        TurnApprovalRequest {
+            approval_id: approval_id.to_owned(),
+            tool_call_id: "call_shell".to_owned(),
+            tool_name: "shell".to_owned(),
+            risk,
+            title: "Run shell command".to_owned(),
+            detail: "Execute cargo test".to_owned(),
+            command: Some("cargo test".to_owned()),
+            cwd: Some(".".to_owned()),
+            output_summary: None,
+            paths: None,
+            hunks: None,
+            risk_reasons: Vec::new(),
+            persistable,
+        }
+    }
+
+    fn sample_patch_turn_approval_request(approval_id: &str) -> TurnApprovalRequest {
+        TurnApprovalRequest {
+            approval_id: approval_id.to_owned(),
+            tool_call_id: "call_patch".to_owned(),
+            tool_name: "apply_patch".to_owned(),
+            risk: RiskLevel::Write,
+            title: "Apply patch".to_owned(),
+            detail: "Modify README.md".to_owned(),
+            command: None,
+            cwd: None,
+            output_summary: None,
+            paths: Some(vec!["README.md".to_owned()]),
+            hunks: Some(vec![
+                prole_coder_agent_core::tool_execution::PatchApprovalHunk {
+                    id: "README.md#1:old1+3:new1+3".to_owned(),
+                    file_path: "README.md".to_owned(),
+                    file_index: 0,
+                    hunk_index: 0,
+                    old_start: 1,
+                    old_count: 3,
+                    new_start: 1,
+                    new_count: 3,
+                    section: None,
+                },
+                prole_coder_agent_core::tool_execution::PatchApprovalHunk {
+                    id: "README.md#2:old5+2:new5+3".to_owned(),
+                    file_path: "README.md".to_owned(),
+                    file_index: 0,
+                    hunk_index: 1,
+                    old_start: 5,
+                    old_count: 2,
+                    new_start: 5,
+                    new_count: 3,
+                    section: Some("next block".to_owned()),
+                },
+            ]),
+            risk_reasons: Vec::new(),
+            persistable: true,
+        }
+    }
+
     fn initialize_params() -> Value {
         initialize_params_for("C:/workspace/project")
     }
@@ -3619,6 +4610,22 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("line should be JSON"))
             .collect()
+    }
+
+    // Extracts event envelopes from single-event and batch wire formats for assertions.
+    // Batch metadata is validated by dedicated batch tests, not by this helper.
+    fn agent_event_values(lines: &[Value]) -> Vec<Value> {
+        let mut events = Vec::new();
+        for line in lines {
+            if line["method"] == "agent.event" {
+                events.push(line["params"].clone());
+            } else if line["method"] == "agent.eventBatch"
+                && let Some(batch_events) = line["params"]["events"].as_array()
+            {
+                events.extend(batch_events.iter().cloned());
+            }
+        }
+        events
     }
 
     fn line_index(lines: &[Value], predicate: impl Fn(&Value) -> bool) -> usize {
@@ -3767,6 +4774,7 @@ mod tests {
         cancellations: Vec<CancelParams>,
         resumes: Vec<ResumeParams>,
         list_runs: Vec<ListRunsParams>,
+        fim_previews: Vec<FimPreviewParams>,
     }
 
     impl AgentRpcRequestHandler for TestHandler {
@@ -3810,6 +4818,7 @@ mod tests {
                 approval_id: params.approval_id,
                 state: RpcApprovalState::Approved,
                 persist: params.persist.unwrap_or(RpcApprovalPersistence::Never),
+                hunks: params.hunks,
             }))
         }
 
@@ -3877,6 +4886,18 @@ mod tests {
                     changed_files: Vec::new(),
                     verification_status: Some("skipped".to_owned()),
                 }],
+            }))
+        }
+
+        fn preview_fim(
+            &mut self,
+            params: FimPreviewParams,
+        ) -> Result<AgentRpcHandlerOutput<FimPreviewResult>, AgentRpcHandlerError> {
+            self.fim_previews.push(params);
+            Ok(AgentRpcHandlerOutput::new(FimPreviewResult {
+                text: "fixture completion".to_owned(),
+                model: "fixture-fim".to_owned(),
+                finish_reason: Some("stop".to_owned()),
             }))
         }
     }

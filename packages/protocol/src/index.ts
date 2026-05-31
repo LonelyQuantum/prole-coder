@@ -1,6 +1,7 @@
 export const protocolVersion = "0.1.0" as const;
 export const jsonRpcVersion = "2.0" as const;
 export const agentEventMethod = "agent.event" as const;
+export const agentEventBatchMethod = "agent.eventBatch" as const;
 export const agentInitializeMethod = "agent.initialize" as const;
 export const agentSendTurnMethod = "agent.sendTurn" as const;
 export const agentResumeMethod = "agent.resume" as const;
@@ -8,6 +9,7 @@ export const agentApproveMethod = "agent.approve" as const;
 export const agentRejectMethod = "agent.reject" as const;
 export const agentCancelMethod = "agent.cancel" as const;
 export const agentListRunsMethod = "agent.listRuns" as const;
+export const agentPreviewFimMethod = "agent.previewFim" as const;
 
 export interface ProtocolErrorDefinition {
   readonly code: number;
@@ -60,6 +62,35 @@ export const protocolErrorDefinitions = [
 export const riskLevels = ["read", "write", "exec", "network", "destructive"] as const;
 export type RiskLevel = (typeof riskLevels)[number];
 export type ApprovalRisk = RiskLevel;
+
+export const providerCapabilityFeatures = [
+  "thinking",
+  "toolCalls",
+  "toolChoice",
+  "fim",
+  "streaming",
+  "cacheUsage",
+] as const;
+export type ProviderCapabilityFeature = (typeof providerCapabilityFeatures)[number];
+
+export interface ProviderModelCapabilities {
+  readonly id: string;
+  readonly displayName?: string;
+  readonly contextWindowTokens: number;
+  readonly maxOutputTokens: number;
+  readonly supportsThinking: boolean;
+  readonly supportsToolCalls: boolean;
+  readonly supportsToolChoice: boolean;
+  readonly supportsFim: boolean;
+  readonly supportsStreaming: boolean;
+  readonly reportsCacheUsage: boolean;
+}
+
+export interface ProviderCapabilities {
+  readonly provider: string;
+  readonly defaultModel: string;
+  readonly models: readonly ProviderModelCapabilities[];
+}
 
 export const approvalRequirements = ["none", "required", "always_required"] as const;
 export type ApprovalRequirement = (typeof approvalRequirements)[number];
@@ -402,7 +433,9 @@ export interface ServerCapabilities {
   readonly supportsRunResume: boolean;
   readonly supportsPatchApproval: boolean;
   readonly supportsPersistentApprovals: boolean;
+  readonly supportsEventBatching: boolean;
   readonly supportedRiskLevels: readonly RiskLevel[];
+  readonly provider: ProviderCapabilities;
 }
 
 export interface AgentInitializeResult {
@@ -480,12 +513,18 @@ export interface ListRunsResult {
 export interface ApproveParams {
   readonly approvalId: string;
   readonly persist?: ApprovalPersistence;
+  readonly hunks?: {
+    readonly approved: readonly string[];
+  };
 }
 
 export interface ApproveResult {
   readonly approvalId: string;
   readonly state: "approved";
   readonly persist: ApprovalPersistence;
+  readonly hunks?: {
+    readonly approved: readonly string[];
+  };
 }
 
 export interface RejectParams {
@@ -510,6 +549,21 @@ export interface CancelResult {
   readonly reason?: string;
 }
 
+export interface FimPreviewParams {
+  readonly prefix: string;
+  readonly suffix?: string;
+  readonly path?: string;
+  readonly languageId?: string;
+  readonly model?: string;
+  readonly maxTokens?: number;
+}
+
+export interface FimPreviewResult {
+  readonly text: string;
+  readonly model: string;
+  readonly finishReason?: string;
+}
+
 export interface ApprovalRequest {
   readonly approvalId: string;
   readonly risk: RiskLevel;
@@ -518,9 +572,25 @@ export interface ApprovalRequest {
   readonly toolCallId: string;
   readonly toolName: ToolName;
   readonly command?: string;
+  readonly cwd?: string;
+  readonly outputSummary?: string;
   readonly paths?: readonly string[];
+  readonly hunks?: readonly PatchApprovalHunk[];
   readonly riskReasons?: readonly string[];
   readonly persistable: boolean;
+}
+
+// Keep vscode/extension/src/approvalFlow.ts optionalApprovalHunks in sync with this wire shape.
+export interface PatchApprovalHunk {
+  readonly id: string;
+  readonly filePath: string;
+  readonly fileIndex: number;
+  readonly hunkIndex: number;
+  readonly oldStart: number;
+  readonly oldCount: number;
+  readonly newStart: number;
+  readonly newCount: number;
+  readonly section?: string;
 }
 
 export type JsonRpcId = string | number | null;
@@ -605,6 +675,30 @@ export interface ProviderCompletedPayload extends RunLogPayloadMetadata {
   readonly streaming?: ProviderStreamingPayload;
 }
 
+export interface ProviderRequestedPayload {
+  readonly iteration: number;
+  readonly messageCount: number;
+  readonly reasoningState: Readonly<Record<string, unknown>>;
+}
+
+export type ToolExecutionStatus = "ok" | "failed";
+
+export interface ToolCompletedPayload extends RunLogPayloadMetadata {
+  readonly toolCallId: string;
+  readonly name: ToolName;
+  readonly status: ToolExecutionStatus;
+  readonly summary: string;
+  readonly result: Readonly<Record<string, unknown>>;
+}
+
+export type VerificationStatus = "passed" | "failed" | "skipped";
+
+export interface RunCompletedPayload {
+  readonly summary: string;
+  readonly changedFiles: readonly string[];
+  readonly verificationStatus: VerificationStatus;
+}
+
 export interface ToolApprovalRequiredPayload {
   readonly approvalId: string;
   readonly toolCallId: string;
@@ -613,7 +707,10 @@ export interface ToolApprovalRequiredPayload {
   readonly title: string;
   readonly detail: string;
   readonly command?: string;
+  readonly cwd?: string;
+  readonly outputSummary?: string;
   readonly paths?: readonly string[];
+  readonly hunks?: readonly PatchApprovalHunk[];
   readonly riskReasons?: readonly string[];
   readonly persistable: boolean;
 }
@@ -624,12 +721,33 @@ export interface ToolApprovalResolvedPayload {
   readonly toolName: ToolName;
   readonly decision: "approved" | "rejected" | "canceled" | "expired";
   readonly reason?: string;
+  readonly hunks?:
+    | {
+        readonly scope: "all";
+      }
+    | {
+        readonly scope: "selected";
+        readonly approved: readonly string[];
+      };
 }
 
 export type AgentEventNotification<TPayload = unknown> = JsonRpcNotification<
   AgentEventEnvelope<TPayload>
 > & {
   readonly method: typeof agentEventMethod;
+};
+
+export interface AgentEventBatchParams<TPayload = unknown> {
+  readonly events: readonly AgentEventEnvelope<TPayload>[];
+  readonly firstSeq: number;
+  readonly lastSeq: number;
+  readonly count: number;
+}
+
+export type AgentEventBatchNotification<TPayload = unknown> = JsonRpcNotification<
+  AgentEventBatchParams<TPayload>
+> & {
+  readonly method: typeof agentEventBatchMethod;
 };
 
 export type AgentEvent =

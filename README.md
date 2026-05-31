@@ -362,7 +362,9 @@ TypeScript workspace，需要先运行 `pnpm install`：
 pnpm -r typecheck
 pnpm -r lint
 pnpm -r test
-pnpm -C vscode/extension package
+pnpm run vscode:test-electron
+pnpm run vsix:smoke
+pnpm run vsix:alpha
 ```
 
 全量检查：
@@ -566,7 +568,7 @@ extension.ts
 
 ## 开发计划
 
-当前进度：Phase 1 Agent Core MVP 功能闭环、Phase 2 的 1M Context Capsule 核心收敛和 Phase 3 的 VS Code 插件核心与共享 RPC 交互管线均已完成。DeepSeek provider、基础工具执行、Context Builder、Run Log、Turn Loop、CLI、RPC、审批、取消、真实 DeepSeek streaming/tool-call 验收、本地 fixture smoke、进程级 CLI smoke、小型真实仓库 CLI 联网验收、合并前测试收敛、Context Capsule、manifest、token estimator、attachments、provider summary、Run Log 体积控制、tool call JSON Schema 校验、200K/500K/900K 离线大上下文验收入口和 Phase 2e 展示型 demo 扩展均已完成；VS Code RPC server 启动监管、JSON-RPC request client、RPC 全双工 reader/writer 与事件发送队列、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、命令风险动态升级、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化和命令子进程树清理均已完成。下一步进入 Phase 4 的 VS Code 深度集成。
+当前进度：Phase 1 Agent Core MVP 功能闭环、Phase 2 的 1M Context Capsule 核心收敛、Phase 3 的 VS Code 插件核心与共享 RPC 交互管线均已完成。Phase 4 的 VS Code 深度集成已完成，包含原 14 项能力以及 P4-15 到 P4-18 的 Codex-like UX 收敛：默认使用 VS Code 原生 Chat 右侧入口、简化审批 UX、保持连续会话心智并自动压缩历史上下文。DeepSeek provider、基础工具执行、Context Builder、Run Log、Turn Loop、CLI、RPC、审批、取消、真实 DeepSeek streaming/tool-call 验收、本地 fixture smoke、进程级 CLI smoke、小型真实仓库 CLI 联网验收、合并前测试收敛、Context Capsule、manifest、token estimator、attachments、provider summary、Run Log 体积控制、tool call JSON Schema 校验、200K/500K/900K 离线大上下文验收入口和 Phase 2e 展示型 demo 扩展均已完成；VS Code RPC server 启动监管、JSON-RPC request client、RPC 全双工 reader/writer 与事件发送队列、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、命令风险动态升级、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、命令子进程树清理、VSIX alpha 打包、extension-host 端到端验收、原生 `@prole` Chat Participant、自动上下文压缩和简化审批 UX 均已完成。之后进入 Phase 5：TUI 与生态扩展。
 
 阶段完成口径：README 中某个 Phase 只有在 `docs/phase-tasks.md` 对应 Phase 下的所有任务都标记为 `[x]` 后，才能在高层开发计划中表述为“全部完成”。如果某阶段核心功能已完成但仍有 P1/P2 增强或发布/文档验收项未完成，README 必须继续把该阶段表述为进行中，并列出剩余任务。
 
@@ -666,21 +668,36 @@ extension.ts
 
 ### Phase 4：VS Code 深度集成
 
-- [ ] Problems 面板 diagnostics 进入 Context Builder。
-- [ ] Terminal command approval。
-- [ ] provider、model、预算、审批策略和 RPC 命令配置界面。
-- [ ] RPC 高频事件输出节流与批量发送策略。
-- [ ] 事件 payload schema 与协议 fixture 对齐。
-- [ ] 审批持久化存储。
-- [ ] 真实 hunk 级 patch 审批。
-- [ ] FIM completion preview。
-- [ ] Provider capability model：显式表达 thinking、tool choice、FIM、stream usage、cache usage、上下文和输出限制。
-- [ ] VSIX alpha / pre-release 打包与插件安装说明。
+- [x] P4-1：VSIX dry-run packaging smoke，已通过 `pnpm run vsix:smoke` 验证 `.vscodeignore`、`workspace:*` 依赖边界、media asset、compiled `out/` 和 activationEvents；该 smoke 会临时生成并检查 VSIX，随后清理产物，不代表 P4-13 完成。
+- [x] P4-2：`@vscode/test-electron` 最小 harness，覆盖 extension activation、trusted workspace 和 Chat view 基础加载；`pnpm run vscode:test-electron` 可运行 smoke。
+- [x] P4-3：Provider capability model data contract，已通过 ADR 0006 和 `agent.initialize.capabilities.provider` 显式表达 thinking、tool calls/tool choice、FIM、stream/cache usage、上下文和输出限制。
+- [x] P4-4：事件 payload schema 与协议 fixture 对齐，已新增共享 fixture 与 Rust/TypeScript 测试，并补齐协议版本不匹配的 VS Code 提示边界。
+- [x] P4-5：RPC 高频事件输出节流与批量发送策略，实时 wire 层支持 `agent.eventBatch`，Run Log 与 replay 仍保持逐事件 `seq` 事实来源。
+- [x] P4-6：`agent.cancel` 类型化 helper 与 Chat Cancel UI，已新增 `RpcServerManager.cancel()`、Cancel 按钮和运行中 composer 状态收口。
+- [x] P4-7：Problems 面板 diagnostics 通过 diagnostic attachments 进入 Context Builder，VS Code 发送 turn 时会采集当前 Problems 快照，按协议 attachment 上限裁剪并优先保留 error。
+- [x] P4-8：Terminal command approval，审批 payload 支持命令、cwd、风险等级、风险原因、上一条 shell 输出摘要和持久化语义；P4-16 后主审批 modal 不再暴露复杂持久化选项。
+- [x] P4-9：审批持久化存储，RPC 队列支持 session/workspace 持久批准，并继续禁止 network/destructive 风险持久化。
+- [x] P4-10：provider、model、预算、审批策略和 RPC 命令配置界面，已新增 Open Settings 命令，打开 VS Code 设置并展示 RPC server capability、默认模型、预算、审批能力、RPC command/state；配置只包含非敏感 RPC/FIM 选项，不保存 API Key。
+- [x] P4-11：真实 hunk 级 patch 审批，首版限定 `apply_patch`，Core/RPC 支持 selected hunk 决策、校验未知/重复 hunk、Run Log 记录 selected/all 范围，VS Code modal 可选择 hunks 并通过 `agent.approve.hunks` 回传；审批事件 payload 已同步协议 fixture。
+- [x] P4-12：FIM completion preview，已新增 `agent.previewFim` RPC、DeepSeek beta FIM adapter、fixture provider 预览和 VS Code inline completion provider，模型选择只依赖 server capability 的 `supportsFim`。
+- [x] P4-13：VSIX alpha / pre-release 打包与插件安装说明，已新增 `pnpm run vsix:alpha`，在 `target/vsix/` 生成可安装 pre-release VSIX 与 SHA-256 校验和，并在 `docs/release.md` 记录 clean 环境安装验收路径。
+- [x] P4-14：补齐 end-to-end 集成测试覆盖，已在 `pnpm run vscode:test-electron` 中接入本地 JSON-RPC fixture server，覆盖 Chat sendTurn、Cancel、Problems diagnostics、自动审批回传、Run List / resume 和隔离 VS Code profile 启动；VSIX 安装后的 clean 环境基础交互继续按 `docs/release.md` 的 P4-13 路径手动验收。
+- [x] P4-15：原生 VS Code Chat Participant `@prole`，让常规入口默认打开 VS Code Chat 侧栏体验；保留 Activity Bar Webview 作为 Run List / Context Capsule / diff 等高级面板。
+- [x] P4-16：简化审批 UX，主审批动作收敛为 Approve / Reject，`apply_patch` 多 hunk 时保留 Select Hunks 边界；持久化策略继续由后端策略控制，不在主弹窗里暴露复杂选项。
+- [x] P4-17：Sidebar Chat 和原生 Chat Participant 自动注入压缩后的对话历史，作为 `explicit_content` attachment 进入已有 Context Capsule 管线，让连续对话自然承接上下文；Sidebar timeline 单条消息会先限长，避免极端长流式输出造成过大的中间文本。
+- [x] P4-18：补齐单元测试、extension-host E2E、VSIX smoke/alpha 打包验证和文档说明；已通过 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke` 和 `pnpm run vsix:alpha`，并补充 Chat Participant 早到 terminal event 缓冲回归测试。
 
 验收标准：
 
 - 插件不需要用户手动打开终端即可完成一次“诊断 -> 修改 -> 测试 -> 报告”。
 - 插件和 CLI 对同一任务产生一致的 run log。
+- VS Code 插件可通过 VSIX 安装到 clean 环境。
+- fixture provider 下 Chat sendTurn、Cancel、Problems diagnostics、审批和 Run List / resume 至少有一条 extension-host 或可重复手动验收路径。
+- 配置界面不保存 API Key，只管理非敏感配置。
+- `ProleCoder: Open Chat` 优先打开 VS Code 原生 Chat 并填入 `@prole`，用户无需手动拖动 Activity Bar view 到右侧。
+- 原生 Chat 和 Sidebar Chat 都通过真实 `agent.sendTurn` 驱动回合，并继续复用 Problems diagnostics、审批回传、Cancel、Run Log 和 Context Capsule。
+- 连续对话会自动生成可审计、受限长度的上下文压缩 attachment；不会在 UI 文案里要求用户手动重开对话来延续上下文。
+- `docs/phase-tasks.md` 的 Phase 4 条目已全部标记为 `[x]`，README 可以把 Phase 4 表述为整阶段完成。
 
 ### Phase 5：TUI 与生态扩展
 

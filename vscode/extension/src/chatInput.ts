@@ -1,4 +1,4 @@
-import type { RpcRunMode, SendTurnParams } from "@prole-coder/protocol" with {
+import type { RpcRunMode, SendTurnParams, TurnAttachment } from "@prole-coder/protocol" with {
   "resolution-mode": "import",
 };
 
@@ -51,10 +51,14 @@ export function parseChatTurnSubmission(value: unknown): ChatTurnSubmissionParse
   };
 }
 
-export function sendTurnParams(submission: ChatTurnSubmission): SendTurnParams {
+export function sendTurnParams(
+  submission: ChatTurnSubmission,
+  attachments: readonly TurnAttachment[] = [],
+): SendTurnParams {
   return {
     message: submission.message,
     mode: submission.mode,
+    ...(attachments.length === 0 ? {} : { attachments }),
   };
 }
 

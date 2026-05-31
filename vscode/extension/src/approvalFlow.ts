@@ -136,6 +136,7 @@ export class ApprovalEventController implements DisposableLike {
       return this.rpcClient.approve({
         approvalId: decision.approvalId,
         persist: approvalPersist(decision.persist),
+        ...(decision.hunks === undefined ? {} : { hunks: decision.hunks }),
       });
     }
 
@@ -177,7 +178,25 @@ export function approvalPromptRequestFromEvent(
     detail: event.payload.detail,
     persistable: event.payload.persistable,
     ...(event.payload.command === undefined ? {} : { command: event.payload.command }),
+    ...(event.payload.cwd === undefined ? {} : { cwd: event.payload.cwd }),
+    ...(event.payload.outputSummary === undefined
+      ? {}
+      : { outputSummary: event.payload.outputSummary }),
     ...(event.payload.paths === undefined ? {} : { paths: event.payload.paths }),
+    ...(event.payload.hunks === undefined
+      ? {}
+      : {
+          hunks: event.payload.hunks.map((hunk) => ({
+            id: hunk.id,
+            filePath: hunk.filePath,
+            hunkIndex: hunk.hunkIndex,
+            oldStart: hunk.oldStart,
+            oldCount: hunk.oldCount,
+            newStart: hunk.newStart,
+            newCount: hunk.newCount,
+            ...(hunk.section === undefined ? {} : { section: hunk.section }),
+          })),
+        }),
     ...(event.payload.riskReasons === undefined ? {} : { riskReasons: event.payload.riskReasons }),
   };
 }
@@ -196,8 +215,35 @@ function isApprovalPayload(value: unknown): value is ToolApprovalRequiredPayload
     isNonEmptyString(value["detail"]) &&
     typeof value["persistable"] === "boolean" &&
     optionalString(value["command"]) &&
+    optionalString(value["cwd"]) &&
+    optionalString(value["outputSummary"]) &&
     optionalStringArray(value["paths"]) &&
+    optionalApprovalHunks(value["hunks"]) &&
     optionalStringArray(value["riskReasons"])
+  );
+}
+
+function optionalApprovalHunks(value: unknown): boolean {
+  // Mirrors the shared protocol PatchApprovalHunk shape; update both sides when the wire shape changes.
+  if (value === undefined) {
+    return true;
+  }
+  if (!Array.isArray(value)) {
+    return false;
+  }
+
+  return value.every(
+    (hunk) =>
+      isRecord(hunk) &&
+      isNonEmptyString(hunk["id"]) &&
+      isNonEmptyString(hunk["filePath"]) &&
+      Number.isInteger(hunk["fileIndex"]) &&
+      Number.isInteger(hunk["hunkIndex"]) &&
+      Number.isInteger(hunk["oldStart"]) &&
+      Number.isInteger(hunk["oldCount"]) &&
+      Number.isInteger(hunk["newStart"]) &&
+      Number.isInteger(hunk["newCount"]) &&
+      optionalString(hunk["section"]),
   );
 }
 

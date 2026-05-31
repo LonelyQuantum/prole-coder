@@ -1,5 +1,6 @@
 src/**
 test/**
+scripts/**
 out-test/**
 out/**/*.test.js
 out/**/*.test.js.map

@@ -45,6 +45,29 @@ Agent Core
 }
 ```
 
+实时高频事件可以使用 `agent.eventBatch` notification 批量发送；Run Log 本身仍以单个 `seq` 事件作为事实来源，`agent.resume` replay 仍按 `agent.event` 重放。
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "agent.eventBatch",
+  "params": {
+    "events": [
+      {
+        "seq": 2,
+        "time": "2026-05-20T14:00:00.001Z",
+        "type": "assistant.delta",
+        "runId": "run_01",
+        "turnId": "turn_01",
+        "payload": { "text": "hello" }
+      }
+    ],
+    "firstSeq": 2,
+    "lastSeq": 2,
+    "count": 1
+  }
+}
+```
+
 ## 版本
 
 协议版本为 `0.1.0`。
@@ -99,7 +122,28 @@ interface ServerCapabilities {
   supportsRunResume: boolean;
   supportsPatchApproval: boolean;
   supportsPersistentApprovals: boolean;
+  supportsEventBatching: boolean;
   supportedRiskLevels: RiskLevel[];
+  provider: ProviderCapabilities;
+}
+
+interface ProviderCapabilities {
+  provider: string;
+  defaultModel: string;
+  models: ProviderModelCapabilities[];
+}
+
+interface ProviderModelCapabilities {
+  id: string;
+  displayName?: string;
+  contextWindowTokens: number;
+  maxOutputTokens: number;
+  supportsThinking: boolean;
+  supportsToolCalls: boolean;
+  supportsToolChoice: boolean;
+  supportsFim: boolean;
+  supportsStreaming: boolean;
+  reportsCacheUsage: boolean;
 }
 ```
 
@@ -119,6 +163,22 @@ interface PlanStep {
   title: string;
   status: PlanStepStatus;
   detail?: string;
+}
+```
+
+### PatchApprovalHunk
+
+```ts
+interface PatchApprovalHunk {
+  id: string;
+  filePath: string;
+  fileIndex: number;
+  hunkIndex: number;
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  section?: string;
 }
 ```
 
@@ -161,8 +221,27 @@ Result：
     "protocolVersion": "0.1.0",
     "supportsRunResume": true,
     "supportsPatchApproval": true,
-    "supportsPersistentApprovals": false,
-    "supportedRiskLevels": ["read", "write", "exec", "network", "destructive"]
+    "supportsPersistentApprovals": true,
+    "supportsEventBatching": true,
+    "supportedRiskLevels": ["read", "write", "exec", "network", "destructive"],
+    "provider": {
+      "provider": "deepseek",
+      "defaultModel": "deepseek-v4-pro",
+      "models": [
+        {
+          "id": "deepseek-v4-pro",
+          "displayName": "DeepSeek V4 Pro",
+          "contextWindowTokens": 1048576,
+          "maxOutputTokens": 393216,
+          "supportsThinking": true,
+          "supportsToolCalls": true,
+          "supportsToolChoice": false,
+          "supportsFim": true,
+          "supportsStreaming": true,
+          "reportsCacheUsage": true
+        }
+      ]
+    }
   },
   "stateDir": ".prole-coder"
 }
@@ -215,9 +294,9 @@ interface SendTurnResult {
 
 Result 返回后，进度通过 `agent.event` notification 持续到达。
 
-当前 Rust request loop 已能解析 `agent.sendTurn` 并分发给 `AgentRpcRequestHandler`。`crates/agent-rpc::AgentTurnLoopRpcHandler` 已能创建 run、选择注入的 provider factory、启动后台 Turn Loop worker，并在创建 run 后立即返回 `accepted`。Run Log 事件会通过独立的 live event queue 发送到 request loop 的单 writer，并持续输出为 `agent.event` notification；遇到审批时，worker 在 pending approval 队列中等待 `agent.approve` / `agent.reject` / `agent.cancel`，并在超时时写入取消事件。如果 request loop 读到 EOF 或 writer 失败，会触发 handler shutdown / disconnect cancel；对于 active run，shutdown 会把未决审批解析为 `decision: "canceled"` 并写入 `run.canceled`，或等待已有 terminal event 收口。
+当前 Rust request loop 已能解析 `agent.sendTurn` 并分发给 `AgentRpcRequestHandler`。`crates/agent-rpc::AgentTurnLoopRpcHandler` 已能创建 run、选择注入的 provider factory、启动后台 Turn Loop worker，并在创建 run 后立即返回 `accepted`。Run Log 事件会通过独立的 live event queue 发送到 request loop 的单 writer，并持续输出为 `agent.event` notification；遇到审批时，worker 会先检查 session/workspace 持久批准，再在 pending approval 队列中等待 `agent.approve` / `agent.reject` / `agent.cancel`，并在超时时写入取消事件。如果 request loop 读到 EOF 或 writer 失败，会触发 handler shutdown / disconnect cancel；对于 active run，shutdown 会把未决审批解析为 `decision: "canceled"` 并写入 `run.canceled`，或等待已有 terminal event 收口。
 
-Phase 2c 起，Rust handler 会消费 `attachments` 并转换为 Context Capsule 来源：`file` 由 Core 在工作区内读取，复用工具执行层的路径和敏感目录保护；`selection` / `explicit_content` 由前端提供文本但受数量、大小、重复来源和路径校验限制；`diagnostic` 由 VS Code/TUI 等前端传入结构化诊断文本。当前默认限制是单 turn 最多 32 个 attachment，单个 attachment 文本最多 256 KiB；超过限制会让该 run 以 `run.failed` / `E_INVALID_ATTACHMENT` 结束。
+Phase 2c 起，Rust handler 会消费 `attachments` 并转换为 Context Capsule 来源：`file` 由 Core 在工作区内读取，复用工具执行层的路径和敏感目录保护；`selection` / `explicit_content` 由前端提供文本但受数量、大小、重复来源和路径校验限制；`diagnostic` 由 VS Code/TUI 等前端传入结构化诊断文本。VS Code 插件在发送 turn 时会把当前 Problems 快照转换为 diagnostic attachments，并按协议 attachment 上限优先保留 error；Phase 4 起，Sidebar Chat 与原生 `@prole` Chat Participant 会把历史对话/事件摘要压缩为受限长度的 `explicit_content` attachment，并为该自动上下文预留一个 attachment 槽位。Sidebar timeline 来源会在生成自动上下文前先限制单条消息长度，避免极端长 `assistant.delta` 合并内容造成过大的中间文本。当前默认限制是单 turn 最多 32 个 attachment，单个 attachment 文本最多 256 KiB；超过限制会让该 run 以 `run.failed` / `E_INVALID_ATTACHMENT` 结束。
 
 ### `agent.approve`
 
@@ -227,21 +306,29 @@ Phase 2c 起，Rust handler 会消费 `attachments` 并转换为 Context Capsule
 interface ApproveParams {
   approvalId: string;
   persist?: "never" | "session" | "workspace";
+  hunks?: {
+    approved: string[];
+  };
 }
 
 interface ApproveResult {
   approvalId: string;
   state: "approved";
   persist: "never" | "session" | "workspace";
+  hunks?: {
+    approved: string[];
+  };
 }
 ```
 
 规则：
 
 - `persist` 默认是 `never`。
-- 只有明确标记为 persistable 的审批类型才能使用 `workspace` 持久化。
+- 只有明确标记为 `persistable: true` 的审批类型才能使用 `session` / `workspace` 持久化。
+- `network` 和 `destructive` 风险不可持久化，即使客户端发送持久化参数也会被 server 拒绝。
+- `hunks.approved` 只用于 `apply_patch` 的 hunk 级批准；必须引用 `tool.approvalRequired.hunks` 中存在的 id，且不能与 `session` / `workspace` 持久化同时使用。
 - 批准已过期或未知审批时返回 `E_APPROVAL_NOT_FOUND`。
-- 当前 Rust request loop 已能解析 `agent.approve` 并分发给 `AgentRpcRequestHandler`；`AgentTurnLoopRpcHandler` 已能批准当前 active run 的 pending approval，并继续输出 `tool.approvalResolved`、后续工具事件和 run 结束事件。未知、已使用或已过期的 approval 会返回 `E_APPROVAL_NOT_FOUND`。
+- 当前 Rust request loop 已能解析 `agent.approve` 并分发给 `AgentRpcRequestHandler`；`AgentTurnLoopRpcHandler` 已能批准当前 active run 的 pending approval，并按需写入 session/workspace 持久批准。后续相同 key 的审批会自动通过并继续输出 `tool.approvalResolved`、后续工具事件和 run 结束事件。hunk 级批准会在 Core 层过滤 `apply_patch` 后只应用已批准 hunks。未知、已使用或已过期的 approval 会返回 `E_APPROVAL_NOT_FOUND`。
 
 ### `agent.reject`
 
@@ -355,6 +442,34 @@ interface ListRunsResult {
 - 返回顺序按 `updatedAt` 从新到旧排序；时间相同时按 `runId` 升序稳定排序。
 - `limit` 省略时返回全部已知 run；传入时只返回前 N 条。
 - 当前 Rust request loop 已能解析 `agent.listRuns` 并分发给 handler；`AgentTurnLoopRpcHandler` 已能从 Run Log summary metadata 返回列表。
+
+### `agent.previewFim`
+
+请求一次 fill-in-the-middle completion preview。该方法用于编辑器 inline completion，不创建 run，也不写入 run log。
+
+```ts
+interface FimPreviewParams {
+  prefix: string;
+  suffix?: string;
+  path?: string;
+  languageId?: string;
+  model?: string;
+  maxTokens?: number;
+}
+
+interface FimPreviewResult {
+  text: string;
+  model: string;
+  finishReason?: string;
+}
+```
+
+规则：
+
+- `prefix` 必须非空。
+- `model` 只能由 client 在 server capability 明确支持 FIM 时传入；前端不得靠模型名称推断能力。
+- `maxTokens` 是 provider 请求上限，不改变 server 侧上下文预算。
+- 当前 Rust request loop 已能解析 `agent.previewFim` 并分发给 handler；CLI fixture provider 返回可测试预览，DeepSeek provider 通过 beta FIM completion endpoint 获取结果。
 
 ## 事件封装
 
@@ -622,7 +737,9 @@ interface ToolApprovalRequired {
   detail: string;
   cwd?: string;
   command?: string;
+  outputSummary?: string;
   paths?: string[];
+  hunks?: PatchApprovalHunk[];
   riskReasons?: string[];
   persistable: boolean;
 }
@@ -637,10 +754,16 @@ interface ToolApprovalResolved {
   toolName: ToolName;
   decision: "approved" | "rejected" | "canceled" | "expired";
   reason?: string;
+  hunks?:
+    | { scope: "all" }
+    | {
+        scope: "selected";
+        approved: string[];
+      };
 }
 ```
 
-该事件记录用户、策略或 RPC 队列对审批请求的决定。`decision: "approved"` 后续应进入 `tool.started`；`decision: "rejected"` 后当前工具调用不得执行，run 可以失败、继续只读工作或让模型请求不同操作；`decision: "canceled"` 和 `decision: "expired"` 表示 active run 被用户取消或审批超时，后续必须写入 `run.canceled`，对应工具不得执行。CLI 当前会把 prompt 的批准/拒绝写入该事件；RPC handler 的 pending approval 队列会在 `agent.approve` / `agent.reject` / `agent.cancel` 或超时后写入同等事件。
+该事件记录用户、策略或 RPC 队列对审批请求的决定。`decision: "approved"` 后续应进入 `tool.started`；`hunks.scope: "selected"` 表示后续只会应用指定 hunk id。`decision: "rejected"` 后当前工具调用不得执行，run 可以失败、继续只读工作或让模型请求不同操作；`decision: "canceled"` 和 `decision: "expired"` 表示 active run 被用户取消或审批超时，后续必须写入 `run.canceled`，对应工具不得执行。CLI 当前会把 prompt 的批准/拒绝写入该事件；RPC handler 的 pending approval 队列会在 `agent.approve` / `agent.reject` / `agent.cancel` 或超时后写入同等事件。
 
 ### `tool.started`
 
@@ -679,7 +802,7 @@ interface PatchProposed {
 }
 ```
 
-Patch 通过其中的 `approvalId` 使用 `agent.approve` 批准。
+Patch 通过其中的 `approvalId` 使用 `agent.approve` 批准。`apply_patch` 首版支持在 `tool.approvalRequired.hunks` 中暴露可批准 hunk；client 可以发送 `agent.approve` 的 `hunks.approved` 只批准其中一部分。
 
 ### `patch.applied`
 

@@ -1,6 +1,6 @@
 # 详细任务索引
 
-状态：Phase 1 审计完成；后续任务已归入阶段。
+状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成；Phase 4 包含原 14 项 VS Code 深度集成能力以及 P4-15 到 P4-18 的 Codex-like UX 收敛。
 
 本文档是详细设计文档里的任务账本。README 保留高层开发计划；这里把各模块文档中出现的“已实现、尚未实现、后续增强、下一步”收敛为可勾选任务，避免后续工作只散落在说明文字里。
 
@@ -93,16 +93,24 @@
 
 | 状态 | 任务 | 来源 | 说明 |
 | --- | --- | --- | --- |
-| [ ] | Problems 面板诊断进入 Context Builder | `README.md`、`docs/vscode-extension.md`、`docs/context-capsule.md` | 依赖 Phase 2 attachment/context 输入稳定。 |
-| [ ] | Terminal command approval | `README.md`、`docs/vscode-extension.md`、`docs/approval-model.md` | 展示命令、cwd、风险等级、输出摘要和持久化选项。 |
-| [ ] | provider、model、预算、审批策略和 RPC 命令配置界面 | `README.md`、`docs/vscode-extension.md` | 避免保存 API Key，配置只管理非敏感选项。 |
-| [ ] | RPC 高频事件输出节流与批量发送策略 | `docs/rpc-server.md`、`docs/vscode-extension.md` | 面向 `assistant.delta` 等高频事件，减少 stdio/webview 卡顿；需保持 Run Log `seq` 与 live notification 顺序一致。 |
-| [ ] | 事件 payload schema 与协议 fixture 对齐 | `docs/json-rpc-protocol.md`、`docs/turn-loop.md`、`packages/protocol` | 将 `provider.requested`、`tool.completed`、`run.completed` 等事件 payload 纳入 Rust/TypeScript 兼容性测试，避免协议漂移。 |
-| [ ] | 审批持久化存储 | `docs/approval-model.md`、`docs/tool-system.md`、`docs/vscode-extension.md` | 实现 session/workspace 持久批准存储；继续禁止 network/destructive 风险持久化。 |
-| [ ] | 真实 hunk 级 patch 审批 | `docs/tool-system.md`、`docs/vscode-extension.md` | 复用 Phase 3 的 hunk boundary，将 `apply_patch` 从 whole-patch approve/reject 扩展到 hunk 级决策、冲突诊断和回放记录。 |
-| [ ] | FIM completion preview | `README.md`、`docs/deepseek-api-adapter.md`、`docs/vscode-extension.md` | 需要 provider capability model 与编辑器 UI。 |
-| [ ] | Provider capability model | `README.md`、`docs/roadmap.md`、`docs/deepseek-api-adapter.md` | 显式表达 thinking、tool choice、FIM、stream usage、cache usage、上下文和输出限制。 |
-| [ ] | VSIX alpha / pre-release 打包与安装说明 | `docs/release.md`、`docs/vscode-extension.md` | Marketplace 上架不阻塞 Phase 4 完成，但需要可安装产物和文档。 |
+| [x] | P4-1：VSIX dry-run packaging smoke | `README.md`、`docs/vscode-extension.md`、`docs/release.md` | 已完成：新增 `pnpm run vsix:smoke` / `vscode/extension/scripts/vsixDryRunSmoke.mjs`，构建 protocol 与 extension 后在 `target/` 下临时生成 VSIX，检查 `.vscodeignore`、`workspace:*` 运行时边界、media asset、compiled `out/`、activationEvents 和包内排除规则，并清理临时产物；不代表 P4-13 完成。验收：`pnpm -r --if-present vsix:smoke`。 |
+| [x] | P4-2：`@vscode/test-electron` 最小 harness | `README.md`、`docs/vscode-extension.md` | 已完成：新增 `pnpm run vscode:test-electron` / `vscode/extension/scripts/runVscodeIntegrationTests.mjs`，测试 extension activation、trusted workspace、Chat view focus 和命令注册；测试工作区禁用 RPC autoStart，并已扩展为 P4-14 E2E 入口。 |
+| [x] | P4-3：Provider capability model data contract | `README.md`、`docs/roadmap.md`、`docs/deepseek-api-adapter.md`、`docs/json-rpc-protocol.md` | 已完成：新增 ADR 0006；`agent.initialize.capabilities.provider` 暴露 DeepSeek V4 model capability data contract，包含 thinking、tool calls/tool choice、FIM、stream/cache usage、上下文和输出限制，首版不引入 heavy trait。 |
+| [x] | P4-4：事件 payload schema 与协议 fixture 对齐 | `docs/json-rpc-protocol.md`、`docs/turn-loop.md`、`packages/protocol` | 已完成：新增 `docs/protocol/event-payloads.v1.json`，将 `provider.requested`、`tool.completed`、`run.completed` 纳入 Rust/TypeScript 兼容性测试；VS Code 初始化协议版本不匹配会给出明确提示。 |
+| [x] | P4-5：RPC 高频事件输出节流与批量发送策略 | `docs/rpc-server.md`、`docs/vscode-extension.md`、`docs/json-rpc-protocol.md` | 已完成：实时 live event wire 层支持 `agent.eventBatch` 批量发送，VS Code manager 按序分发；Run Log 仍逐事件写入并保持 `seq` 为事实来源，`agent.resume` replay 仍按单事件结构输出。 |
+| [x] | P4-6：`agent.cancel` 类型化 helper 与 Chat Cancel UI | `README.md`、`docs/vscode-extension.md`、`docs/json-rpc-protocol.md` | 已完成：新增 `RpcServerManager.cancel()` typed helper、Cancel 按钮和运行中 composer 状态；覆盖 typed cancel RPC 边界测试。 |
+| [x] | P4-7：Problems 面板诊断进入 Context Builder | `README.md`、`docs/vscode-extension.md`、`docs/context-capsule.md` | 已完成：VS Code 发送 turn 时采集 Problems 快照，并通过 `agent.sendTurn.attachments` 的 diagnostic attachment 注入；前端按协议 attachment 上限裁剪、优先保留 error，Core/Context Builder 继续负责 attachment 校验和 token 预算。 |
+| [x] | P4-8：Terminal command approval | `README.md`、`docs/vscode-extension.md`、`docs/approval-model.md` | 已完成：审批 payload 支持命令、cwd、风险等级、风险原因、上一条 shell 输出摘要字段和 never/session/workspace 持久化语义；P4-16 后 VS Code 主审批弹窗不再暴露复杂持久化选项。 |
+| [x] | P4-9：审批持久化存储 | `docs/approval-model.md`、`docs/tool-system.md`、`docs/vscode-extension.md` | 已完成：RPC pending queue 支持 session 内存复用和 workspace `.prole-coder/approvals.v1.json` 存储；继续在 Core 和 RPC 层禁止 network/destructive 风险持久化。 |
+| [x] | P4-10：provider、model、预算、审批策略和 RPC 命令配置界面 | `README.md`、`docs/vscode-extension.md` | 已完成：VS Code `ProleCoder: Open Settings` 打开扩展设置，并从 `agent.initialize` ready state 展示 provider、默认模型、context/output budget、模型 capability、审批策略、RPC command/args/autostart 和 state dir；配置贡献只包含非敏感 RPC/FIM 选项，API Key 仍只由 RPC server 环境读取。验收：`pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`。 |
+| [x] | P4-11：真实 hunk 级 patch 审批 | `docs/tool-system.md`、`docs/vscode-extension.md`、`docs/json-rpc-protocol.md` | 已完成：首版限定 `apply_patch`，Core 解析 unified diff 生成稳定 hunk id，`ApprovalDecision::ApprovedHunks` 会过滤 patch 后只应用已批准 hunks；RPC pending queue 校验未知、重复、空 hunk 和持久化误用；VS Code modal 提供 selected hunk quick pick；`tool.approvalRequired` / `tool.approvalResolved` 已扩展并纳入协议 fixture。验收：`cargo test -p prole-coder-agent-core filter_apply_patch_hunks_keeps_only_selected_hunks`、`cargo test -p prole-coder-agent-core turn_loop_applies_only_approved_patch_hunks`、`cargo test -p prole-coder-agent-rpc approval_queue_resolves_hunk_level_patch_decisions`、`pnpm -r test`。 |
+| [x] | P4-12：FIM completion preview | `README.md`、`docs/deepseek-api-adapter.md`、`docs/vscode-extension.md` | 已完成：新增 `agent.previewFim` RPC 类型、Rust request loop 分发、CLI provider factory FIM preview、DeepSeek beta `/completions` FIM adapter、fixture provider 预览和 VS Code 原生 inline completion provider；前端模型选择只使用 P4-3 capability data 的 `supportsFim`，不靠模型名称推断。验收：`cargo test -p prole-coder-agent-rpc request_loop_handles_fim_preview_requests`、`cargo test -p prole-coder-cli fixture_rpc_provider_factory_returns_fim_preview`、`pnpm -r typecheck`、`pnpm -r test`。 |
+| [x] | P4-13：VSIX alpha / pre-release 打包与安装说明 | `docs/release.md`、`docs/vscode-extension.md` | 已完成：新增 `pnpm run vsix:alpha` / `vscode/extension/scripts/packageAlphaVsix.mjs`，构建 protocol 与 extension 后在 `target/vsix/` 保留可安装 pre-release VSIX，并生成 SHA-256 校验和；脚本校验 VSIX manifest 的 pre-release 标记与 publisher/name/version 一致性，`docs/release.md` 记录 clean user-data/extensions 目录安装验收步骤。验收：`pnpm run vsix:alpha`。 |
+| [x] | P4-14：补齐 end-to-end 集成测试覆盖 | `README.md`、`docs/vscode-extension.md`、`docs/testing.md` | 已完成：`pnpm run vscode:test-electron` 在隔离 user-data/extensions profile 中启动 VS Code test host，并通过 `vscode/extension/test/fixtures/rpcFixtureServer.mjs` 本地 JSON-RPC fixture 覆盖 extension activation、Chat sendTurn、Problems diagnostic attachments、自动审批回传、Cancel、Run List / resume 和 Chat timeline/submission/context 状态；VSIX 安装后的 clean 环境基础交互继续按 `docs/release.md` 的可重复手动路径验收。 |
+| [x] | P4-15：原生 VS Code Chat Participant `@prole` | `README.md`、`docs/vscode-extension.md` | 已完成：贡献 `contributes.chatParticipants` 和 `vscode.chat.createChatParticipant`，让 `ProleCoder: Open Chat` 优先打开 VS Code 原生 Chat 侧栏并填入 `@prole`；Activity Bar Webview 保留为高级状态面板。验收：`pnpm -r typecheck`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke`、`pnpm run vsix:alpha`。 |
+| [x] | P4-16：审批 UX 简化 | `README.md`、`docs/approval-model.md`、`docs/vscode-extension.md` | 已完成：主审批弹窗收敛为 Approve / Reject；`apply_patch` 多 hunk 继续提供 Select Hunks quick pick；持久化批准能力保留在后端策略与 RPC 队列，不在主审批弹窗里暴露复杂选项。验收：`commands.test.ts` 覆盖简化 choices、一次性 approve、reject/dismiss 和 hunk 选择。 |
+| [x] | P4-17：自动上下文压缩 | `README.md`、`docs/context-capsule.md`、`docs/json-rpc-protocol.md` | 已完成：Sidebar Chat 和原生 Chat Participant 从历史对话/事件流生成受限长度的 `explicit_content` attachment，交给已有 Context Capsule 处理，让连续对话自然承接上下文；Sidebar timeline 单条消息会先限长，避免极端长流式输出造成过大的中间文本。验收：`automaticContext.test.ts` 和 `chatParticipantCore.test.ts` 覆盖压缩、预算裁剪、单条 timeline 消息限长、attachment 合并和 turn runner 注入。 |
+| [x] | P4-18：测试与打包验收 | `README.md`、`docs/testing.md`、`docs/release.md` | 已完成：覆盖自动上下文压缩、原生 Chat Participant turn runner、简化审批 choices、extension-host E2E、VSIX smoke/alpha 打包和文档一致性，并补充 Chat Participant 早到 terminal event 缓冲回归测试。验收：`pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke`、`pnpm run vsix:alpha`、`git diff --check` 和敏感信息扫描。 |
 
 ## Phase 5：TUI 与生态扩展
 

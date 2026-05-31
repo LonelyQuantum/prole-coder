@@ -18,19 +18,22 @@ use crate::{
         ReasoningContentError, ReasoningContentMode, ReasoningContentState,
         ReasoningContentStateMachine,
     },
-    run_log::{RunLogError, RunLogEvent, RunLogWriter},
+    run_log::{RunLogError, RunLogEvent, RunLogWriter, redact_text},
     tool::{
         ToolArgumentSchemaError, ToolDefinition, ToolName, find_builtin_tool,
         validate_tool_arguments,
     },
     tool_execution::{
-        ApplyPatchArgs, ReadFileArgs, ShellArgs, ToolExecutionError, ToolStatus,
-        WorkspaceManifestArgs, WorkspaceToolExecutor, redacted_tool_result_value,
+        ApplyPatchArgs, PatchApprovalHunk, ReadFileArgs, ShellArgs, ShellResult,
+        ToolExecutionError, ToolStatus, WorkspaceManifestArgs, WorkspaceToolExecutor,
+        filter_apply_patch_hunks, patch_approval_hunks, redacted_tool_result_value,
     },
 };
 
 const DEFAULT_MAX_ATTACHMENTS: usize = 32;
 const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 256 * 1024;
+const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_LINES: usize = 8;
+const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 
 #[derive(Debug)]
 pub struct AgentTurnLoop<P, A> {
@@ -178,6 +181,7 @@ where
         let mut messages = vec![ChatMessage::user(context.content)];
         let mut tool_results = Vec::new();
         let mut changed_files = Vec::new();
+        let mut last_shell_output_summary = None;
 
         for iteration in 1..=self.config.max_model_turns {
             let prepared = self.reasoning.prepare_messages(&messages)?;
@@ -270,10 +274,12 @@ where
                     turn_id: &input.turn_id,
                     iteration,
                     tool_index: tool_index + 1,
+                    previous_shell_output_summary: last_shell_output_summary.as_deref(),
                     cancellation_token: &input.cancellation_token,
                 };
                 let executed =
                     self.execute_tool_call(tool_call, tool_context, run_log, event_sink)?;
+                let follow_up_output_summary = executed.follow_up_output_summary.clone();
                 changed_files.extend(executed.changed_files.iter().cloned());
                 messages.push(ChatMessage::tool_result(
                     tool_call.id.clone(),
@@ -285,6 +291,9 @@ where
                     status: executed.status,
                     result: executed.log_result,
                 });
+                if let Some(output_summary) = follow_up_output_summary {
+                    last_shell_output_summary = Some(output_summary);
+                }
             }
         }
 
@@ -667,7 +676,8 @@ where
             }
             ToolName::ApplyPatch => {
                 let args: ApplyPatchArgs = parse_tool_arguments(tool_call, &arguments_preview)?;
-                self.ensure_approval(
+                let approval_hunks = patch_approval_hunks(&args.unified_diff)?;
+                let approval_scope = self.ensure_approval(
                     definition,
                     &risk_assessment,
                     tool_call,
@@ -676,9 +686,16 @@ where
                     context.tool_index,
                     Some(args.expected_files.clone()),
                     None,
+                    None,
+                    None,
+                    Some(approval_hunks),
                     run_log,
                     event_sink,
                 )?;
+                let args = match approval_scope {
+                    ApprovalScope::All => args,
+                    ApprovalScope::Hunks { hunk_ids } => filter_apply_patch_hunks(args, &hunk_ids)?,
+                };
                 self.execute_without_approval(
                     tool_call,
                     context,
@@ -708,6 +725,9 @@ where
                     context.tool_index,
                     args.cwd.clone().map(|cwd| vec![cwd]),
                     Some(args.command.clone()),
+                    Some(args.cwd.clone().unwrap_or_else(|| ".".to_owned())),
+                    context.previous_shell_output_summary.map(str::to_owned),
+                    None,
                     run_log,
                     event_sink,
                 )?;
@@ -719,7 +739,7 @@ where
                     event_sink,
                     |tools, args, cancellation_token| {
                         let result = tools.shell_with_cancellation(args, cancellation_token)?;
-                        tool_record(result.status, result.summary.clone(), Vec::new(), &result)
+                        shell_tool_record(result)
                     },
                 )
             }
@@ -821,12 +841,15 @@ where
         tool_index: usize,
         paths: Option<Vec<String>>,
         command: Option<String>,
+        cwd: Option<String>,
+        output_summary: Option<String>,
+        hunks: Option<Vec<PatchApprovalHunk>>,
         run_log: &mut (impl RunLogWriter + ?Sized),
         event_sink: &mut (impl TurnEventSink + ?Sized),
-    ) -> Result<(), AgentTurnLoopError> {
+    ) -> Result<ApprovalScope, AgentTurnLoopError> {
         let approval = effective_approval_requirement(definition.approval, risk_assessment.risk);
         if approval == ApprovalRequirement::None {
-            return Ok(());
+            return Ok(ApprovalScope::All);
         }
 
         let request = TurnApprovalRequest {
@@ -842,7 +865,10 @@ where
                 &risk_assessment.risk_reasons,
             ),
             command,
+            cwd,
+            output_summary,
             paths,
+            hunks,
             risk_reasons: risk_assessment.risk_reasons.clone(),
             persistable: approval_persistable(approval, risk_assessment.risk),
         };
@@ -862,9 +888,25 @@ where
                     event_sink,
                     "tool.approvalResolved",
                     Some(turn_id.to_owned()),
-                    approval_resolved_payload(&request, "approved", None),
+                    approval_resolved_payload(
+                        &request,
+                        "approved",
+                        None,
+                        Some(&ApprovalScope::All),
+                    ),
                 )?;
-                Ok(())
+                Ok(ApprovalScope::All)
+            }
+            ApprovalDecision::ApprovedHunks { hunk_ids } => {
+                let approval_scope = ApprovalScope::Hunks { hunk_ids };
+                append_turn_event(
+                    run_log,
+                    event_sink,
+                    "tool.approvalResolved",
+                    Some(turn_id.to_owned()),
+                    approval_resolved_payload(&request, "approved", None, Some(&approval_scope)),
+                )?;
+                Ok(approval_scope)
             }
             ApprovalDecision::Rejected { reason } => {
                 append_turn_event(
@@ -872,7 +914,7 @@ where
                     event_sink,
                     "tool.approvalResolved",
                     Some(turn_id.to_owned()),
-                    approval_resolved_payload(&request, "rejected", Some(reason.as_str())),
+                    approval_resolved_payload(&request, "rejected", Some(reason.as_str()), None),
                 )?;
                 Err(AgentTurnLoopError::ApprovalRejected {
                     approval_id: request.approval_id,
@@ -886,7 +928,7 @@ where
                     event_sink,
                     "tool.approvalResolved",
                     Some(turn_id.to_owned()),
-                    approval_resolved_payload(&request, "canceled", Some(reason.as_str())),
+                    approval_resolved_payload(&request, "canceled", Some(reason.as_str()), None),
                 )?;
                 Err(AgentTurnLoopError::ApprovalCanceled {
                     approval_id: request.approval_id,
@@ -900,7 +942,7 @@ where
                     event_sink,
                     "tool.approvalResolved",
                     Some(turn_id.to_owned()),
-                    approval_resolved_payload(&request, "expired", Some(reason.as_str())),
+                    approval_resolved_payload(&request, "expired", Some(reason.as_str()), None),
                 )?;
                 Err(AgentTurnLoopError::ApprovalExpired {
                     approval_id: request.approval_id,
@@ -1467,7 +1509,10 @@ pub struct TurnApprovalRequest {
     pub title: String,
     pub detail: String,
     pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub output_summary: Option<String>,
     pub paths: Option<Vec<String>>,
+    pub hunks: Option<Vec<PatchApprovalHunk>>,
     pub risk_reasons: Vec<String>,
     pub persistable: bool,
 }
@@ -1475,9 +1520,16 @@ pub struct TurnApprovalRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalDecision {
     Approved,
+    ApprovedHunks { hunk_ids: Vec<String> },
     Rejected { reason: String },
     Canceled { reason: String },
     Expired { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalScope {
+    All,
+    Hunks { hunk_ids: Vec<String> },
 }
 
 pub trait ApprovalPolicy {
@@ -1673,6 +1725,7 @@ struct ExecutedToolCall {
     message_content: String,
     log_result: Value,
     changed_files: Vec<String>,
+    follow_up_output_summary: Option<String>,
 }
 
 struct CollectedProviderTurn {
@@ -1689,6 +1742,7 @@ struct ToolCallContext<'a> {
     turn_id: &'a str,
     iteration: usize,
     tool_index: usize,
+    previous_shell_output_summary: Option<&'a str>,
     cancellation_token: &'a CancellationToken,
 }
 
@@ -1743,7 +1797,77 @@ fn tool_record<T: serde::Serialize>(
         message_content,
         log_result,
         changed_files,
+        follow_up_output_summary: None,
     })
+}
+
+fn shell_tool_record(result: ShellResult) -> Result<ExecutedToolCall, AgentTurnLoopError> {
+    let output_summary = shell_approval_output_summary(&result);
+    let log_result = redacted_tool_result_value(&result)?;
+    let message_content = serde_json::to_string(&log_result)?;
+    Ok(ExecutedToolCall {
+        status: result.status,
+        summary: result.summary,
+        message_content,
+        log_result,
+        changed_files: Vec::new(),
+        follow_up_output_summary: output_summary,
+    })
+}
+
+fn shell_approval_output_summary(result: &ShellResult) -> Option<String> {
+    let mut sections = Vec::new();
+    if let Some(stdout) = shell_output_tail_section("stdout", &result.stdout) {
+        sections.push(stdout);
+    }
+    if let Some(stderr) = shell_output_tail_section("stderr", &result.stderr) {
+        sections.push(stderr);
+    }
+    if sections.is_empty() {
+        return None;
+    }
+
+    let exit_code = result
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let summary = format!("exitCode: {exit_code}\n{}", sections.join("\n"));
+    Some(truncate_shell_output_summary(&summary))
+}
+
+fn shell_output_tail_section(label: &str, output: &str) -> Option<String> {
+    let redacted = redact_text(output);
+    let trimmed = redacted.trim_end();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let line_count = trimmed.lines().count();
+    let omitted = line_count.saturating_sub(SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_LINES);
+    let shown = line_count - omitted;
+    let mut section = if omitted == 0 {
+        format!("{label}:")
+    } else {
+        format!("{label} (last {shown} of {line_count} lines):")
+    };
+    for line in trimmed.lines().skip(omitted) {
+        section.push('\n');
+        section.push_str(line);
+    }
+    Some(section)
+}
+
+fn truncate_shell_output_summary(text: &str) -> String {
+    const TRUNCATED_MARKER: &str = "\n[output summary truncated]";
+    if text.len() <= SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_BYTES {
+        return text.to_owned();
+    }
+
+    let mut end = SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_BYTES - TRUNCATED_MARKER.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &text[..end], TRUNCATED_MARKER)
 }
 
 fn reasoning_state_payload(state: ReasoningContentState) -> Value {
@@ -1896,10 +2020,25 @@ fn approval_payload(request: &TurnApprovalRequest) -> Value {
     if let Some(command) = &request.command {
         payload.insert("command".to_owned(), Value::String(command.clone()));
     }
+    if let Some(cwd) = &request.cwd {
+        payload.insert("cwd".to_owned(), Value::String(cwd.clone()));
+    }
+    if let Some(output_summary) = &request.output_summary {
+        payload.insert(
+            "outputSummary".to_owned(),
+            Value::String(output_summary.clone()),
+        );
+    }
     if let Some(paths) = &request.paths {
         payload.insert(
             "paths".to_owned(),
             Value::Array(paths.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if let Some(hunks) = &request.hunks {
+        payload.insert(
+            "hunks".to_owned(),
+            serde_json::to_value(hunks).expect("patch approval hunks must serialize"),
         );
     }
     if !request.risk_reasons.is_empty() {
@@ -1923,6 +2062,7 @@ fn approval_resolved_payload(
     request: &TurnApprovalRequest,
     decision: &'static str,
     reason: Option<&str>,
+    scope: Option<&ApprovalScope>,
 ) -> Value {
     let mut payload = Map::new();
     payload.insert(
@@ -1940,6 +2080,22 @@ fn approval_resolved_payload(
     payload.insert("decision".to_owned(), Value::String(decision.to_owned()));
     if let Some(reason) = reason {
         payload.insert("reason".to_owned(), Value::String(reason.to_owned()));
+    }
+    if let Some(scope) = scope {
+        let mut scope_payload = Map::new();
+        match scope {
+            ApprovalScope::All => {
+                scope_payload.insert("scope".to_owned(), Value::String("all".to_owned()));
+            }
+            ApprovalScope::Hunks { hunk_ids } => {
+                scope_payload.insert("scope".to_owned(), Value::String("selected".to_owned()));
+                scope_payload.insert(
+                    "approved".to_owned(),
+                    Value::Array(hunk_ids.iter().cloned().map(Value::String).collect()),
+                );
+            }
+        }
+        payload.insert("hunks".to_owned(), Value::Object(scope_payload));
     }
 
     Value::Object(payload)
@@ -2014,7 +2170,8 @@ mod tests {
 
     use super::{
         AgentRunMode, AgentTurnInput, AgentTurnLoop, AgentTurnLoopConfig, AgentTurnLoopError,
-        AutoApprovePolicy, CancellationToken, TextRange, TurnAttachment, TurnEventSink,
+        ApprovalDecision, ApprovalPolicy, ApprovalPolicyError, AutoApprovePolicy,
+        CancellationToken, TextRange, TurnApprovalRequest, TurnAttachment, TurnEventSink,
         TurnEventSinkError, TurnProvider, TurnProviderCompletion, TurnProviderDelta,
         TurnProviderError, TurnProviderEvent, TurnProviderFinishReason, TurnProviderFuture,
         TurnProviderRequest, TurnProviderResponse, TurnProviderStream,
@@ -2421,6 +2578,8 @@ mod tests {
             .find(|event| event.event_type == "tool.approvalRequired")
             .expect("tool.approvalRequired should be emitted");
         assert_eq!(approval.payload["risk"], "network");
+        assert_eq!(approval.payload["command"], "npm install");
+        assert_eq!(approval.payload["cwd"], ".");
         assert_eq!(
             approval.payload["riskReasons"],
             json!(["dependency install/update"])
@@ -2474,6 +2633,74 @@ mod tests {
                 .iter()
                 .any(|event| event.event_type == "tool.started")
         );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_includes_previous_shell_output_summary_in_next_shell_approval() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_shell_output_summary")
+            .expect("run should be created");
+        #[cfg(windows)]
+        let first_command = "Write-Output first; Write-Output second";
+        #[cfg(not(windows))]
+        let first_command = "printf 'first\\nsecond\\n'";
+        #[cfg(windows)]
+        let second_command = "Write-Output done";
+        #[cfg(not(windows))]
+        let second_command = "printf done";
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("Run two commands.".to_owned()),
+                vec![
+                    ChatToolCall::function(
+                        "call_shell_1",
+                        "shell",
+                        json!({
+                            "command": first_command,
+                            "timeoutMs": 10_000
+                        })
+                        .to_string(),
+                    ),
+                    ChatToolCall::function(
+                        "call_shell_2",
+                        "shell",
+                        json!({
+                            "command": second_command,
+                            "timeoutMs": 10_000
+                        })
+                        .to_string(),
+                    ),
+                ],
+            ),
+            TurnProviderResponse::final_text("Commands finished."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
+                .expect("turn loop should initialize");
+
+        loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Run two commands"), &mut run)
+            .await
+            .expect("approved shell commands should complete");
+
+        let events = store
+            .load_run("run_turn_shell_output_summary")
+            .expect("events should load");
+        let approvals = events
+            .iter()
+            .filter(|event| event.event_type == "tool.approvalRequired")
+            .collect::<Vec<_>>();
+        assert_eq!(approvals.len(), 2);
+        assert!(approvals[0].payload.get("outputSummary").is_none());
+        let output_summary = approvals[1].payload["outputSummary"]
+            .as_str()
+            .expect("second approval should include previous shell output summary");
+        assert!(output_summary.contains("exitCode: 0"));
+        assert!(output_summary.contains("stdout:"));
+        assert!(output_summary.contains("second"));
     }
 
     #[tokio::test]
@@ -2573,6 +2800,76 @@ mod tests {
             .find(|event| event.event_type == "run.completed")
             .expect("run should complete");
         assert_eq!(completed.payload["changedFiles"], json!(["README.md"]));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_applies_only_approved_patch_hunks() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "one\nold\nthree\n\nkeep\nremove\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_patch_hunks")
+            .expect("run should be created");
+        let patch = concat!(
+            "--- a/README.md\n",
+            "+++ b/README.md\n",
+            "@@ -1,3 +1,3 @@\n",
+            " one\n",
+            "-old\n",
+            "+new\n",
+            " three\n",
+            "@@ -5,2 +5,3 @@\n",
+            " keep\n",
+            "+insert\n",
+            " remove\n",
+        );
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should edit the README.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_1",
+                    "apply_patch",
+                    json!({
+                        "unifiedDiff": patch,
+                        "expectedFiles": ["README.md"],
+                    })
+                    .to_string(),
+                )],
+            ),
+            TurnProviderResponse::final_text("Updated README."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, HunkApprovePolicy)
+                .expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
+            .await
+            .expect("hunk-approved patch should complete");
+
+        assert_eq!(
+            workspace.read("README.md"),
+            "one\nold\nthree\n\nkeep\ninsert\nremove\n"
+        );
+        assert_eq!(outcome.changed_files, vec!["README.md"]);
+        let events = store
+            .load_run("run_turn_patch_hunks")
+            .expect("events should load");
+        let required = events
+            .iter()
+            .find(|event| event.event_type == "tool.approvalRequired")
+            .expect("approval should be required");
+        assert_eq!(required.payload["hunks"].as_array().map(Vec::len), Some(2));
+        let resolved = events
+            .iter()
+            .find(|event| event.event_type == "tool.approvalResolved")
+            .expect("approval should resolve");
+        assert_eq!(resolved.payload["hunks"]["scope"], "selected");
+        assert_eq!(
+            resolved.payload["hunks"]["approved"],
+            json!(["README.md#2:old5+2:new5+3"])
+        );
     }
 
     #[tokio::test]
@@ -2804,6 +3101,21 @@ mod tests {
     struct ScriptedProvider {
         responses: VecDeque<TurnProviderResponse>,
         requests: Vec<TurnProviderRequest>,
+    }
+
+    struct HunkApprovePolicy;
+
+    impl ApprovalPolicy for HunkApprovePolicy {
+        fn decide(
+            &mut self,
+            request: &TurnApprovalRequest,
+        ) -> Result<ApprovalDecision, ApprovalPolicyError> {
+            assert_eq!(request.tool_name, "apply_patch");
+            assert_eq!(request.hunks.as_ref().map(Vec::len), Some(2));
+            Ok(ApprovalDecision::ApprovedHunks {
+                hunk_ids: vec!["README.md#2:old5+2:new5+3".to_owned()],
+            })
+        }
     }
 
     impl ScriptedProvider {

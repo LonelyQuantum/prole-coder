@@ -1,12 +1,13 @@
 # DeepSeek API Adapter
 
-状态：草案，Phase 1 基础实现已完成。
+状态：草案，Phase 1 基础实现和 Phase 4 FIM preview 边界已完成。
 
 本文档定义 `ProleCoder` 访问 DeepSeek API 的 Rust adapter。它属于 Agent Core 的 provider 边界，不直接处理 UI、审批、工具执行或 run log。
 
 ## 目标
 
 - 使用 DeepSeek API 调用 `chat/completions`。
+- 使用 DeepSeek beta FIM completion endpoint 支持编辑器 completion preview。
 - 默认支持 `deepseek-v4-pro`，同时保留 `deepseek-v4-flash`。
 - 显式表示 `thinking`、`reasoning_effort`、`reasoning_content`、tool calls、usage 和 cache token 字段。
 - 保持请求和响应类型的表达性，使未来适配不同 provider、私有部署或兼容协议时不丢失语义。
@@ -35,6 +36,20 @@ Chat Completions endpoint：
 ```text
 POST /chat/completions
 ```
+
+FIM Completion 默认 base URL：
+
+```text
+https://api.deepseek.com/beta
+```
+
+FIM Completion endpoint：
+
+```text
+POST /completions
+```
+
+FIM 请求使用 `prompt` 作为 cursor 前缀，`suffix` 作为 cursor 后缀，`stream` 固定为 `false`。VS Code inline completion 会通过 RPC `agent.previewFim` 请求该路径；前端只在 server capability 明确标记模型 `supportsFim` 时发送请求。当前 DeepSeek chat 与 beta FIM endpoint 使用同一个 `DEEPSEEK_API_KEY`，只在默认 base URL 上区分 `https://api.deepseek.com` 与 `https://api.deepseek.com/beta`。
 
 当前主要模型：
 
@@ -81,6 +96,8 @@ crates/agent-core/src/provider/deepseek_api.rs
 - `ChatCompletionResponse`：非流式响应。
 - `ChatCompletionChunk`：流式 chunk。
 - `ChatCompletionStream`：HTTP streaming 响应转换后的事件流。
+- `FimCompletionRequest`：DeepSeek FIM 请求体，包含 `model`、`prompt`、可选 `suffix`、可选 `max_tokens`，并默认 `stream = false`。
+- `FimCompletionResponse` / `FimCompletionChoice`：FIM 非流式响应和 text choice。
 - `SseEventParser`：增量解析 SSE byte chunks。
 - `StreamEvent`：`Chunk` 或 `Done`。
 - `parse_stream_event_block`：解析单个 SSE event block。
@@ -119,7 +136,7 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 DEEPSEEK_MODEL=deepseek-v4-pro
 ```
 
-运行时 adapter 仍然从 `DEEPSEEK_API_KEY` 读取密钥。真实联网测试额外支持测试专用的 `PROLE_CODER_DEEPSEEK_API_KEY` 和 `.secrets/deepseek-api-key` 本地密钥文件；这个文件只放 API Key，不放 base URL 或模型名。测试侧读取优先级为 `PROLE_CODER_DEEPSEEK_API_KEY`、`DEEPSEEK_API_KEY`、`.secrets/deepseek-api-key`。`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_MODEL` 有项目默认值，也可以在外部测试配置或当前 shell 环境变量中选择。
+运行时 adapter 仍然从 `DEEPSEEK_API_KEY` 读取密钥，chat completion 与 FIM preview 共用这个密钥。真实联网测试额外支持测试专用的 `PROLE_CODER_DEEPSEEK_API_KEY` 和 `.secrets/deepseek-api-key` 本地密钥文件；这个文件只放 API Key，不放 base URL 或模型名。测试侧读取优先级为 `PROLE_CODER_DEEPSEEK_API_KEY`、`DEEPSEEK_API_KEY`、`.secrets/deepseek-api-key`。`DEEPSEEK_BASE_URL` 和 `DEEPSEEK_MODEL` 有项目默认值，也可以在外部测试配置或当前 shell 环境变量中选择。
 
 ## 错误处理
 
@@ -129,6 +146,8 @@ adapter 使用显式错误枚举：
 - base URL 无效。
 - 模型 ID 为空。
 - 请求消息为空。
+- FIM prefix 为空。
+- FIM `max_tokens` 超出 1 到 4096 的边界。
 - 非流式调用收到 streaming request。
 - HTTP 发送失败。
 - DeepSeek 返回非 2xx 状态。
@@ -201,7 +220,7 @@ cargo test -p prole-coder-agent-core --test deepseek_api_live -- --ignored --noc
 
 ## 后续增强
 
-- 抽象 provider capability model，显式表达 thinking、tool_choice、FIM、stream usage、cache usage、最大上下文和最大输出长度等能力，而不是把规则散落在调用处。
+- Provider capability model 已通过 Phase 4 P4-3 显式表达 thinking、tool_choice、FIM、stream usage、cache usage、最大上下文和最大输出长度；后续如模型真实能力变化，应先更新 capability data contract，再更新 UI 行为。
 - 增加更细的错误分类，用于区分认证失败、限速、无效参数、服务端错误、网络中断和被截断的 stream；分类只用于明确提示和重试决策，不做静默兜底。
 - 继续收集不同模型、不同工具 schema 和 thinking/tool-call 组合下的 streaming delta 形态，必要时补更细的兼容性测试。
 - Phase 2c 已增加针对 cache usage 字段的离线测试、ignored live cache usage 实验入口，以及 `provider.completed` 上下文缓存统计记录。
@@ -214,6 +233,7 @@ cargo test -p prole-coder-agent-core --test deepseek_api_live -- --ignored --noc
 
 - DeepSeek API 首次调用：https://api-docs.deepseek.com/zh-cn/
 - DeepSeek Chat Completions：https://api-docs.deepseek.com/api/create-chat-completion
+- DeepSeek FIM Completion：https://api-docs.deepseek.com/zh-cn/guides/fim_completion
 - DeepSeek 思考模式：https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
 - DeepSeek 模型与价格：https://api-docs.deepseek.com/quick_start/pricing/
 - DeepSeek 限速说明：https://api-docs.deepseek.com/quick_start/rate_limit/

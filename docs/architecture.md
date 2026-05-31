@@ -62,7 +62,7 @@ TypeScript workspace：
 
 ## 后续增强
 
-- 深化 VS Code 插件能力，补齐 alpha VSIX 打包、FIM/diagnostics 等 Phase 4 集成；TUI 后续复用同一 RPC 管线。
+- Phase 4 已完成 VS Code 深度集成、alpha VSIX 打包、FIM/diagnostics 和 extension-host E2E；TUI 后续复用同一 RPC 管线。
 - 扩展 `crates/agent-rpc`，支持多 active run、输出节流和更细的事件 payload schema。
 - 明确 `.prole-coder/` 本地状态的目录结构、版本迁移策略和脱敏规则。
 - 增加端到端测试，覆盖 CLI/TUI/VS Code 对同一任务产生一致 run log 的能力。

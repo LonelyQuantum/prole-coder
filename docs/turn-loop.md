@@ -1,6 +1,6 @@
 # Agent Turn Loop
 
-状态：Phase 1 基础编排、TurnProvider async / streaming 边界、真实 DeepSeek 文本 streaming 联网验收、streaming tool call 增量拼装验证、基础 RPC 事件桥接、双向 request loop、真实 RPC Turn Loop handler、`TurnEventSink` 实时事件输出、CLI 交互式审批、CLI JSON-RPC 错误输出、RPC pending approval 等待队列、审批超时、取消语义、provider/tool 协作式取消信号、Run Log 写入串行化、Run summary metadata 和 tool call JSON Schema 预校验已实现；Phase 3 已完成 RPC 全双工事件队列、VS Code Chat/审批/Run List/Context Viz 接入和命令子进程树清理。TUI 真实 RPC UI 仍在后续阶段。
+状态：Phase 1 基础编排、TurnProvider async / streaming 边界、真实 DeepSeek 文本 streaming 联网验收、streaming tool call 增量拼装验证、基础 RPC 事件桥接、双向 request loop、真实 RPC Turn Loop handler、`TurnEventSink` 实时事件输出、CLI 交互式审批、CLI JSON-RPC 错误输出、RPC pending approval 等待队列、审批超时、取消语义、provider/tool 协作式取消信号、Run Log 写入串行化、Run summary metadata 和 tool call JSON Schema 预校验已实现；Phase 3 已完成 RPC 全双工事件队列、VS Code Chat/审批/Run List/Context Viz 接入和命令子进程树清理；Phase 4 已将 `provider.requested`、`tool.completed`、`run.completed` 纳入共享事件 payload fixture。TUI 真实 RPC UI 仍在后续阶段。
 
 Agent Turn Loop 是 Agent Core 的回合编排层。它负责把已经实现的 Context Builder、`reasoning_content` 状态机、provider 边界、工具执行、审批和 Run Log 串成同一条可复现事件流。
 

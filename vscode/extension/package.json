@@ -15,7 +15,9 @@
   "activationEvents": [
     "onStartupFinished",
     "onCommand:prole-coder.openChat",
-    "onView:prole-coder.chat"
+    "onCommand:prole-coder.openSettings",
+    "onView:prole-coder.chat",
+    "onChatParticipant:prole-coder.chatParticipant"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -23,6 +25,37 @@
       {
         "command": "prole-coder.openChat",
         "title": "ProleCoder: Open Chat"
+      },
+      {
+        "command": "prole-coder.openSettings",
+        "title": "ProleCoder: Open Settings"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "prole-coder.chatParticipant",
+        "name": "prole",
+        "fullName": "ProleCoder",
+        "description": "Use ProleCoder from the native VS Code Chat sidebar.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "edit",
+            "description": "Ask ProleCoder to make workspace changes."
+          },
+          {
+            "name": "ask",
+            "description": "Ask about the workspace without editing."
+          },
+          {
+            "name": "plan",
+            "description": "Plan a change before editing."
+          },
+          {
+            "name": "review",
+            "description": "Review the current code."
+          }
+        ]
       }
     ],
     "viewsContainers": {
@@ -63,6 +96,30 @@
             "type": "string"
           },
           "description": "Arguments passed to the Rust Agent RPC server command."
+        },
+        "prole-coder.fim.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable ProleCoder inline FIM completion previews when the connected RPC server reports FIM-capable provider data."
+        },
+        "prole-coder.fim.model": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model id for FIM previews. Leave empty to use the RPC server default model from provider capabilities."
+        },
+        "prole-coder.fim.maxTokens": {
+          "type": "integer",
+          "default": 128,
+          "minimum": 1,
+          "maximum": 4096,
+          "description": "Maximum completion tokens requested for FIM previews."
+        },
+        "prole-coder.fim.maxContextChars": {
+          "type": "integer",
+          "default": 12000,
+          "minimum": 1000,
+          "maximum": 100000,
+          "description": "Maximum prefix and suffix characters sent to the RPC server for a FIM preview."
         }
       }
     }
@@ -71,6 +128,9 @@
     "build": "pnpm --filter @prole-coder/protocol build && tsc -p tsconfig.json",
     "lint": "pnpm --filter @prole-coder/protocol build && tsc -p tsconfig.test.json --noEmit",
     "package": "vsce package",
+    "test:electron": "pnpm run build && tsc -p tsconfig.test.json && node scripts/runVscodeIntegrationTests.mjs",
+    "vsix:alpha": "pnpm run build && node scripts/packageAlphaVsix.mjs",
+    "vsix:smoke": "pnpm run build && node scripts/vsixDryRunSmoke.mjs",
     "test": "pnpm --filter @prole-coder/protocol build && tsc -p tsconfig.test.json && node --test \"out-test/**/*.test.js\"",
     "typecheck": "pnpm --filter @prole-coder/protocol build && tsc -p tsconfig.json --noEmit"
   },

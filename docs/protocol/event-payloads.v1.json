@@ -1,0 +1,74 @@
+{
+  "version": "0.1.0",
+  "scope": "Phase 4 fixture alignment covers stable event payload protocol surfaces that Rust and TypeScript both validate.",
+  "events": [
+    {
+      "type": "provider.requested",
+      "payloadName": "ProviderRequestedPayload",
+      "required": ["iteration", "messageCount", "reasoningState"],
+      "properties": {
+        "iteration": "number",
+        "messageCount": "number",
+        "reasoningState": "object"
+      }
+    },
+    {
+      "type": "tool.completed",
+      "payloadName": "ToolCompletedPayload",
+      "required": ["toolCallId", "name", "status", "summary", "result"],
+      "properties": {
+        "toolCallId": "string",
+        "name": "string",
+        "status": "ok|failed",
+        "summary": "string",
+        "result": "object"
+      }
+    },
+    {
+      "type": "run.completed",
+      "payloadName": "RunCompletedPayload",
+      "required": ["summary", "changedFiles", "verificationStatus"],
+      "properties": {
+        "summary": "string",
+        "changedFiles": "array<string>",
+        "verificationStatus": "passed|failed|skipped"
+      }
+    },
+    {
+      "type": "tool.approvalRequired",
+      "payloadName": "ToolApprovalRequiredPayload",
+      "required": [
+        "approvalId",
+        "toolCallId",
+        "toolName",
+        "risk",
+        "title",
+        "detail",
+        "persistable"
+      ],
+      "properties": {
+        "approvalId": "string",
+        "toolCallId": "string",
+        "toolName": "ToolName",
+        "risk": "RiskLevel",
+        "title": "string",
+        "detail": "string",
+        "paths": "array<string>",
+        "hunks": "array<PatchApprovalHunk>",
+        "persistable": "boolean"
+      }
+    },
+    {
+      "type": "tool.approvalResolved",
+      "payloadName": "ToolApprovalResolvedPayload",
+      "required": ["approvalId", "toolCallId", "toolName", "decision"],
+      "properties": {
+        "approvalId": "string",
+        "toolCallId": "string",
+        "toolName": "ToolName",
+        "decision": "approved|rejected|canceled|expired",
+        "hunks": "all|selected"
+      }
+    }
+  ]
+}

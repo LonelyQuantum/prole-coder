@@ -68,7 +68,7 @@ Phase 2a/2b/2c 已把基础 builder 升级为结构化 `ContextCapsule`：先构
 
 Phase 1 已实现 `WorkspaceToolExecutor`，作为 workspace_manifest/read/search/apply_patch/shell/git 工具的基础执行层。它负责 workspace 路径解析、敏感路径拒绝、命令超时和结构化工具结果。详细设计见 `docs/tool-system.md`。
 
-当前执行层已接入基础 Agent Turn Loop，可以跑通“模型请求工具 -> 请求审批 -> 记录审批决定 -> 执行工具 -> 写入 run log -> 继续下一轮模型调用”的 fake provider 集成测试。RPC handler 已能在 `tool.approvalRequired` 处等待 `agent.approve` / `agent.reject` / `agent.cancel` 或审批超时，并能通过 `CancellationToken` 协作式取消 provider request 和命令类工具。Phase 2d 已加入 tool call JSON Schema 预校验：模型 arguments 会先解析为 `serde_json::Value` 并按工具注册表 schema 校验，再进入 Rust typed deserialization、审批和执行。Phase 3 已加入 shell 命令风险分类器，在审批前识别依赖安装、网络访问、远程 git、删除、reset 和发布等高风险操作并升级风险；命令类工具取消或超时时也会清理子进程树。尚未完成的是更强 sandbox。
+当前执行层已接入基础 Agent Turn Loop，可以跑通“模型请求工具 -> 请求审批 -> 记录审批决定 -> 执行工具 -> 写入 run log -> 继续下一轮模型调用”的 fake provider 集成测试。RPC handler 已能在 `tool.approvalRequired` 处复用 session/workspace 持久批准，或等待 `agent.approve` / `agent.reject` / `agent.cancel` / 审批超时，并能通过 `CancellationToken` 协作式取消 provider request 和命令类工具。Phase 2d 已加入 tool call JSON Schema 预校验：模型 arguments 会先解析为 `serde_json::Value` 并按工具注册表 schema 校验，再进入 Rust typed deserialization、审批和执行。Phase 3 已加入 shell 命令风险分类器，在审批前识别依赖安装、网络访问、远程 git、删除、reset 和发布等高风险操作并升级风险；Phase 4 已让 shell 审批 payload 携带命令、cwd 和上一条 shell 输出摘要。命令类工具取消或超时时会清理子进程树。尚未完成的是更强 sandbox。
 
 ## Run Log
 

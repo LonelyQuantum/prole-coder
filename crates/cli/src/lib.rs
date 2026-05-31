@@ -15,8 +15,8 @@ use prole_coder_agent_core::{
     context::ContextBuildError,
     provider::deepseek_api::{
         ChatCompletionStream, ChatFunctionDefinition, ChatTool, ChatToolCall,
-        ChatToolCallAccumulator, DeepSeekApiAdapter, DeepSeekApiConfig, FinishReason, StreamEvent,
-        ThinkingConfig, Usage,
+        ChatToolCallAccumulator, DeepSeekApiAdapter, DeepSeekApiConfig, DeepSeekModelId,
+        FimCompletionRequest, FinishReason, StreamEvent, ThinkingConfig, Usage,
     },
     reasoning::ReasoningContentMode,
     run_log::{RunLog, RunLogError, RunLogStore},
@@ -36,12 +36,12 @@ use prole_coder_agent_core::{
     },
 };
 use prole_coder_agent_rpc::{
-    AgentRpcError, AgentRpcHandlerError, AgentTurnLoopRpcHandler, JSON_RPC_INTERNAL_ERROR,
-    JSON_RPC_INVALID_PARAMS, JsonRpcErrorObject, JsonRpcErrorResponse, RPC_APPROVAL_DENIED,
-    RPC_CONTEXT_BUDGET_EXCEEDED, RPC_INTERNAL_INVARIANT, RPC_INVALID_TOOL_ARGUMENTS,
-    RPC_PROVIDER_ERROR, RPC_RUN_ALREADY_ACTIVE, RPC_RUN_CANCELED, RPC_RUN_NOT_FOUND,
-    RPC_TOOL_EXECUTION_FAILED, RpcTurnProviderFactory, SendTurnParams, StdioEventBridge,
-    run_stdio_request_loop,
+    AgentRpcError, AgentRpcHandlerError, AgentTurnLoopRpcHandler, FimPreviewParams,
+    FimPreviewResult, JSON_RPC_INTERNAL_ERROR, JSON_RPC_INVALID_PARAMS, JsonRpcErrorObject,
+    JsonRpcErrorResponse, RPC_APPROVAL_DENIED, RPC_CONTEXT_BUDGET_EXCEEDED, RPC_INTERNAL_INVARIANT,
+    RPC_INVALID_TOOL_ARGUMENTS, RPC_PROVIDER_ERROR, RPC_RUN_ALREADY_ACTIVE, RPC_RUN_CANCELED,
+    RPC_RUN_NOT_FOUND, RPC_TOOL_EXECUTION_FAILED, RpcTurnProviderFactory, SendTurnParams,
+    StdioEventBridge, run_stdio_request_loop,
 };
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -988,6 +988,75 @@ impl RpcTurnProviderFactory for CliRpcProviderFactory {
         )
         .map_err(|error| AgentRpcHandlerError::new(RPC_INTERNAL_INVARIANT, error.to_string()))
     }
+
+    fn preview_fim(
+        &mut self,
+        params: &FimPreviewParams,
+    ) -> Result<FimPreviewResult, AgentRpcHandlerError> {
+        match self.provider {
+            ProviderKind::Fixture => Ok(FimPreviewResult {
+                text: fixture_fim_preview_text(params),
+                model: params
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "fixture-fim".to_owned()),
+                finish_reason: Some("stop".to_owned()),
+            }),
+            ProviderKind::DeepSeek => deepseek_fim_preview(params),
+        }
+    }
+}
+
+fn fixture_fim_preview_text(params: &FimPreviewParams) -> String {
+    if params.language_id.as_deref() == Some("rust") {
+        " println!(\"prole fixture\");".to_owned()
+    } else {
+        " prole fixture completion".to_owned()
+    }
+}
+
+fn deepseek_fim_preview(
+    params: &FimPreviewParams,
+) -> Result<FimPreviewResult, AgentRpcHandlerError> {
+    let config = DeepSeekApiConfig::from_env_for_fim()
+        .map_err(|error| AgentRpcHandlerError::new(RPC_PROVIDER_ERROR, error.to_string()))?;
+    let adapter = DeepSeekApiAdapter::new(config)
+        .map_err(|error| AgentRpcHandlerError::new(RPC_PROVIDER_ERROR, error.to_string()))?;
+    let model = params
+        .model
+        .clone()
+        .unwrap_or_else(|| adapter.config().model().to_string());
+    let model_id = DeepSeekModelId::new(model.clone())
+        .map_err(|error| AgentRpcHandlerError::new(RPC_PROVIDER_ERROR, error.to_string()))?;
+    let mut request = FimCompletionRequest::new(model_id, params.prefix.clone())
+        .map_err(|error| AgentRpcHandlerError::new(RPC_PROVIDER_ERROR, error.to_string()))?;
+    if let Some(suffix) = &params.suffix {
+        request = request.with_suffix(suffix.clone());
+    }
+    if let Some(max_tokens) = params.max_tokens {
+        request = request.with_max_tokens(max_tokens);
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .thread_name("prole-coder-fim")
+        .build()
+        .map_err(|error| AgentRpcHandlerError::new(RPC_INTERNAL_INVARIANT, error.to_string()))?;
+    let response = runtime
+        .block_on(adapter.create_fim_completion(request))
+        .map_err(|error| AgentRpcHandlerError::new(RPC_PROVIDER_ERROR, error.to_string()))?;
+    let first_choice = response.choices.first().ok_or_else(|| {
+        AgentRpcHandlerError::new(
+            RPC_PROVIDER_ERROR,
+            "DeepSeek FIM response did not include any completion choices",
+        )
+    })?;
+
+    Ok(FimPreviewResult {
+        text: first_choice.text.clone(),
+        model: response.model,
+        finish_reason: first_choice.finish_reason.clone().map(finish_reason_label),
+    })
 }
 
 #[derive(Debug)]
@@ -1168,6 +1237,17 @@ fn turn_provider_finish_reason_from_deepseek(reason: FinishReason) -> TurnProvid
         FinishReason::ContentFilter => TurnProviderFinishReason::ContentFilter,
         FinishReason::InsufficientSystemResource => TurnProviderFinishReason::Error,
     }
+}
+
+fn finish_reason_label(reason: FinishReason) -> String {
+    match reason {
+        FinishReason::Stop => "stop",
+        FinishReason::Length => "length",
+        FinishReason::ToolCalls => "tool_calls",
+        FinishReason::ContentFilter => "content_filter",
+        FinishReason::InsufficientSystemResource => "insufficient_system_resource",
+    }
+    .to_owned()
 }
 
 fn turn_provider_usage_from_deepseek(usage: Usage) -> TurnProviderUsage {
@@ -1465,7 +1545,10 @@ mod tests {
         test_helpers::TestWorkspace,
         turn_loop::TurnProviderEvent,
     };
-    use prole_coder_agent_rpc::{PROTOCOL_VERSION, RPC_APPROVAL_DENIED, RPC_TOOL_EXECUTION_FAILED};
+    use prole_coder_agent_rpc::{
+        FimPreviewParams, PROTOCOL_VERSION, RPC_APPROVAL_DENIED, RPC_TOOL_EXECUTION_FAILED,
+        RpcTurnProviderFactory,
+    };
     use serde_json::{Value, json};
     use std::{
         io::{self, Read, Write},
@@ -1475,8 +1558,8 @@ mod tests {
     };
 
     use super::{
-        CliCommand, ProviderKind, RunCommand, deepseek_chat_stream_to_turn_provider_stream,
-        run_cli, run_cli_with_input,
+        CliCommand, CliRpcProviderFactory, FixtureKind, ProviderKind, RunCommand, ThinkingKind,
+        deepseek_chat_stream_to_turn_provider_stream, run_cli, run_cli_with_input,
     };
 
     #[test]
@@ -1957,6 +2040,30 @@ mod tests {
                 .iter()
                 .any(|event| event.event_type == "run.completed")
         );
+    }
+
+    #[test]
+    fn fixture_rpc_provider_factory_returns_fim_preview() {
+        let mut factory = CliRpcProviderFactory {
+            provider: ProviderKind::Fixture,
+            fixture: FixtureKind::Final,
+            max_output_tokens: 32,
+            thinking: ThinkingKind::Enabled,
+        };
+
+        let result = factory
+            .preview_fim(&FimPreviewParams {
+                prefix: "fn main() {".to_owned(),
+                suffix: Some("}".to_owned()),
+                path: Some("src/main.rs".to_owned()),
+                language_id: Some("rust".to_owned()),
+                model: None,
+                max_tokens: Some(32),
+            })
+            .expect("fixture FIM preview should be available");
+
+        assert_eq!(result.model, "fixture-fim");
+        assert!(result.text.contains("prole fixture"));
     }
 
     type InteractiveCliRpc = (

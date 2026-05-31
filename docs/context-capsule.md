@@ -1,6 +1,6 @@
 # 上下文胶囊（Context Capsule）
 
-状态：草案，Phase 1 基础 Context Builder 已实现；Phase 2a/2b/2c/2d 已完成；Phase 3 的 VS Code/RPC 事件消费与 Context Capsule 可视化已完成首版。
+状态：草案，Phase 1 基础 Context Builder 已实现；Phase 2a/2b/2c/2d 已完成；Phase 3 的 VS Code/RPC 事件消费与 Context Capsule 可视化已完成首版；Phase 4 已补齐 VS Code Sidebar Chat 与原生 `@prole` Chat Participant 的自动上下文压缩 attachment。
 
 Context Capsule 是一次模型回合的结构化输入包。它面向 DeepSeek 的长上下文和上下文缓存能力设计。
 
@@ -196,7 +196,7 @@ Context Capsule 不直接扫描工作区，而是消费工具系统和 run log �
 - `workspace_manifest` 提供稳定文件骨架、摘要、manifest hash、git state / object id、风险标记和 `max_entries_exceeded` 截断原因。
 - `git_status` / `git_diff` 提供当前工作区变化摘要。
 - `read_file` 和 `search` 提供已审计的文件片段与来源路径；`read_file` 已返回完整文件的 `sha256` 和 `sizeBytes`，供 manifest 和工具结果一致性校验使用。
-- `agent.sendTurn.attachments` 现在直接进入 Context Builder：file attachment 由 Core 读取并继承 `read_file` 安全边界；selection、explicit_content 和 diagnostic 使用前端提供文本，但会做数量、大小、重复来源、路径和 range 校验。
+- `agent.sendTurn.attachments` 现在直接进入 Context Builder：file attachment 由 Core 读取并继承 `read_file` 安全边界；selection、explicit_content 和 diagnostic 使用前端提供文本，但会做数量、大小、重复来源、路径和 range 校验。VS Code 插件已在发送 turn 时把 Problems 面板快照转换为 diagnostic attachments，并按协议 attachment 上限优先保留 error；Sidebar Chat 与原生 `@prole` Chat Participant 还会把历史对话/事件摘要压缩为受限长度的 `explicit_content` attachment，且 Sidebar timeline 单条消息在压缩前先限长，让连续对话自然承接上下文。
 - `lsp_diagnostics` 提供编辑器或语言服务器诊断。
 - 工具结果进入上下文前必须经过脱敏、大小限制和来源标注；Run Log 会对超长字符串和数组写入 `runLogTruncation`，让前端区分空输出、缺失字段和被截断输出。
 

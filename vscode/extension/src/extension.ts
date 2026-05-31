@@ -1,23 +1,51 @@
 import * as vscode from "vscode";
 
-import { ApprovalEventController } from "./approvalFlow";
+import { ApprovalEventController, type ApprovalRequester } from "./approvalFlow";
+import { registerProleChatParticipant } from "./chatParticipant";
 import { CHAT_VIEW_ID, ProleChatViewProvider } from "./chatView";
-import { registerOpenChatCommand } from "./commands";
+import {
+  type ChatViewOpener,
+  registerOpenChatCommand,
+  registerOpenSettingsCommand,
+} from "./commands";
 import { createPatchDiffPreviewController } from "./diffPreview";
+import { registerFimInlineCompletionProvider } from "./fimPreviewVscode";
 import { RpcServerManager, readRpcServerLaunchConfig } from "./rpcServer";
 
 export function activate(context: vscode.ExtensionContext): void {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   const rpcServer = createRpcServerManager(context);
-  const chatView = new ProleChatViewProvider(context.extensionUri, rpcServer);
-  const openChat = registerOpenChatCommand(vscode.commands, vscode.window, rpcServer, chatView);
+  const chatView = new ProleChatViewProvider(context.extensionUri, rpcServer, workspaceRoot);
+  const chatParticipant = registerProleChatParticipant(context, rpcServer, workspaceRoot);
+  const openChat = registerOpenChatCommand(
+    vscode.commands,
+    vscode.window,
+    rpcServer,
+    nativeChatOpener(chatView),
+  );
+  const openSettings = registerOpenSettingsCommand(
+    vscode.commands,
+    {
+      showInformationMessage(message) {
+        return vscode.window.showInformationMessage(message);
+      },
+      showWarningMessage(message) {
+        return vscode.window.showWarningMessage(message);
+      },
+      openSettings(query) {
+        return vscode.commands.executeCommand("workbench.action.openSettings", query);
+      },
+    },
+    rpcServer,
+  );
   const chatViewRegistration = vscode.window.registerWebviewViewProvider(CHAT_VIEW_ID, chatView, {
     webviewOptions: {
       retainContextWhenHidden: true,
     },
   });
 
-  context.subscriptions.push(openChat, chatView, chatViewRegistration);
+  context.subscriptions.push(openChat, openSettings, chatView, chatViewRegistration, chatParticipant);
+  registerTestCommands(context, chatView);
   if (rpcServer !== undefined && workspaceRoot !== undefined) {
     const patchDiffPreviewController = createPatchDiffPreviewController(context, rpcServer, workspaceRoot);
     const approvalController = new ApprovalEventController(
@@ -28,10 +56,11 @@ export function activate(context: vscode.ExtensionContext): void {
           return vscode.window.showWarningMessage(message);
         },
       },
-      undefined,
+      testApprovalRequester(context),
       patchDiffPreviewController,
     );
     context.subscriptions.push(patchDiffPreviewController, approvalController);
+    context.subscriptions.push(registerFimInlineCompletionProvider(rpcServer));
     context.subscriptions.push(rpcServer);
     if (rpcServer.autoStart) {
       void rpcServer.start().catch((error: unknown) => {
@@ -78,4 +107,47 @@ function extensionVersion(context: vscode.ExtensionContext): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function nativeChatOpener(fallback: ChatViewOpener): ChatViewOpener {
+  return {
+    async openChatView() {
+      try {
+        return await vscode.commands.executeCommand("workbench.action.chat.open", {
+          query: "@prole ",
+          isPartialQuery: true,
+        });
+      } catch {
+        return fallback.openChatView();
+      }
+    },
+  };
+}
+
+function registerTestCommands(context: vscode.ExtensionContext, chatView: ProleChatViewProvider): void {
+  if (context.extensionMode !== vscode.ExtensionMode.Test || process.env["PROLE_CODER_VSCODE_TEST"] !== "1") {
+    return;
+  }
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("prole-coder.test.chatMessage", (message: unknown) =>
+      chatView.testHandleWebviewMessage(message),
+    ),
+    vscode.commands.registerCommand("prole-coder.test.chatState", () => chatView.testState()),
+  );
+}
+
+function testApprovalRequester(context: vscode.ExtensionContext): ApprovalRequester | undefined {
+  if (
+    context.extensionMode !== vscode.ExtensionMode.Test ||
+    process.env["PROLE_CODER_VSCODE_TEST_AUTO_APPROVE"] !== "1"
+  ) {
+    return undefined;
+  }
+
+  return async (_window, request) => ({
+    kind: "approve",
+    approvalId: request.approvalId,
+    persist: "never",
+  });
 }

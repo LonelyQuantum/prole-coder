@@ -48,6 +48,35 @@
 
 默认 CI 当前通过 `pnpm run check` 执行。`search` 工具测试会执行 `rg`，因此本机和 CI 都需要安装 ripgrep。
 
+## Phase 4 VS Code extension-host E2E
+
+Phase 4 P4-14 的确定性 VS Code 端到端入口：
+
+```powershell
+pnpm run vscode:test-electron
+```
+
+该命令会构建 protocol 与 extension，编译 `test/electron/index.ts`，再用 `@vscode/test-electron` 启动隔离的 VS Code test host。`vscode/extension/scripts/runVscodeIntegrationTests.mjs` 会为每轮测试创建独立 `target/vscode-test-user-data-*` 和 `target/vscode-test-extensions-*` profile，避免本机 VS Code 状态或上一轮测试 mutex 影响结果。
+
+测试工作区使用本地 JSON-RPC fixture server，不联网、不读取 API key，也不依赖全局 `prole` 命令。覆盖范围：
+
+- extension activation、trusted workspace、Chat view focus 和命令注册。
+- Chat submit turn 通过真实 `RpcServerManager.sendTurn()` 进入 fixture RPC server。
+- Problems diagnostics 被采集为 `agent.sendTurn.attachments` 的 diagnostic attachment。
+- `tool.approvalRequired` 经过 test-only auto approval requester 回传为真实 `agent.approve`。
+- Chat Cancel UI 边界通过真实 `agent.cancel` 请求收口。
+- Run List refresh 和 `agent.resume` replay 通过同一 `agent.event` 渲染路径更新 timeline。
+
+test-only command 和 auto approval 同时要求 VS Code `ExtensionMode.Test` 以及 `PROLE_CODER_VSCODE_TEST=1` / `PROLE_CODER_VSCODE_TEST_AUTO_APPROVE=1` 环境变量，普通扩展激活不会注册这些测试入口。
+
+P4-15 到 P4-18 的 Codex-like UX 收敛继续复用这条 extension-host 入口，并补齐以下确定性覆盖：
+
+- `automaticContext.test.ts` 覆盖历史对话压缩、字符预算裁剪、空历史跳过、Sidebar timeline 转换、单条 timeline 消息限长和 attachment 上限合并。
+- `chatParticipantCore.test.ts` 覆盖原生 `@prole` Chat Participant turn runner、命令到 run mode 的映射、sendTurn response 前早到事件缓冲、assistant delta streaming、缺少 RPC client 的错误和自动上下文进度提示。
+- `commands.test.ts` 覆盖简化后的审批 choices：主弹窗只暴露 `Approve` / `Reject`，`Approve` 映射一次性批准，`apply_patch` 多 hunk 走 `Select Hunks`。
+- `test/electron/index.ts` 覆盖 VS Code manifest 中的 `contributes.chatParticipants`，并通过 `ProleCoder: Open Chat` 入口验证原生 Chat 入口不会依赖手动拖动 Activity Bar view。
+- `pnpm run vsix:smoke` 和 `pnpm run vsix:alpha` 会校验 VSIX manifest 中的 `onChatParticipant:prole-coder.chatParticipant` activation event 以及 `@prole` Chat Participant 贡献点。
+
 ## 新增测试的协作要求
 
 - PR 或提交说明中标明测试类型：unit、integration、regression、live、demo 或 stress。

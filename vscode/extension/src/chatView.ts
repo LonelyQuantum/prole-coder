@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
 
 import type {
+  CancelParams,
+  CancelResult,
   ListRunsParams,
   ListRunsResult,
   ResumeParams,
@@ -12,6 +14,10 @@ import type {
   "resolution-mode": "import",
 };
 
+import {
+  automaticContextAttachmentFromTimeline,
+  mergeTurnAttachments,
+} from "./automaticContext";
 import { CHAT_RUN_MODES, DEFAULT_CHAT_MODE, parseChatTurnSubmission, sendTurnParams } from "./chatInput";
 import { ChatEventTimeline, type ChatTimelineSnapshot } from "./chatEvents";
 import {
@@ -19,6 +25,7 @@ import {
   emptyContextViz,
   type ContextVizSnapshot,
 } from "./contextViz";
+import { diagnosticAttachmentsFromProblems } from "./diagnostics";
 import type { AgentEventEnvelope, DisposableLike } from "./rpcServer";
 import {
   RUN_LIST_LIMIT,
@@ -41,12 +48,16 @@ export interface ChatTurnSender {
   sendTurn(params: SendTurnParams): Promise<SendTurnResult>;
 }
 
+export interface ChatCancelClient {
+  cancel(params: CancelParams): Promise<CancelResult>;
+}
+
 export interface ChatRunHistoryClient {
   listRuns(params?: ListRunsParams): Promise<ListRunsResult>;
   resume(params: ResumeParams): Promise<ResumeResult>;
 }
 
-export type ChatRpcClient = ChatRpcEventSource & ChatTurnSender & ChatRunHistoryClient;
+export type ChatRpcClient = ChatRpcEventSource & ChatTurnSender & ChatCancelClient & ChatRunHistoryClient;
 
 interface SnapshotWebviewMessage {
   readonly type: "snapshot";
@@ -77,19 +88,27 @@ type ExtensionToWebviewMessage =
 type ChatSubmissionStatus = "idle" | "sending" | "running" | "completed" | "failed" | "canceled";
 type TerminalSubmissionStatus = Extract<ChatSubmissionStatus, "completed" | "failed" | "canceled">;
 
-interface ChatSubmissionSnapshot {
+export interface ChatSubmissionSnapshot {
   readonly busy: boolean;
   readonly status: ChatSubmissionStatus;
   readonly message: string;
   readonly runId?: string;
   readonly turnId?: string;
   readonly error?: string;
+  readonly canceling?: boolean;
 }
 
 interface TerminalRunState {
   readonly status: TerminalSubmissionStatus;
   readonly message: string;
   readonly error?: string;
+}
+
+export interface ChatViewTestState {
+  readonly timeline: ChatTimelineSnapshot;
+  readonly submission: ChatSubmissionSnapshot;
+  readonly runs: RunListSnapshot;
+  readonly context: ContextVizSnapshot;
 }
 
 export class ProleChatViewProvider implements vscode.WebviewViewProvider, DisposableLike {
@@ -106,6 +125,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   constructor(
     private readonly extensionUri: vscode.Uri,
     rpcClient?: ChatRpcClient,
+    private readonly workspaceRoot?: string,
   ) {
     this.rpcClient = rpcClient;
     this.rpcSubscription = rpcClient?.onEvent((event) => {
@@ -154,6 +174,19 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     return vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);
   }
 
+  testHandleWebviewMessage(message: unknown): Promise<void> {
+    return this.handleWebviewMessage(message);
+  }
+
+  testState(): ChatViewTestState {
+    return {
+      timeline: this.timeline.snapshot(),
+      submission: this.submission,
+      runs: this.runList,
+      context: this.contextViz,
+    };
+  }
+
   dispose(): void {
     this.rpcSubscription?.dispose();
     this.viewMessageSubscription?.dispose();
@@ -170,6 +203,12 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     const resumeRunId = resumeRunIdFromMessage(message);
     if (resumeRunId !== undefined) {
       await this.resumeRun(resumeRunId);
+      return;
+    }
+
+    const cancelRunId = cancelRunIdFromMessage(message);
+    if (cancelRunId !== undefined) {
+      await this.cancelTurn(cancelRunId);
       return;
     }
 
@@ -214,7 +253,14 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     this.setContextViz(emptyContextViz());
 
     try {
-      const result = await this.rpcClient.sendTurn(sendTurnParams(parsed.value));
+      const automaticContext = automaticContextAttachmentFromTimeline(this.timeline.snapshot());
+      const attachments = mergeTurnAttachments(
+        automaticContext,
+        this.collectDiagnosticAttachments(),
+      );
+      const result = await this.rpcClient.sendTurn(
+        sendTurnParams(parsed.value, attachments),
+      );
       void this.refreshRuns("Refreshing runs...");
       const terminal = this.terminalRuns.get(result.runId);
       this.setSubmission(
@@ -330,6 +376,67 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     } catch (error) {
       this.setRunList(failedRunList(`Failed to resume run: ${errorMessage(error)}`, this.runList));
     }
+  }
+
+  private async cancelTurn(runId: string): Promise<void> {
+    if (this.rpcClient === undefined) {
+      this.setSubmission({
+        ...this.submission,
+        busy: false,
+        status: "failed",
+        message: "Open a trusted workspace before canceling a turn.",
+        error: "No trusted workspace is available.",
+      });
+      return;
+    }
+
+    if (!this.submission.busy || this.submission.runId !== runId || this.submission.canceling) {
+      return;
+    }
+
+    this.setSubmission({
+      ...this.submission,
+      message: "Cancel requested...",
+      canceling: true,
+    });
+
+    try {
+      const result = await this.rpcClient.cancel({
+        runId,
+        reason: "canceled in VS Code",
+      });
+      void this.refreshRuns("Refreshing runs...");
+      this.setSubmission({
+        busy: false,
+        status: "canceled",
+        message: result.reason ?? "Run canceled.",
+        runId: result.runId,
+        ...(this.submission.turnId === undefined ? {} : { turnId: this.submission.turnId }),
+      });
+    } catch (error) {
+      const messageText = `Failed to cancel turn: ${errorMessage(error)}`;
+      this.setSubmission({
+        ...this.submission,
+        message: messageText,
+        error: messageText,
+        canceling: false,
+      });
+    }
+  }
+
+  private collectDiagnosticAttachments(): NonNullable<SendTurnParams["attachments"]> {
+    if (this.workspaceRoot === undefined) {
+      return [];
+    }
+
+    const problems = vscode.languages.getDiagnostics().map(([uri, diagnostics]) => ({
+      uri: {
+        fsPath: uri.fsPath,
+      },
+      diagnostics,
+    }));
+
+    return diagnosticAttachmentsFromProblems(problems, this.workspaceRoot);
   }
 
   private updateSubmissionForEvent(event: AgentEventEnvelope): boolean {
@@ -783,6 +890,7 @@ function renderChatViewHtml(
     .prompt:focus,
     .mode:focus,
     .send:focus,
+    .cancel:focus,
     .refresh-runs:focus,
     .run-entry:focus,
     .context-tab:focus {
@@ -806,7 +914,8 @@ function renderChatViewHtml(
       font: var(--vscode-font-size) var(--vscode-font-family);
     }
 
-    .send {
+    .send,
+    .cancel {
       flex: 0 0 auto;
       min-width: 64px;
       height: 28px;
@@ -822,7 +931,18 @@ function renderChatViewHtml(
       background: var(--vscode-button-hoverBackground);
     }
 
+    .cancel {
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+      font-weight: 500;
+    }
+
+    .cancel:hover:enabled {
+      background: var(--vscode-button-secondaryHoverBackground);
+    }
+
     .send:disabled,
+    .cancel:disabled,
     .prompt:disabled,
     .mode:disabled {
       opacity: 0.65;
@@ -878,6 +998,7 @@ function renderChatViewHtml(
       <div class="composer-row">
         <select id="mode" class="mode" aria-label="Run mode"></select>
         <button id="send" class="send" type="submit">Send</button>
+        <button id="cancel" class="cancel" type="button">Cancel</button>
         <div id="submission" class="submission" aria-live="polite"></div>
       </div>
     </form>
@@ -902,6 +1023,7 @@ function renderChatViewHtml(
     const promptInput = document.getElementById("prompt");
     const modeInput = document.getElementById("mode");
     const sendButton = document.getElementById("send");
+    const cancelButton = document.getElementById("cancel");
     const submissionRoot = document.getElementById("submission");
     let currentContext = initialContext;
     let contextSourceTab = "included";
@@ -934,6 +1056,13 @@ function renderChatViewHtml(
       vscodeApi.postMessage({ type: "refreshRuns" });
     });
 
+    cancelButton.addEventListener("click", () => {
+      const runId = cancelButton.dataset.runId;
+      if (typeof runId === "string" && runId.length > 0) {
+        vscodeApi.postMessage({ type: "cancelTurn", runId });
+      }
+    });
+
     composer.addEventListener("submit", (event) => {
       event.preventDefault();
       const message = promptInput.value.trim();
@@ -947,7 +1076,7 @@ function renderChatViewHtml(
         return;
       }
 
-      setComposerBusy(true);
+      setComposerBusy(true, false);
       submissionRoot.className = "submission sending";
       submissionRoot.textContent = "Sending turn...";
       vscodeApi.postMessage({
@@ -1289,7 +1418,10 @@ function renderChatViewHtml(
       const state = submission && typeof submission === "object" ? submission : initialSubmission;
       const status = typeof state.status === "string" ? state.status : "idle";
       const busy = state.busy === true;
-      setComposerBusy(busy);
+      const runId = typeof state.runId === "string" ? state.runId : "";
+      const cancelable = busy && runId.length > 0 && state.canceling !== true;
+      setComposerBusy(busy, cancelable);
+      cancelButton.dataset.runId = runId;
       submissionRoot.className = "submission " + status;
       submissionRoot.textContent = typeof state.message === "string" ? state.message : "";
       if (status === "running") {
@@ -1297,10 +1429,11 @@ function renderChatViewHtml(
       }
     }
 
-    function setComposerBusy(busy) {
+    function setComposerBusy(busy, cancelable) {
       promptInput.disabled = busy;
       modeInput.disabled = busy;
       sendButton.disabled = busy;
+      cancelButton.disabled = cancelable !== true;
     }
 
     function renderItem(item) {
@@ -1398,6 +1531,15 @@ function terminalMessage(event: AgentEventEnvelope, fallback: string): string {
   const payload = isRecord(event.payload) ? event.payload : undefined;
   const message = payload?.["message"] ?? payload?.["reason"] ?? payload?.["summary"];
   return typeof message === "string" && message.length > 0 ? message : fallback;
+}
+
+function cancelRunIdFromMessage(message: unknown): string | undefined {
+  if (!isRecord(message) || message["type"] !== "cancelTurn") {
+    return undefined;
+  }
+
+  const runId = message["runId"];
+  return typeof runId === "string" && runId.length > 0 ? runId : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

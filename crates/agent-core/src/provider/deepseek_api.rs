@@ -8,9 +8,12 @@ use thiserror::Error;
 use url::Url;
 
 pub const DEFAULT_API_BASE_URL: &str = "https://api.deepseek.com";
+pub const DEFAULT_FIM_API_BASE_URL: &str = "https://api.deepseek.com/beta";
 pub const DEFAULT_MODEL: &str = DeepSeekModelId::V4_PRO;
 const CHAT_COMPLETIONS_PATH: &str = "chat/completions";
+const FIM_COMPLETIONS_PATH: &str = "completions";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
+const FIM_MAX_TOKENS_LIMIT: u32 = 4096;
 
 #[derive(Debug, Error)]
 pub enum DeepSeekApiError {
@@ -27,6 +30,10 @@ pub enum DeepSeekApiError {
     UnsupportedBaseUrlScheme { scheme: String },
     #[error("chat completion request must include at least one message")]
     EmptyMessages,
+    #[error("FIM completion request prefix must not be empty")]
+    EmptyFimPrefix,
+    #[error("FIM completion max_tokens must be between 1 and {FIM_MAX_TOKENS_LIMIT}")]
+    InvalidFimMaxTokens,
     #[error("reasoning_effort requires thinking.type = enabled")]
     ReasoningEffortRequiresEnabledThinking,
     #[error("tool_choice is not supported while DeepSeek thinking mode is enabled")]
@@ -142,6 +149,15 @@ impl DeepSeekApiConfig {
         Self::new(api_key, base_url, model)
     }
 
+    pub fn from_env_for_fim() -> Result<Self, DeepSeekApiError> {
+        // DeepSeek chat and beta FIM endpoints currently share the same API key.
+        let api_key = env::var("DEEPSEEK_API_KEY").map_err(|_| DeepSeekApiError::MissingApiKey)?;
+        let base_url =
+            env::var("DEEPSEEK_BASE_URL").unwrap_or_else(|_| DEFAULT_FIM_API_BASE_URL.to_owned());
+        let model = env::var("DEEPSEEK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_owned());
+        Self::new(api_key, base_url, model)
+    }
+
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -251,6 +267,22 @@ impl DeepSeekApiAdapter {
 
         decode_chat_completion_stream(response).await
     }
+
+    pub async fn create_fim_completion(
+        &self,
+        request: FimCompletionRequest,
+    ) -> Result<FimCompletionResponse, DeepSeekApiError> {
+        request.validate_for_deepseek()?;
+        let response = self
+            .client
+            .post(self.config.endpoint(FIM_COMPLETIONS_PATH)?)
+            .bearer_auth(&self.config.api_key)
+            .json(&request)
+            .send()
+            .await?;
+
+        decode_fim_completion_response(response).await
+    }
 }
 
 async fn decode_chat_completion_response(
@@ -259,6 +291,18 @@ async fn decode_chat_completion_response(
     let status = response.status();
     let body = response.text().await?;
 
+    if !status.is_success() {
+        return Err(DeepSeekApiError::Api { status, body });
+    }
+
+    serde_json::from_str(&body).map_err(|source| DeepSeekApiError::InvalidJson { source, body })
+}
+
+async fn decode_fim_completion_response(
+    response: reqwest::Response,
+) -> Result<FimCompletionResponse, DeepSeekApiError> {
+    let status = response.status();
+    let body = response.text().await?;
     if !status.is_success() {
         return Err(DeepSeekApiError::Api { status, body });
     }
@@ -408,6 +452,60 @@ impl ChatCompletionRequest {
             });
         }
         self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FimCompletionRequest {
+    pub model: DeepSeekModelId,
+    pub prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suffix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+}
+
+impl FimCompletionRequest {
+    pub fn new(
+        model: DeepSeekModelId,
+        prompt: impl Into<String>,
+    ) -> Result<Self, DeepSeekApiError> {
+        let prompt = prompt.into();
+        if prompt.is_empty() {
+            return Err(DeepSeekApiError::EmptyFimPrefix);
+        }
+
+        Ok(Self {
+            model,
+            prompt,
+            suffix: None,
+            max_tokens: None,
+            stream: Some(false),
+        })
+    }
+
+    pub fn with_suffix(mut self, suffix: impl Into<String>) -> Self {
+        self.suffix = Some(suffix.into());
+        self
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    pub fn validate_for_deepseek(&self) -> Result<(), DeepSeekApiError> {
+        if self.prompt.is_empty() {
+            return Err(DeepSeekApiError::EmptyFimPrefix);
+        }
+        if let Some(max_tokens) = self.max_tokens
+            && !(1..=FIM_MAX_TOKENS_LIMIT).contains(&max_tokens)
+        {
+            return Err(DeepSeekApiError::InvalidFimMaxTokens);
+        }
+        Ok(())
     }
 }
 
@@ -832,6 +930,23 @@ pub struct ChatCompletionMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct FimCompletionResponse {
+    pub id: String,
+    pub choices: Vec<FimCompletionChoice>,
+    pub created: u64,
+    pub model: String,
+    pub object: String,
+    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct FimCompletionChoice {
+    pub index: u32,
+    pub text: String,
+    pub finish_reason: Option<FinishReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ChatCompletionChunk {
     pub id: String,
     pub choices: Vec<ChatCompletionChunkChoice>,
@@ -1003,8 +1118,9 @@ mod tests {
     use super::{
         ChatCompletionRequest, ChatFunctionCallDelta, ChatMessage, ChatTool, ChatToolCall,
         ChatToolCallAccumulator, ChatToolCallAccumulatorError, ChatToolCallDelta, ChatToolType,
-        DeepSeekApiConfig, DeepSeekApiError, DeepSeekModelId, ReasoningEffort, SseEventParser,
-        StreamEvent, StreamOptions, ThinkingConfig, ToolChoice, parse_stream_event_block,
+        DeepSeekApiConfig, DeepSeekApiError, DeepSeekModelId, FimCompletionRequest,
+        ReasoningEffort, SseEventParser, StreamEvent, StreamOptions, ThinkingConfig, ToolChoice,
+        parse_stream_event_block,
     };
 
     #[test]
@@ -1052,6 +1168,68 @@ mod tests {
         assert_eq!(
             endpoint.as_str(),
             "https://api.deepseek.com/beta/chat/completions"
+        );
+    }
+
+    #[test]
+    fn fim_request_serializes_prefix_suffix_and_non_streaming_default() {
+        let request = FimCompletionRequest::new(
+            DeepSeekModelId::new(DeepSeekModelId::V4_PRO).expect("model should be valid"),
+            "fn main() {",
+        )
+        .expect("FIM request should be valid")
+        .with_suffix("}")
+        .with_max_tokens(32);
+
+        let json = serde_json::to_value(request).expect("request should serialize");
+
+        assert_eq!(json["model"], "deepseek-v4-pro");
+        assert_eq!(json["prompt"], "fn main() {");
+        assert_eq!(json["suffix"], "}");
+        assert_eq!(json["max_tokens"], 32);
+        assert_eq!(json["stream"], false);
+    }
+
+    #[test]
+    fn fim_request_rejects_invalid_max_tokens() {
+        let request = FimCompletionRequest::new(
+            DeepSeekModelId::new(DeepSeekModelId::V4_PRO).expect("model should be valid"),
+            "prefix",
+        )
+        .expect("FIM request should be valid")
+        .with_max_tokens(0);
+
+        let error = request
+            .validate_for_deepseek()
+            .expect_err("zero FIM max_tokens should fail");
+
+        assert!(matches!(error, DeepSeekApiError::InvalidFimMaxTokens));
+    }
+
+    #[test]
+    fn fim_response_deserializes_text_choice() {
+        let response = r#"{
+          "id": "fim-test",
+          "object": "text_completion",
+          "created": 1710000000,
+          "model": "deepseek-v4-pro",
+          "choices": [
+            { "index": 0, "text": " println!(\"hi\"); ", "finish_reason": "stop" }
+          ],
+          "usage": {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5
+          }
+        }"#;
+
+        let response: super::FimCompletionResponse =
+            serde_json::from_str(response).expect("FIM response should parse");
+
+        assert_eq!(response.choices[0].text, " println!(\"hi\"); ");
+        assert_eq!(
+            response.choices[0].finish_reason,
+            Some(super::FinishReason::Stop)
         );
     }
 

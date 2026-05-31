@@ -11,18 +11,28 @@ import {
   agentRejectMethod,
   agentCancelMethod,
   agentListRunsMethod,
+  agentEventBatchMethod,
+  agentPreviewFimMethod,
   type ApprovalRequest,
   type ApproveParams,
   type ApproveResult,
   type CancelParams,
   type CancelResult,
+  type AgentEventBatchParams,
+  type FimPreviewParams,
+  type FimPreviewResult,
   type ListRunsParams,
   type ListRunsResult,
+  type ProviderCapabilities,
   type ProviderCompletedPayload,
+  type ProviderRequestedPayload,
+  type RunCompletedPayload,
   type RunLogPayloadMetadata,
   type RunSummary,
   type RejectParams,
   type RejectResult,
+  type ServerCapabilities,
+  type ToolCompletedPayload,
   type ToolApprovalRequiredPayload,
   type ToolApprovalResolvedPayload,
   type TurnAttachment,
@@ -53,12 +63,30 @@ interface ToolRegistryTool {
   readonly status: string;
 }
 
+interface EventPayloadFixture {
+  readonly version: string;
+  readonly events: readonly EventPayloadFixtureEntry[];
+}
+
+interface EventPayloadFixtureEntry {
+  readonly type: string;
+  readonly payloadName: string;
+  readonly required: readonly string[];
+  readonly properties: Readonly<Record<string, string>>;
+}
+
 const toolRegistryFixture = JSON.parse(
   readFileSync(
     new URL("../../../../docs/protocol/tool-registry.v1.json", import.meta.url),
     "utf8",
   ),
 ) as ToolRegistryFixture;
+const eventPayloadFixture = JSON.parse(
+  readFileSync(
+    new URL("../../../../docs/protocol/event-payloads.v1.json", import.meta.url),
+    "utf8",
+  ),
+) as EventPayloadFixture;
 const jsonRpcProtocolDocument = readFileSync(
   new URL("../../../../docs/json-rpc-protocol.md", import.meta.url),
   "utf8",
@@ -102,7 +130,43 @@ test("JSON-RPC method constants match protocol document", () => {
   assert.equal(agentRejectMethod, "agent.reject");
   assert.equal(agentCancelMethod, "agent.cancel");
   assert.equal(agentListRunsMethod, "agent.listRuns");
+  assert.equal(agentPreviewFimMethod, "agent.previewFim");
   assert.equal(agentEventMethod, "agent.event");
+  assert.equal(agentEventBatchMethod, "agent.eventBatch");
+});
+
+test("server capabilities expose provider model capabilities", () => {
+  const provider = {
+    provider: "deepseek",
+    defaultModel: "deepseek-v4-pro",
+    models: [
+      {
+        id: "deepseek-v4-pro",
+        displayName: "DeepSeek V4 Pro",
+        contextWindowTokens: 1_048_576,
+        maxOutputTokens: 393_216,
+        supportsThinking: true,
+        supportsToolCalls: true,
+        supportsToolChoice: false,
+        supportsFim: true,
+        supportsStreaming: true,
+        reportsCacheUsage: true,
+      },
+    ],
+  } satisfies ProviderCapabilities;
+  const capabilities = {
+    protocolVersion,
+    supportsRunResume: true,
+    supportsPatchApproval: true,
+    supportsPersistentApprovals: true,
+    supportsEventBatching: true,
+    supportedRiskLevels: riskLevels,
+    provider,
+  } satisfies ServerCapabilities;
+
+  assert.equal(capabilities.provider.defaultModel, "deepseek-v4-pro");
+  assert.equal(capabilities.provider.models[0]?.supportsFim, true);
+  assert.equal(capabilities.supportsEventBatching, true);
 });
 
 test("protocol error code registry matches protocol document", () => {
@@ -131,11 +195,25 @@ test("approval request and decision params use stable protocol fields", () => {
   const request = {
     approvalId: "approval_1",
     toolCallId: "call_1",
-    toolName: "shell",
-    risk: "exec",
-    title: "Run shell command",
-    detail: "Execute cargo test",
-    command: "cargo test",
+    toolName: "apply_patch",
+    risk: "write",
+    title: "Apply patch",
+    detail: "Modify README.md",
+    cwd: ".",
+    outputSummary: "previous command output was truncated",
+    paths: ["README.md"],
+    hunks: [
+      {
+        id: "README.md#1:old1+3:new1+3",
+        filePath: "README.md",
+        fileIndex: 0,
+        hunkIndex: 0,
+        oldStart: 1,
+        oldCount: 3,
+        newStart: 1,
+        newCount: 3,
+      },
+    ],
     riskReasons: ["dependency install/update"],
     persistable: false,
   } satisfies ApprovalRequest;
@@ -146,7 +224,10 @@ test("approval request and decision params use stable protocol fields", () => {
     risk: request.risk,
     title: request.title,
     detail: request.detail,
-    command: request.command,
+    cwd: request.cwd,
+    outputSummary: request.outputSummary,
+    paths: request.paths,
+    hunks: request.hunks,
     riskReasons: request.riskReasons,
     persistable: request.persistable,
   } satisfies ToolApprovalRequiredPayload;
@@ -155,15 +236,23 @@ test("approval request and decision params use stable protocol fields", () => {
     toolCallId: request.toolCallId,
     toolName: request.toolName,
     decision: "approved",
+    hunks: {
+      scope: "selected",
+      approved: ["README.md#1:old1+3:new1+3"],
+    },
   } satisfies ToolApprovalResolvedPayload;
   const approve = {
     approvalId: request.approvalId,
-    persist: "session",
+    persist: "never",
+    hunks: {
+      approved: ["README.md#1:old1+3:new1+3"],
+    },
   } satisfies ApproveParams;
   const approveResult = {
     approvalId: request.approvalId,
     state: "approved",
-    persist: "session",
+    persist: "never",
+    hunks: approve.hunks,
   } satisfies ApproveResult;
   const reject = {
     approvalId: request.approvalId,
@@ -183,6 +272,19 @@ test("approval request and decision params use stable protocol fields", () => {
     state: "canceled",
     reason: cancel.reason,
   } satisfies CancelResult;
+  const fimPreview = {
+    prefix: "fn main() {",
+    suffix: "}",
+    path: "src/main.rs",
+    languageId: "rust",
+    model: "deepseek-v4-pro",
+    maxTokens: 32,
+  } satisfies FimPreviewParams;
+  const fimPreviewResult = {
+    text: " println!(\"hi\");",
+    model: "deepseek-v4-pro",
+    finishReason: "stop",
+  } satisfies FimPreviewResult;
   const expiredPayload = {
     approvalId: request.approvalId,
     toolCallId: request.toolCallId,
@@ -192,11 +294,15 @@ test("approval request and decision params use stable protocol fields", () => {
   } satisfies ToolApprovalResolvedPayload;
 
   assert.equal(approve.approvalId, "approval_1");
-  assert.equal(requiredPayload.toolName, "shell");
+  assert.equal(requiredPayload.toolName, "apply_patch");
+  assert.equal(requiredPayload.hunks?.[0]?.id, "README.md#1:old1+3:new1+3");
   assert.equal(resolvedPayload.decision, "approved");
+  assert.equal(approve.hunks?.approved[0], "README.md#1:old1+3:new1+3");
   assert.equal(approveResult.state, "approved");
   assert.equal(reject.reason, rejectResult.reason);
   assert.equal(cancelResult.state, "canceled");
+  assert.equal(fimPreview.languageId, "rust");
+  assert.equal(fimPreviewResult.finishReason, "stop");
   assert.equal(expiredPayload.decision, "expired");
 });
 
@@ -295,6 +401,116 @@ test("attachments and provider completed payload use phase 2c and 2d fields", ()
   assert.equal(providerCompleted.usage.promptCacheHitTokens, 64);
   assert.equal(providerCompleted.streaming.toolCallDeltaCount, 1);
   assert.equal(metadata.runLogTruncation?.[0]?.reason, "max_string_bytes");
+});
+
+test("event payload fixture stays aligned with shared protocol types", () => {
+  const providerRequested = {
+    iteration: 1,
+    messageCount: 4,
+    reasoningState: {
+      status: "active",
+    },
+  } satisfies ProviderRequestedPayload;
+  const toolCompleted = {
+    toolCallId: "call_1",
+    name: "shell",
+    status: "ok",
+    summary: "Command completed.",
+    result: {
+      exitCode: 0,
+    },
+  } satisfies ToolCompletedPayload;
+  const runCompleted = {
+    summary: "Updated the workspace.",
+    changedFiles: ["README.md"],
+    verificationStatus: "passed",
+  } satisfies RunCompletedPayload;
+  const toolApprovalRequired = {
+    approvalId: "approval_1",
+    toolCallId: "call_patch",
+    toolName: "apply_patch",
+    risk: "write",
+    title: "Apply patch",
+    detail: "Modify README.md",
+    paths: ["README.md"],
+    hunks: [
+      {
+        id: "README.md#1:old1+3:new1+3",
+        filePath: "README.md",
+        fileIndex: 0,
+        hunkIndex: 0,
+        oldStart: 1,
+        oldCount: 3,
+        newStart: 1,
+        newCount: 3,
+      },
+    ],
+    persistable: true,
+  } satisfies ToolApprovalRequiredPayload;
+  const toolApprovalResolved = {
+    approvalId: "approval_1",
+    toolCallId: "call_patch",
+    toolName: "apply_patch",
+    decision: "approved",
+    hunks: {
+      scope: "selected",
+      approved: ["README.md#1:old1+3:new1+3"],
+    },
+  } satisfies ToolApprovalResolvedPayload;
+  const samples = {
+    "provider.requested": providerRequested,
+    "tool.completed": toolCompleted,
+    "run.completed": runCompleted,
+    "tool.approvalRequired": toolApprovalRequired,
+    "tool.approvalResolved": toolApprovalResolved,
+  } as const;
+
+  assert.equal(eventPayloadFixture.version, protocolVersion);
+  assert.deepEqual(eventPayloadFixture.events.map((event) => event.type), [
+    "provider.requested",
+    "tool.completed",
+    "run.completed",
+    "tool.approvalRequired",
+    "tool.approvalResolved",
+  ]);
+
+  for (const event of eventPayloadFixture.events) {
+    const sample = samples[event.type as keyof typeof samples] as Record<string, unknown>;
+    assert.ok(sample, `missing sample for ${event.type}`);
+    for (const field of event.required) {
+      assert.equal(field in sample, true, `${event.type} must include ${field}`);
+    }
+  }
+});
+
+test("event batch notification payload preserves event ordering metadata", () => {
+  const batch = {
+    events: [
+      {
+        seq: 10,
+        time: "1970-01-01T00:00:00.000Z",
+        type: "assistant.delta",
+        runId: "run_1",
+        turnId: "turn_1",
+        payload: { text: "hello" },
+      },
+      {
+        seq: 11,
+        time: "1970-01-01T00:00:00.001Z",
+        type: "assistant.delta",
+        runId: "run_1",
+        turnId: "turn_1",
+        payload: { text: " world" },
+      },
+    ],
+    firstSeq: 10,
+    lastSeq: 11,
+    count: 2,
+  } satisfies AgentEventBatchParams;
+
+  assert.equal(batch.events[0]?.seq, batch.firstSeq);
+  assert.equal(batch.events[1]?.seq, batch.lastSeq);
+  assert.equal(batch.events.length, batch.count);
 });
 
 test("tool registry contains every declared tool exactly once", () => {
