@@ -63,6 +63,47 @@ test("RPC server manager spawns the configured command and initializes the works
   assert.equal(ready.capabilities.supportsEventBatching, true);
 });
 
+test("RPC server manager forwards configured process environment overrides", async () => {
+  const factory = new FakeProcessFactory();
+  const manager = new RpcServerManager({
+    launch: {
+      command: "prole",
+      args: ["rpc"],
+      autoStart: true,
+    },
+    workspace: {
+      root: "C:/workspace/project",
+      trusted: true,
+    },
+    extensionVersion: "0.1.0",
+    processFactory: factory,
+    processEnv: {
+      DEEPSEEK_API_KEY: "stored-key",
+    },
+  });
+
+  const readyPromise = manager.start();
+  const child = factory.lastChild();
+  child.stdout.pushJson(initializeResponse(child.initializeRequest().id));
+  await readyPromise;
+
+  assert.deepEqual(factory.lastOptions?.env, {
+    DEEPSEEK_API_KEY: "stored-key",
+  });
+
+  manager.stop();
+  manager.setProcessEnv({ DEEPSEEK_API_KEY: "rotated-key" });
+
+  const restarted = manager.start();
+  const restartedChild = factory.lastChild();
+  restartedChild.stdout.pushJson(initializeResponse(restartedChild.initializeRequest().id));
+  await restarted;
+
+  assert.deepEqual(factory.lastOptions?.env, {
+    DEEPSEEK_API_KEY: "rotated-key",
+  });
+});
+
 test("RPC server manager forwards agent.event notifications", async () => {
   const factory = new FakeProcessFactory();
   const manager = rpcManagerWithFactory(factory);
