@@ -70,6 +70,7 @@ export interface RpcServerConfiguration {
 
 export interface RpcSpawnOptions {
   readonly cwd: string;
+  readonly env?: Record<string, string | undefined>;
 }
 
 export interface RpcWritable {
@@ -105,6 +106,7 @@ export interface RpcServerManagerOptions {
   readonly launch: RpcServerLaunchConfig;
   readonly workspace: RpcServerWorkspace;
   readonly extensionVersion: string;
+  readonly processEnv?: Record<string, string | undefined>;
   readonly processFactory?: RpcProcessFactory;
   readonly notifier?: RpcServerNotifier;
 }
@@ -149,6 +151,10 @@ export const nodeRpcProcessFactory: RpcProcessFactory = {
   spawn(command, args, options) {
     return spawn(command, [...args], {
       cwd: options.cwd,
+      env: {
+        ...process.env,
+        ...options.env,
+      },
       stdio: "pipe",
       windowsHide: true,
     });
@@ -183,6 +189,7 @@ export class RpcServerManager implements DisposableLike {
   private readonly notifier: RpcServerNotifier | undefined;
   private readonly eventHandlers = new Set<(event: AgentEventEnvelope) => void>();
   private readonly pendingRequests = new Map<string, PendingRpcRequest<unknown>>();
+  private processEnv: Record<string, string | undefined>;
 
   private child: RpcChildProcess | undefined;
   private startPromise: Promise<RpcServerReadyState> | undefined;
@@ -202,6 +209,7 @@ export class RpcServerManager implements DisposableLike {
     this.extensionVersion = options.extensionVersion;
     this.processFactory = options.processFactory ?? nodeRpcProcessFactory;
     this.notifier = options.notifier;
+    this.processEnv = { ...(options.processEnv ?? {}) };
   }
 
   get status(): RpcServerStatus {
@@ -218,6 +226,10 @@ export class RpcServerManager implements DisposableLike {
 
   get launchConfig(): RpcServerLaunchConfig {
     return this.launch;
+  }
+
+  setProcessEnv(env: Record<string, string | undefined>): void {
+    this.processEnv = { ...env };
   }
 
   start(): Promise<RpcServerReadyState> {
@@ -245,6 +257,7 @@ export class RpcServerManager implements DisposableLike {
     try {
       child = this.processFactory.spawn(this.launch.command, this.launch.args, {
         cwd: this.workspace.root,
+        env: this.processEnv,
       });
     } catch (error) {
       const spawnError = asError(error);
