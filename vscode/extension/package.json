@@ -16,6 +16,11 @@
     "onStartupFinished",
     "onCommand:prole-coder.openChat",
     "onCommand:prole-coder.openSettings",
+    "onCommand:prole-coder.configureDeepSeekApiKey",
+    "onCommand:prole-coder.clearDeepSeekApiKey",
+    "onCommand:prole-coder.showProviderStatus",
+    "onCommand:prole-coder.generateCommitMessage",
+    "onCommand:prole-coder.generatePrDescription",
     "onView:prole-coder.chat",
     "onChatParticipant:prole-coder.chatParticipant"
   ],
@@ -29,6 +34,26 @@
       {
         "command": "prole-coder.openSettings",
         "title": "ProleCoder: Open Settings"
+      },
+      {
+        "command": "prole-coder.configureDeepSeekApiKey",
+        "title": "ProleCoder: Configure DeepSeek API Key"
+      },
+      {
+        "command": "prole-coder.clearDeepSeekApiKey",
+        "title": "ProleCoder: Clear DeepSeek API Key"
+      },
+      {
+        "command": "prole-coder.showProviderStatus",
+        "title": "ProleCoder: Show Provider Status"
+      },
+      {
+        "command": "prole-coder.generateCommitMessage",
+        "title": "ProleCoder: Generate Commit Message"
+      },
+      {
+        "command": "prole-coder.generatePrDescription",
+        "title": "ProleCoder: Generate PR Description"
       }
     ],
     "chatParticipants": [
