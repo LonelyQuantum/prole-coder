@@ -1,6 +1,6 @@
 # 编辑器插件（VS Code Extension）
 
-状态：Phase 3 VS Code 插件核心体验已完成；Phase 4 VS Code 深度集成已完成 14 项深度集成能力；Phase 5 VS Code Codex-like UX 与开发工作流正在进行中，P5-1 到 P5-5 的原生 Chat UX 与诊断收敛已完成，P5-6 起继续补齐 API key 配置、错误恢复和 Git 工作流。基础命令、审批弹窗 adapter、RPC server 启动监管、初始化握手、JSON-RPC request client、VS Code/protocol TypeScript 类型共享、RPC/commands 边界测试、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、共享 RPC 全双工事件管线、命令风险动态升级展示、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、VSIX alpha 打包、extension-host E2E、原生 `@prole` Chat Participant、简化审批 UX、自动上下文压缩和 `ProleCoder` Output Channel 错误诊断均已实现。
+状态：Phase 3 VS Code 插件核心体验已完成；Phase 4 VS Code 深度集成已完成 14 项深度集成能力；Phase 5 VS Code Codex-like UX 与开发工作流已完成。基础命令、审批弹窗 adapter、RPC server 启动监管、初始化握手、JSON-RPC request client、VS Code/protocol TypeScript 类型共享、RPC/commands 边界测试、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、共享 RPC 全双工事件管线、命令风险动态升级展示、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、VSIX alpha 打包、extension-host E2E、原生 `@prole` Chat Participant、简化审批 UX、自动上下文压缩、`ProleCoder` Output Channel 错误诊断、API key 配置、统一 redaction 和 Git 工作流均已实现。
 
 VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server 复用 Rust Agent Core，而不是在 TypeScript 侧重新实现 agent loop、context builder、provider 调用或 tool execution。
 
@@ -140,12 +140,12 @@ Phase 5 Codex-like UX 与开发工作流清单与 `docs/phase-tasks.md` 对齐�
 3. P5-3：自动上下文压缩，已完成：Sidebar Chat 和原生 Chat Participant 会把历史对话/事件摘要压缩为 `explicit_content` attachment，交给 Context Capsule 处理，让连续对话自然承接上下文。
 4. P5-4：UX 收敛测试与打包验收，已完成：已覆盖 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke` 和 `pnpm run vsix:alpha`。
 5. P5-5：VS Code Output Channel 错误诊断，已完成：创建 `ProleCoder` Output Channel，记录 Sidebar Chat、Run List、原生 Chat Participant 和 RPC 启动/运行 warning 的完整错误；activation 层使用统一 notifier 分发日志与 VS Code toast，避免侧边栏短状态截断关键诊断。
-6. P5-6：DeepSeek API key SecretStorage 与 provider status，计划：插件内配置 key，SecretStorage 优先、process env fallback，RPC child env 继承 `process.env` 后覆盖 `DEEPSEEK_API_KEY`。
-7. P5-7：统一 redaction 与 API key 错误恢复 UX，计划：notifier/logger 统一脱敏 SecretStorage/env key，API key 配置后 idle 状态自动重启 RPC，active run 场景保守提示稍后生效。
-8. P5-8：Git context 只读采集与大 diff attachment 管线，计划：优先使用 VS Code Git API，git CLI 仅作受控 fallback，Context Capsule 负责大 diff 预算与 omitted source 可观察性。
-9. P5-9：Generate Commit Message，计划：从 staged diff 生成候选 commit message 并写入 Source Control inputBox，不自动 commit。
-10. P5-10：Generate PR Description，计划：根据 base branch、diff/stat、commit summary 和 test summary 生成 PR title/body markdown，不自动创建 PR。
-11. P5-11：Phase 5 UX 工作流验收，计划：补齐 P5-6 到 P5-10 的测试、VSIX 验证和文档收敛；G4 自动 commit / push / create PR 留作后续增强并接入审批模型。
+6. P5-6：DeepSeek API key SecretStorage 与 provider status，已完成：插件内配置/清除 key 与查看 provider status；SecretStorage 优先、process env fallback，RPC child env 继承 `process.env` 后覆盖 `DEEPSEEK_API_KEY`。
+7. P5-7：统一 redaction 与 API key 错误恢复 UX，已完成：notifier/logger 统一脱敏 SecretStorage/env key，API key 配置后 idle 状态自动重启 RPC，active run 场景保守提示稍后生效。
+8. P5-8：Git context 只读采集与大 diff attachment 管线，已完成：优先使用 VS Code Git API，git CLI 仅作受控 fallback，commit/PR 命令把 diff context 作为 `explicit_content` attachment 进入 Context Capsule 管线。
+9. P5-9：Generate Commit Message，已完成：从 staged diff 生成候选 commit message 并写入 Source Control inputBox，不自动 commit；staged 为空时才询问是否使用 unstaged diff。
+10. P5-10：Generate PR Description，已完成：根据 upstream/main/master/用户选择的 base、diff/stat 和 commit summary 生成 PR title/body markdown，用带标题的 untitled markdown 预览承载结果，不自动创建 PR。
+11. P5-11：Phase 5 UX 工作流验收，已完成：补齐 P5-6 到 P5-10 的测试、VSIX 验证和文档收敛；Git workflow agent 终态事件已补幂等保护，G4 自动 commit / push / create PR 留作后续增强并接入审批模型。
 
 在这些能力稳定前，不在插件侧重复实现 context builder、tool execution 或 provider 调用。
 
