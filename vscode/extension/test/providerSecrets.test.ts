@@ -3,10 +3,13 @@ import test from "node:test";
 
 import {
   DEEPSEEK_API_KEY_ENV,
+  DEEPSEEK_MODEL_ENV,
   deepSeekEnvOverride,
+  formatDeepSeekModelStatus,
   formatProviderSecretStatus,
   providerSecretRedactionValues,
   resolveDeepSeekApiKey,
+  resolveDeepSeekModel,
 } from "../src/providerSecrets.js";
 
 test("resolveDeepSeekApiKey prefers SecretStorage over process env", () => {
@@ -21,6 +24,10 @@ test("resolveDeepSeekApiKey prefers SecretStorage over process env", () => {
   assert.equal(resolution.apiKey, "secret-storage-key");
   assert.deepEqual(deepSeekEnvOverride(resolution), {
     [DEEPSEEK_API_KEY_ENV]: "secret-storage-key",
+  });
+  assert.deepEqual(deepSeekEnvOverride(resolution, " deepseek-v4-flash "), {
+    [DEEPSEEK_API_KEY_ENV]: "secret-storage-key",
+    [DEEPSEEK_MODEL_ENV]: "deepseek-v4-flash",
   });
   assert.deepEqual(providerSecretRedactionValues(resolution), ["secret-storage-key"]);
   assert.equal(formatProviderSecretStatus(resolution), "DeepSeek API key: VS Code SecretStorage");
@@ -48,4 +55,30 @@ test("resolveDeepSeekApiKey falls back to process env and reports missing", () =
   assert.deepEqual(deepSeekEnvOverride(missingResolution), {});
   assert.deepEqual(providerSecretRedactionValues(missingResolution), []);
   assert.equal(formatProviderSecretStatus(missingResolution), "DeepSeek API key: missing");
+});
+
+test("resolveDeepSeekModel prefers configured model over process env", () => {
+  assert.equal(
+    resolveDeepSeekModel({
+      configuredModel: " deepseek-v4-pro ",
+      processEnv: {
+        [DEEPSEEK_MODEL_ENV]: "deepseek-v4-flash",
+      },
+    }),
+    "deepseek-v4-pro",
+  );
+  assert.equal(
+    resolveDeepSeekModel({
+      configuredModel: "",
+      processEnv: {
+        [DEEPSEEK_MODEL_ENV]: " deepseek-v4-flash ",
+      },
+    }),
+    "deepseek-v4-flash",
+  );
+  assert.equal(resolveDeepSeekModel({ configuredModel: " ", processEnv: {} }), undefined);
+  assert.equal(
+    formatDeepSeekModelStatus("deepseek-v4-pro"),
+    "DeepSeek model: DeepSeek V4 Pro (deepseek-v4-pro)",
+  );
 });

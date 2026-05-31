@@ -25,6 +25,7 @@ import {
   deepSeekEnvOverride,
   providerSecretRedactionValues,
   resolveDeepSeekApiKey,
+  resolveDeepSeekModel,
 } from "./providerSecrets";
 import { MutableSecretRedactor } from "./redaction";
 import { RpcServerManager, readRpcServerLaunchConfig } from "./rpcServer";
@@ -38,11 +39,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     secretValue: await context.secrets.get(DEEPSEEK_API_KEY_SECRET_ID),
     processEnv: process.env,
   });
+  const providerConfiguration = vscode.workspace.getConfiguration("prole-coder.provider");
+  const configuredModel = providerConfiguration.get<unknown>("model", "");
+  const initialModelId = resolveDeepSeekModel({
+    configuredModel: typeof configuredModel === "string" ? configuredModel : "",
+    processEnv: process.env,
+  });
   secretRedactor.update(providerSecretRedactionValues(initialSecretStatus));
   const notifier = createExtensionNotifier(logger, vscode.window, secretRedactor);
   context.subscriptions.push(outputChannel);
 
-  const rpcServer = createRpcServerManager(context, notifier, deepSeekEnvOverride(initialSecretStatus));
+  const rpcServer = createRpcServerManager(context, notifier, deepSeekEnvOverride(initialSecretStatus, initialModelId));
   const chatView = new ProleChatViewProvider(context.extensionUri, rpcServer, workspaceRoot, logger, secretRedactor);
   const chatParticipant = registerProleChatParticipant(context, rpcServer, workspaceRoot, logger, secretRedactor);
   const openChat = registerOpenChatCommand(
@@ -79,6 +86,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     redactor: secretRedactor,
     rpcServer,
     isRpcIdle: () => chatView.isIdle(),
+    providerConfiguration,
+    configurationTarget: vscode.ConfigurationTarget.Global,
   });
   const gitRepositoryProvider = createVscodeGitRepositoryProvider();
   const markdownSink = createVscodeMarkdownSink();

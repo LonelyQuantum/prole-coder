@@ -12,6 +12,7 @@ const CONTRIBUTED_COMMANDS = [
   "prole-coder.configureDeepSeekApiKey",
   "prole-coder.clearDeepSeekApiKey",
   "prole-coder.showProviderStatus",
+  "prole-coder.selectDeepSeekModel",
   "prole-coder.generateCommitMessage",
   "prole-coder.generatePrDescription",
 ] as const;

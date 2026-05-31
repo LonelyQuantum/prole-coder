@@ -273,8 +273,8 @@ export class RpcServerManager implements DisposableLike {
     this.child = child;
     child.stdout.on("data", (chunk) => this.handleStdoutData(chunk));
     child.stderr.on("data", (chunk) => this.handleStderrData(chunk));
-    child.on("exit", (code, signal) => this.handleExit(code, signal));
-    child.on("error", (error) => this.handleProcessError(error));
+    child.on("exit", (code, signal) => this.handleExit(child, code, signal));
+    child.on("error", (error) => this.handleProcessError(child, error));
 
     this.startPromise = new Promise<RpcServerReadyState>((resolve, reject) => {
       this.resolveStart = resolve;
@@ -506,7 +506,15 @@ export class RpcServerManager implements DisposableLike {
     this.stderrTail = `${this.stderrTail}${chunk.toString()}`.slice(-4096);
   }
 
-  private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
+  private handleExit(
+    exitedChild: RpcChildProcess,
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    if (this.child !== exitedChild) {
+      return;
+    }
+
     const wasIntentional = this.intentionalStop;
     this.child = undefined;
     this.readyState = undefined;
@@ -537,7 +545,11 @@ export class RpcServerManager implements DisposableLike {
     }
   }
 
-  private handleProcessError(error: Error): void {
+  private handleProcessError(processChild: RpcChildProcess, error: Error): void {
+    if (this.child !== processChild) {
+      return;
+    }
+
     if (this.currentStatus === "starting") {
       this.failStarting(error);
       return;

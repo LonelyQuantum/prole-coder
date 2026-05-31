@@ -96,12 +96,15 @@ test("RPC server manager forwards configured process environment overrides", asy
 
   const restarted = manager.start();
   const restartedChild = factory.lastChild();
+  child.exit(null, "SIGTERM");
   restartedChild.stdout.pushJson(initializeResponse(restartedChild.initializeRequest().id));
   await restarted;
 
   assert.deepEqual(factory.lastOptions?.env, {
     DEEPSEEK_API_KEY: "rotated-key",
   });
+  assert.equal(restartedChild.killed, false);
+  assert.equal(manager.status, "ready");
 });
 
 test("RPC server manager forwards agent.event notifications", async () => {

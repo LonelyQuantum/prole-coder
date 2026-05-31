@@ -19,6 +19,7 @@
     "onCommand:prole-coder.configureDeepSeekApiKey",
     "onCommand:prole-coder.clearDeepSeekApiKey",
     "onCommand:prole-coder.showProviderStatus",
+    "onCommand:prole-coder.selectDeepSeekModel",
     "onCommand:prole-coder.generateCommitMessage",
     "onCommand:prole-coder.generatePrDescription",
     "onView:prole-coder.chat",
@@ -46,6 +47,10 @@
       {
         "command": "prole-coder.showProviderStatus",
         "title": "ProleCoder: Show Provider Status"
+      },
+      {
+        "command": "prole-coder.selectDeepSeekModel",
+        "title": "ProleCoder: Select DeepSeek Model"
       },
       {
         "command": "prole-coder.generateCommitMessage",
@@ -145,6 +150,13 @@
           "minimum": 1000,
           "maximum": 100000,
           "description": "Maximum prefix and suffix characters sent to the RPC server for a FIM preview."
+        },
+        "prole-coder.provider.model": {
+          "type": "string",
+          "default": "",
+          "enum": ["", "deepseek-v4-pro", "deepseek-v4-flash"],
+          "enumItemLabels": ["Provider default", "DeepSeek V4 Pro", "DeepSeek V4 Flash"],
+          "description": "Optional DeepSeek model id used for chat and agent turns. Leave empty to use the provider default or DEEPSEEK_MODEL from the environment."
         }
       }
     }

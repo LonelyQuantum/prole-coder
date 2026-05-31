@@ -4,10 +4,15 @@ import test from "node:test";
 import {
   CLEAR_DEEPSEEK_API_KEY_COMMAND,
   CONFIGURE_DEEPSEEK_API_KEY_COMMAND,
+  SELECT_DEEPSEEK_MODEL_COMMAND,
   SHOW_PROVIDER_STATUS_COMMAND,
   registerProviderSecretCommands,
 } from "../src/providerSecretCommands.js";
-import { DEEPSEEK_API_KEY_ENV, DEEPSEEK_API_KEY_SECRET_ID } from "../src/providerSecrets.js";
+import {
+  DEEPSEEK_API_KEY_ENV,
+  DEEPSEEK_API_KEY_SECRET_ID,
+  DEEPSEEK_MODEL_ENV,
+} from "../src/providerSecrets.js";
 import { MutableSecretRedactor } from "../src/redaction.js";
 
 test("configure DeepSeek API key stores SecretStorage value, updates env, and restarts idle RPC", async () => {
@@ -85,7 +90,39 @@ test("show provider status reports missing configuration without exposing keys",
 
   await commands.run(SHOW_PROVIDER_STATUS_COMMAND);
 
-  assert.deepEqual(window.infos.at(-1), "DeepSeek API key: missing");
+  assert.deepEqual(window.infos.at(-1), "DeepSeek API key: missing; DeepSeek model: provider default");
+});
+
+test("select DeepSeek model stores configuration, updates env, and restarts idle RPC", async () => {
+  const commands = new FakeCommands();
+  const window = new FakeSecretWindow([], ["DeepSeek V4 Flash"]);
+  const secrets = new FakeSecrets({
+    [DEEPSEEK_API_KEY_SECRET_ID]: "fixture-secret-value",
+  });
+  const configuration = new FakeProviderConfiguration({
+    model: "deepseek-v4-pro",
+  });
+  const rpc = new FakeRpcServer("ready");
+
+  registerProviderSecretCommands({
+    commands,
+    window,
+    secrets,
+    providerConfiguration: configuration,
+    rpcServer: rpc,
+    isRpcIdle: () => true,
+  });
+
+  await commands.run(SELECT_DEEPSEEK_MODEL_COMMAND);
+
+  assert.equal(configuration.values["model"], "deepseek-v4-flash");
+  assert.deepEqual(rpc.processEnv, {
+    [DEEPSEEK_API_KEY_ENV]: "fixture-secret-value",
+    [DEEPSEEK_MODEL_ENV]: "deepseek-v4-flash",
+  });
+  assert.equal(rpc.stopCount, 1);
+  assert.equal(rpc.startCount, 1);
+  assert.deepEqual(window.infos.at(-1), "DeepSeek model: DeepSeek V4 Flash (deepseek-v4-flash)");
 });
 
 test("configure DeepSeek API key redacts restart failures", async () => {
@@ -127,10 +164,21 @@ class FakeSecretWindow {
   readonly infos: string[] = [];
   readonly warnings: string[] = [];
 
-  constructor(private readonly inputValues: string[]) {}
+  constructor(
+    private readonly inputValues: string[],
+    private readonly quickPickLabels: string[] = [],
+  ) {}
 
   showInputBox(): string | undefined {
     return this.inputValues.shift();
+  }
+
+  showQuickPick<T extends { readonly label: string }>(items: readonly T[]): T | undefined {
+    const label = this.quickPickLabels.shift();
+    if (label === undefined) {
+      return undefined;
+    }
+    return items.find((item) => item.label === label);
   }
 
   showInformationMessage(message: string): void {
@@ -155,6 +203,19 @@ class FakeSecrets {
 
   async delete(key: string): Promise<void> {
     delete this.values[key];
+  }
+}
+
+class FakeProviderConfiguration {
+  constructor(readonly values: Record<string, unknown> = {}) {}
+
+  get<T>(section: string, defaultValue: T): T {
+    const value = this.values[section];
+    return value === undefined ? defaultValue : (value as T);
+  }
+
+  update(section: string, value: unknown): void {
+    this.values[section] = value;
   }
 }
 
