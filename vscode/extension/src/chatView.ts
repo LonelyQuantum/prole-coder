@@ -27,6 +27,14 @@ import {
 } from "./contextViz";
 import { diagnosticAttachmentsFromProblems } from "./diagnostics";
 import type { ProleLogger } from "./logging";
+import {
+  CONFIGURE_DEEPSEEK_API_KEY_ACTION_LABEL,
+  isDeepSeekApiKeyRequiredMessage,
+} from "./providerConfigurationUx";
+import {
+  CONFIGURE_DEEPSEEK_API_KEY_COMMAND,
+  SELECT_DEEPSEEK_MODEL_COMMAND,
+} from "./providerSecretCommands";
 import type { MessageRedactor } from "./redaction";
 import type { AgentEventEnvelope, DisposableLike } from "./rpcServer";
 import {
@@ -90,6 +98,11 @@ type ExtensionToWebviewMessage =
 type ChatSubmissionStatus = "idle" | "sending" | "running" | "completed" | "failed" | "canceled";
 type TerminalSubmissionStatus = Extract<ChatSubmissionStatus, "completed" | "failed" | "canceled">;
 
+export interface ChatSubmissionAction {
+  readonly type: "configureDeepSeekApiKey";
+  readonly label: string;
+}
+
 export interface ChatSubmissionSnapshot {
   readonly busy: boolean;
   readonly status: ChatSubmissionStatus;
@@ -98,6 +111,7 @@ export interface ChatSubmissionSnapshot {
   readonly turnId?: string;
   readonly error?: string;
   readonly canceling?: boolean;
+  readonly action?: ChatSubmissionAction;
 }
 
 interface TerminalRunState {
@@ -220,6 +234,16 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       return;
     }
 
+    if (isConfigureDeepSeekApiKeyMessage(message)) {
+      await this.configureDeepSeekApiKey();
+      return;
+    }
+
+    if (isSelectDeepSeekModelMessage(message)) {
+      await this.selectDeepSeekModel();
+      return;
+    }
+
     if (!isRecord(message) || message["type"] !== "submitTurn") {
       return;
     }
@@ -285,13 +309,18 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     } catch (error) {
       const messageText = `Failed to send turn: ${errorMessage(error)}`;
       const redacted = this.redact(messageText);
+      const missingApiKey = isDeepSeekApiKeyRequiredMessage(messageText);
       this.logger?.error(redacted);
       this.setSubmission({
         ...idleSubmission(),
         status: "failed",
         message: redacted,
         error: redacted,
+        ...(missingApiKey ? { action: configureDeepSeekApiKeyAction() } : {}),
       });
+      if (missingApiKey) {
+        await this.configureDeepSeekApiKey();
+      }
     }
   }
 
@@ -485,6 +514,14 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
 
   private redact(message: string): string {
     return this.redactor?.redact(message) ?? message;
+  }
+
+  private async configureDeepSeekApiKey(): Promise<void> {
+    await vscode.commands.executeCommand(CONFIGURE_DEEPSEEK_API_KEY_COMMAND);
+  }
+
+  private async selectDeepSeekModel(): Promise<void> {
+    await vscode.commands.executeCommand(SELECT_DEEPSEEK_MODEL_COMMAND);
   }
 }
 
@@ -913,6 +950,7 @@ function renderChatViewHtml(
     .mode:focus,
     .send:focus,
     .cancel:focus,
+    .provider-action:focus,
     .refresh-runs:focus,
     .run-entry:focus,
     .context-tab:focus {
@@ -923,6 +961,7 @@ function renderChatViewHtml(
     .composer-row {
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
       gap: 8px;
       min-width: 0;
     }
@@ -959,7 +998,23 @@ function renderChatViewHtml(
       font-weight: 500;
     }
 
+    .provider-action {
+      flex: 0 0 auto;
+      min-width: 58px;
+      height: 28px;
+      padding: 0 8px;
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+      border: 0;
+      font: var(--vscode-font-size) var(--vscode-font-family);
+      font-weight: 500;
+    }
+
     .cancel:hover:enabled {
+      background: var(--vscode-button-secondaryHoverBackground);
+    }
+
+    .provider-action:hover:enabled {
       background: var(--vscode-button-secondaryHoverBackground);
     }
 
@@ -972,12 +1027,37 @@ function renderChatViewHtml(
 
     .submission {
       min-width: 0;
-      flex: 1;
+      flex: 1 1 100%;
       color: var(--vscode-descriptionForeground);
+      display: flex;
+      align-items: center;
+      gap: 6px;
       font-size: 12px;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+
+    .submission-message {
+      min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .submission-action {
+      flex: 0 0 auto;
+      border: 0;
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 11px;
+      line-height: 18px;
+      padding: 0 8px;
+    }
+
+    .submission-action:hover {
+      background: var(--vscode-button-hoverBackground);
     }
 
     .submission.failed {
@@ -1019,6 +1099,8 @@ function renderChatViewHtml(
       <textarea id="prompt" class="prompt" rows="3" placeholder="Ask ProleCoder" aria-label="Chat message"></textarea>
       <div class="composer-row">
         <select id="mode" class="mode" aria-label="Run mode"></select>
+        <button id="api-key" class="provider-action" type="button" title="Configure DeepSeek API key">API Key</button>
+        <button id="model" class="provider-action" type="button" title="Select DeepSeek model">Model</button>
         <button id="send" class="send" type="submit">Send</button>
         <button id="cancel" class="cancel" type="button">Cancel</button>
         <div id="submission" class="submission" aria-live="polite"></div>
@@ -1044,6 +1126,8 @@ function renderChatViewHtml(
     const composer = document.getElementById("composer");
     const promptInput = document.getElementById("prompt");
     const modeInput = document.getElementById("mode");
+    const apiKeyButton = document.getElementById("api-key");
+    const modelButton = document.getElementById("model");
     const sendButton = document.getElementById("send");
     const cancelButton = document.getElementById("cancel");
     const submissionRoot = document.getElementById("submission");
@@ -1076,6 +1160,14 @@ function renderChatViewHtml(
 
     refreshRunsButton.addEventListener("click", () => {
       vscodeApi.postMessage({ type: "refreshRuns" });
+    });
+
+    apiKeyButton.addEventListener("click", () => {
+      vscodeApi.postMessage({ type: "configureDeepSeekApiKey" });
+    });
+
+    modelButton.addEventListener("click", () => {
+      vscodeApi.postMessage({ type: "selectDeepSeekModel" });
     });
 
     cancelButton.addEventListener("click", () => {
@@ -1448,11 +1540,50 @@ function renderChatViewHtml(
       cancelButton.dataset.runId = runId;
       submissionRoot.className = "submission " + status;
       const submissionMessage = typeof state.message === "string" ? state.message : "";
-      submissionRoot.textContent = submissionMessage;
       submissionRoot.title = typeof state.error === "string" ? state.error : submissionMessage;
+      submissionRoot.replaceChildren();
+      const message = document.createElement("span");
+      message.className = "submission-message";
+      message.textContent = submissionMessage;
+      submissionRoot.append(message);
+      const actionButton = renderSubmissionAction(state.action);
+      if (actionButton) {
+        submissionRoot.append(actionButton);
+      }
       if (status === "running") {
         promptInput.value = "";
       }
+    }
+
+    function renderSubmissionAction(action) {
+      const definition = submissionActionDefinition(action);
+      if (definition === undefined) {
+        return undefined;
+      }
+
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "submission-action";
+      button.textContent = typeof action.label === "string" ? action.label : definition.fallbackLabel;
+      button.addEventListener("click", () => {
+        vscodeApi.postMessage({ type: definition.messageType });
+      });
+      return button;
+    }
+
+    function submissionActionDefinition(action) {
+      if (!action || typeof action !== "object") {
+        return undefined;
+      }
+
+      if (action.type === "configureDeepSeekApiKey") {
+        return {
+          fallbackLabel: "Configure API Key",
+          messageType: "configureDeepSeekApiKey",
+        };
+      }
+
+      return undefined;
     }
 
     function setComposerBusy(busy, cancelable) {
@@ -1511,6 +1642,13 @@ function idleSubmission(): ChatSubmissionSnapshot {
   };
 }
 
+function configureDeepSeekApiKeyAction(): ChatSubmissionAction {
+  return {
+    type: "configureDeepSeekApiKey",
+    label: CONFIGURE_DEEPSEEK_API_KEY_ACTION_LABEL,
+  };
+}
+
 function terminalSubmission(
   runId: string,
   turnId: string | undefined,
@@ -1566,6 +1704,14 @@ function cancelRunIdFromMessage(message: unknown): string | undefined {
 
   const runId = message["runId"];
   return typeof runId === "string" && runId.length > 0 ? runId : undefined;
+}
+
+function isConfigureDeepSeekApiKeyMessage(message: unknown): boolean {
+  return isRecord(message) && message["type"] === "configureDeepSeekApiKey";
+}
+
+function isSelectDeepSeekModelMessage(message: unknown): boolean {
+  return isRecord(message) && message["type"] === "selectDeepSeekModel";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

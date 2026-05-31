@@ -16,6 +16,8 @@ import {
 } from "./chatParticipantCore";
 import { diagnosticAttachmentsFromProblems } from "./diagnostics";
 import type { ProleLogger } from "./logging";
+import { isDeepSeekApiKeyRequiredMessage } from "./providerConfigurationUx";
+import { CONFIGURE_DEEPSEEK_API_KEY_COMMAND } from "./providerSecretCommands";
 import type { MessageRedactor } from "./redaction";
 
 export function registerProleChatParticipant(
@@ -27,13 +29,13 @@ export function registerProleChatParticipant(
 ): vscode.Disposable {
   const participant = vscode.chat.createChatParticipant(
     CHAT_PARTICIPANT_ID,
-    (request, chatContext, response, token) => {
+    async (request, chatContext, response, token) => {
       const automaticContext = automaticContextAttachmentFromMessages(
         messagesFromChatHistory(chatContext.history),
       );
       const diagnostics = collectDiagnosticAttachments(workspaceRoot);
       const attachments = mergeTurnAttachments(automaticContext, diagnostics);
-      return runChatParticipantTurn({
+      const result = await runChatParticipantTurn({
         ...(rpcClient === undefined ? {} : { rpcClient }),
         request: {
           prompt: request.prompt,
@@ -45,6 +47,10 @@ export function registerProleChatParticipant(
         ...(redactor === undefined ? {} : { redactor }),
         token,
       });
+      if (isDeepSeekApiKeyRequiredMessage(result.errorDetails?.message ?? "")) {
+        await vscode.commands.executeCommand(CONFIGURE_DEEPSEEK_API_KEY_COMMAND);
+      }
+      return result;
     },
   );
   participant.iconPath = vscode.Uri.joinPath(context.extensionUri, "media", "prole-coder-view.svg");
