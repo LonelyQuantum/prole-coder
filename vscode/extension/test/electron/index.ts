@@ -6,6 +6,15 @@ import * as vscode from "vscode";
 const extensionId = "prole-coder.prole-coder-vscode";
 const TEST_CHAT_MESSAGE_COMMAND = "prole-coder.test.chatMessage";
 const TEST_CHAT_STATE_COMMAND = "prole-coder.test.chatState";
+const CONTRIBUTED_COMMANDS = [
+  "prole-coder.openChat",
+  "prole-coder.openSettings",
+  "prole-coder.configureDeepSeekApiKey",
+  "prole-coder.clearDeepSeekApiKey",
+  "prole-coder.showProviderStatus",
+  "prole-coder.generateCommitMessage",
+  "prole-coder.generatePrDescription",
+] as const;
 
 export async function run(): Promise<void> {
   const extension = vscode.extensions.getExtension(extensionId);
@@ -21,7 +30,9 @@ export async function run(): Promise<void> {
   await vscode.commands.executeCommand("prole-coder.chat.focus");
 
   const commands = await vscode.commands.getCommands(true);
-  assert.equal(commands.includes("prole-coder.openChat"), true);
+  for (const command of CONTRIBUTED_COMMANDS) {
+    assert.equal(commands.includes(command), true);
+  }
   assert.equal(commands.includes(TEST_CHAT_MESSAGE_COMMAND), true);
   assert.equal(commands.includes(TEST_CHAT_STATE_COMMAND), true);
   await vscode.commands.executeCommand("prole-coder.openChat");
@@ -109,7 +120,9 @@ async function exerciseChatCancel(): Promise<void> {
 
   const canceled = await waitFor("canceled chat turn", async () => {
     const current = await chatState();
-    return current.submission.status === "canceled" && current.submission.runId === "run-cancel-1"
+    return current.submission.status === "canceled" &&
+      current.submission.runId === "run-cancel-1" &&
+      current.timeline.items.some((item) => item.type === "run.canceled")
       ? current
       : undefined;
   });
