@@ -151,6 +151,19 @@ impl RunLogStore {
         read_summary(&run_id, &self.summary_path(&run_id)?)
     }
 
+    pub fn delete_run(&self, run_id: impl Into<String>) -> Result<(), RunLogError> {
+        let run_id = validate_id("run id", run_id.into())?;
+        let run_dir = self.run_dir(&run_id)?;
+        if !run_dir.is_dir() {
+            return Err(RunLogError::RunNotFound { run_id });
+        }
+
+        fs::remove_dir_all(&run_dir).map_err(|source| RunLogError::Io {
+            path: run_dir,
+            source,
+        })
+    }
+
     pub fn list_run_summaries(&self) -> Result<Vec<RunSummary>, RunLogError> {
         if !self.runs_dir.exists() {
             return Ok(Vec::new());
@@ -451,8 +464,15 @@ impl RunSummary {
 
         match event.event_type.as_str() {
             "run.started" => {
-                self.started_at_unix_ms = event.time_unix_ms;
+                if self.event_count == 1 {
+                    self.started_at_unix_ms = event.time_unix_ms;
+                }
                 self.updated_at_unix_ms = event.time_unix_ms;
+                self.status = RunSummaryStatus::Running;
+                self.completed_at_unix_ms = None;
+                self.summary = None;
+                self.changed_files.clear();
+                self.verification_status = None;
                 self.mode = string_field(&event.payload, "mode");
             }
             "turn.started" => {
@@ -1227,6 +1247,60 @@ mod tests {
     }
 
     #[test]
+    fn run_log_summary_resets_terminal_fields_when_run_reopens_for_next_turn() {
+        let workspace = TestWorkspace::new("run-log");
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        let mut run = store
+            .create_run("run_multi_turn_summary")
+            .expect("run should be created");
+
+        run.append_at(100, "run.started", None, json!({ "mode": "ask" }))
+            .expect("first run started should append");
+        run.append_at(
+            110,
+            "turn.started",
+            Some("turn_1".to_owned()),
+            json!({ "turnId": "turn_1", "userTask": "First task" }),
+        )
+        .expect("first turn started should append");
+        run.append_at(
+            120,
+            "run.completed",
+            Some("turn_1".to_owned()),
+            json!({
+                "summary": "First summary.",
+                "changedFiles": ["README.md"],
+                "verificationStatus": "passed"
+            }),
+        )
+        .expect("first completion should append");
+        run.append_at(200, "run.started", None, json!({ "mode": "edit" }))
+            .expect("second run started should append");
+        run.append_at(
+            210,
+            "turn.started",
+            Some("turn_2".to_owned()),
+            json!({ "turnId": "turn_2", "userTask": "Second task" }),
+        )
+        .expect("second turn started should append");
+
+        let summary = store
+            .load_run_summary("run_multi_turn_summary")
+            .expect("summary should load");
+        assert_eq!(summary.title, "Second task");
+        assert_eq!(summary.status, RunSummaryStatus::Running);
+        assert_eq!(summary.started_at_unix_ms, 100);
+        assert_eq!(summary.updated_at_unix_ms, 210);
+        assert_eq!(summary.completed_at_unix_ms, None);
+        assert_eq!(summary.last_seq, 5);
+        assert_eq!(summary.event_count, 5);
+        assert_eq!(summary.mode.as_deref(), Some("edit"));
+        assert_eq!(summary.summary, None);
+        assert!(summary.changed_files.is_empty());
+        assert_eq!(summary.verification_status, None);
+    }
+
+    #[test]
     fn run_log_lists_summaries_by_recent_update_without_scanning_events() {
         let workspace = TestWorkspace::new("run-log");
         let store = RunLogStore::new(workspace.path()).expect("store should open");
@@ -1257,6 +1331,28 @@ mod tests {
         );
         assert_eq!(summaries[0].updated_at_unix_ms, 300);
         assert_eq!(summaries[1].updated_at_unix_ms, 100);
+    }
+
+    #[test]
+    fn run_log_deletes_run_directory_safely() {
+        let workspace = TestWorkspace::new("run-log");
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        store
+            .create_run("run_delete")
+            .expect("run should be created");
+
+        store
+            .delete_run("run_delete")
+            .expect("run should be deleted");
+
+        assert!(matches!(
+            store.load_run("run_delete"),
+            Err(RunLogError::RunNotFound { .. })
+        ));
+        assert!(matches!(
+            store.delete_run("../outside"),
+            Err(RunLogError::InvalidIdentifier { .. })
+        ));
     }
 
     #[test]
