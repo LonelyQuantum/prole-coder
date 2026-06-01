@@ -56,6 +56,7 @@ pub const REJECT_METHOD: RpcMethod = RpcMethod::new("reject");
 pub const CANCEL_METHOD: RpcMethod = RpcMethod::new("cancel");
 pub const RESUME_METHOD: RpcMethod = RpcMethod::new("resume");
 pub const LIST_RUNS_METHOD: RpcMethod = RpcMethod::new("listRuns");
+pub const DELETE_RUN_METHOD: RpcMethod = RpcMethod::new("deleteRun");
 pub const FIM_PREVIEW_METHOD: RpcMethod = RpcMethod::new("previewFim");
 pub const EVENT_METHOD: RpcMethod = RpcMethod::new("event");
 pub const EVENT_BATCH_METHOD: RpcMethod = RpcMethod::new("eventBatch");
@@ -416,6 +417,19 @@ pub struct ListRunsResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DeleteRunParams {
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteRunResult {
+    pub run_id: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RpcRunSummary {
     pub run_id: String,
     pub title: String,
@@ -645,6 +659,11 @@ pub trait AgentRpcRequestHandler {
         params: ListRunsParams,
     ) -> Result<AgentRpcHandlerOutput<ListRunsResult>, AgentRpcHandlerError>;
 
+    fn delete_run(
+        &mut self,
+        params: DeleteRunParams,
+    ) -> Result<AgentRpcHandlerOutput<DeleteRunResult>, AgentRpcHandlerError>;
+
     fn preview_fim(
         &mut self,
         params: FimPreviewParams,
@@ -787,13 +806,13 @@ where
             Some(run_id) => run_id,
             None => generate_id("run")?,
         };
-        let turn_id = "turn_1".to_owned();
         let provider = self.provider_factory.create_provider(&params)?;
         let run_log = self
             .workspace()?
             .store
-            .create_run(run_id.clone())
+            .open_or_create_run(run_id.clone())
             .map_err(map_run_log_error)?;
+        let turn_id = next_turn_id(&run_log).map_err(map_run_log_error)?;
         let attachments = params
             .attachments
             .iter()
@@ -993,6 +1012,32 @@ where
         Ok(AgentRpcHandlerOutput::new(ListRunsResult { runs }))
     }
 
+    fn delete_run(
+        &mut self,
+        params: DeleteRunParams,
+    ) -> Result<AgentRpcHandlerOutput<DeleteRunResult>, AgentRpcHandlerError> {
+        self.drain_ready_active_run_events()?;
+        if self
+            .active_run
+            .as_ref()
+            .is_some_and(|active_run| active_run.run_id == params.run_id)
+        {
+            return Err(AgentRpcHandlerError::new(
+                RPC_RUN_ALREADY_ACTIVE,
+                format!("run `{}` is active and cannot be deleted", params.run_id),
+            ));
+        }
+
+        self.workspace()?
+            .store
+            .delete_run(params.run_id.clone())
+            .map_err(map_run_log_error)?;
+        Ok(AgentRpcHandlerOutput::new(DeleteRunResult {
+            run_id: params.run_id,
+            deleted: true,
+        }))
+    }
+
     fn preview_fim(
         &mut self,
         params: FimPreviewParams,
@@ -1115,6 +1160,18 @@ impl<F> AgentTurnLoopRpcHandler<F> {
             )),
         }
     }
+}
+
+fn next_turn_id(run_log: &RunLog) -> Result<String, RunLogError> {
+    let turn_count = run_log
+        .load()?
+        .iter()
+        .filter(|event| event.event_type == "turn.started")
+        .count();
+    let turn_number = turn_count
+        .checked_add(1)
+        .ok_or(RunLogError::SequenceOverflow)?;
+    Ok(format!("turn_{turn_number}"))
 }
 
 impl TryFrom<&RunSummary> for RpcRunSummary {
@@ -2303,6 +2360,9 @@ where
             method if method == LIST_RUNS_METHOD.qualified_name() => {
                 self.handle_list_runs(id, message.params, writer)
             }
+            method if method == DELETE_RUN_METHOD.qualified_name() => {
+                self.handle_delete_run(id, message.params, writer)
+            }
             method if method == FIM_PREVIEW_METHOD.qualified_name() => {
                 self.handle_preview_fim(id, message.params, writer)
             }
@@ -2524,6 +2584,32 @@ where
         };
 
         match self.handler.list_runs(params) {
+            Ok(output) => {
+                write_json_line(writer, &JsonRpcResponse::new(id, output.result))?;
+                emit_run_log_events(writer, &output.events)
+            }
+            Err(error) => write_error(writer, id, error.into_error_object()),
+        }
+    }
+
+    fn handle_delete_run<W>(
+        &mut self,
+        id: Value,
+        params: Option<Value>,
+        writer: &mut W,
+    ) -> Result<(), AgentRpcError>
+    where
+        W: Write,
+    {
+        let params = match parse_params::<DeleteRunParams>(
+            params,
+            DELETE_RUN_METHOD.qualified_name().as_str(),
+        ) {
+            Ok(params) => params,
+            Err(error) => return write_error(writer, id, error),
+        };
+
+        match self.handler.delete_run(params) {
             Ok(output) => {
                 write_json_line(writer, &JsonRpcResponse::new(id, output.result))?;
                 emit_run_log_events(writer, &output.events)
@@ -2898,7 +2984,7 @@ mod tests {
     use prole_coder_agent_core::{
         approval::RiskLevel,
         provider::deepseek_api::ChatToolCall,
-        run_log::{RunLogEvent, RunLogStore},
+        run_log::{RunLogError, RunLogEvent, RunLogStore, RunSummaryStatus},
         test_helpers::TestWorkspace,
         turn_loop::{
             AgentTurnInput, AgentTurnLoopConfig, ApprovalDecision, TurnApprovalRequest,
@@ -2920,19 +3006,20 @@ mod tests {
         APPROVE_METHOD, ActiveRunSpawn, AgentInitializeParams, AgentInitializeResult,
         AgentRpcError, AgentRpcHandlerError, AgentRpcHandlerOutput, AgentRpcRequestHandler,
         AgentTurnLoopRpcHandler, ApproveParams, ApproveResult, CANCEL_METHOD, CancelParams,
-        CancelResult, EVENT_BATCH_METHOD, EVENT_METHOD, FIM_PREVIEW_METHOD, FimPreviewParams,
-        FimPreviewResult, INITIALIZE_METHOD, JSON_RPC_INTERNAL_ERROR, JSON_RPC_INVALID_PARAMS,
-        JSON_RPC_INVALID_REQUEST, JSON_RPC_METHOD_NOT_FOUND, JSON_RPC_PARSE_ERROR,
-        LIST_RUNS_METHOD, ListRunsParams, ListRunsResult, PROTOCOL_VERSION, REJECT_METHOD,
-        RESUME_METHOD, RPC_APPROVAL_DENIED, RPC_APPROVAL_NOT_FOUND, RPC_CONTEXT_BUDGET_EXCEEDED,
-        RPC_INTERNAL_INVARIANT, RPC_INVALID_TOOL_ARGUMENTS, RPC_PROVIDER_ERROR,
-        RPC_RUN_ALREADY_ACTIVE, RPC_RUN_CANCELED, RPC_RUN_NOT_FOUND, RPC_TOOL_EXECUTION_FAILED,
-        RPC_UNSUPPORTED_PROTOCOL, RPC_WORKSPACE_UNTRUSTED, RejectParams, RejectResult,
-        ResumeParams, ResumeResult, RpcApprovalPersistence, RpcApprovalQueue, RpcApprovalState,
-        RpcApprovedHunks, RpcRunState, RpcRunSummary, RpcRunSummaryStatus, RpcWorkspace,
-        SEND_TURN_METHOD, SendTurnParams, SendTurnResult, StdioEventBridge,
-        emit_live_run_log_events, format_unix_millis, run_log_event_to_notification,
-        run_log_events_to_batch_notification, run_stdio_request_loop, spawn_active_run,
+        CancelResult, DELETE_RUN_METHOD, DeleteRunParams, DeleteRunResult, EVENT_BATCH_METHOD,
+        EVENT_METHOD, FIM_PREVIEW_METHOD, FimPreviewParams, FimPreviewResult, INITIALIZE_METHOD,
+        JSON_RPC_INTERNAL_ERROR, JSON_RPC_INVALID_PARAMS, JSON_RPC_INVALID_REQUEST,
+        JSON_RPC_METHOD_NOT_FOUND, JSON_RPC_PARSE_ERROR, LIST_RUNS_METHOD, ListRunsParams,
+        ListRunsResult, PROTOCOL_VERSION, REJECT_METHOD, RESUME_METHOD, RPC_APPROVAL_DENIED,
+        RPC_APPROVAL_NOT_FOUND, RPC_CONTEXT_BUDGET_EXCEEDED, RPC_INTERNAL_INVARIANT,
+        RPC_INVALID_TOOL_ARGUMENTS, RPC_PROVIDER_ERROR, RPC_RUN_ALREADY_ACTIVE, RPC_RUN_CANCELED,
+        RPC_RUN_NOT_FOUND, RPC_TOOL_EXECUTION_FAILED, RPC_UNSUPPORTED_PROTOCOL,
+        RPC_WORKSPACE_UNTRUSTED, RejectParams, RejectResult, ResumeParams, ResumeResult,
+        RpcApprovalPersistence, RpcApprovalQueue, RpcApprovalState, RpcApprovedHunks, RpcRunState,
+        RpcRunSummary, RpcRunSummaryStatus, RpcWorkspace, SEND_TURN_METHOD, SendTurnParams,
+        SendTurnResult, StdioEventBridge, emit_live_run_log_events, format_unix_millis,
+        run_log_event_to_notification, run_log_events_to_batch_notification,
+        run_stdio_request_loop, spawn_active_run,
     };
 
     #[test]
@@ -2944,6 +3031,7 @@ mod tests {
         assert_eq!(CANCEL_METHOD.qualified_name(), "agent.cancel");
         assert_eq!(RESUME_METHOD.qualified_name(), "agent.resume");
         assert_eq!(LIST_RUNS_METHOD.qualified_name(), "agent.listRuns");
+        assert_eq!(DELETE_RUN_METHOD.qualified_name(), "agent.deleteRun");
         assert_eq!(FIM_PREVIEW_METHOD.qualified_name(), "agent.previewFim");
         assert_eq!(EVENT_METHOD.qualified_name(), "agent.event");
         assert_eq!(EVENT_BATCH_METHOD.qualified_name(), "agent.eventBatch");
@@ -3478,6 +3566,42 @@ mod tests {
     }
 
     #[test]
+    fn request_loop_deletes_runs() {
+        let input = [
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init_1",
+                "method": "agent.initialize",
+                "params": initialize_params()
+            })
+            .to_string(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "delete_1",
+                "method": "agent.deleteRun",
+                "params": {
+                    "runId": "run_rpc"
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+        let mut output = Vec::new();
+
+        let handler =
+            run_stdio_request_loop(Cursor::new(input), &mut output, TestHandler::default())
+                .expect("request loop should complete");
+
+        assert_eq!(handler.delete_runs.len(), 1);
+        assert_eq!(handler.delete_runs[0].run_id, "run_rpc");
+        let lines = output_lines(output);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1]["id"], "delete_1");
+        assert_eq!(lines[1]["result"]["runId"], "run_rpc");
+        assert_eq!(lines[1]["result"]["deleted"], true);
+    }
+
+    #[test]
     fn request_loop_handles_fim_preview_requests() {
         let input = [
             json!({
@@ -3768,6 +3892,97 @@ mod tests {
                 .iter()
                 .any(|event| event.event_type == "run.completed")
         );
+    }
+
+    #[test]
+    fn turn_loop_rpc_handler_appends_multiple_turns_to_existing_run() {
+        let workspace = TestWorkspace::new("rpc");
+        let mut handler = AgentTurnLoopRpcHandler::new(final_provider_factory);
+        handler
+            .initialize(
+                serde_json::from_value(initialize_params_for(workspace.path_str()))
+                    .expect("initialize params should deserialize"),
+            )
+            .expect("handler should initialize");
+
+        let first = handler
+            .send_turn(SendTurnParams {
+                run_id: Some("run_multi_turn".to_owned()),
+                message: "First task".to_owned(),
+                mode: super::RpcRunMode::Ask,
+                attachments: Vec::new(),
+            })
+            .expect("first turn should run");
+        let second = handler
+            .send_turn(SendTurnParams {
+                run_id: Some("run_multi_turn".to_owned()),
+                message: "Second task".to_owned(),
+                mode: super::RpcRunMode::Ask,
+                attachments: Vec::new(),
+            })
+            .expect("second turn should append to the same run");
+
+        assert_eq!(first.result.turn_id, "turn_1");
+        assert_eq!(second.result.turn_id, "turn_2");
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        let events = store
+            .load_run("run_multi_turn")
+            .expect("run log should load");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "run.started")
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "turn.started")
+                .map(|event| event.turn_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("turn_1"), Some("turn_2")]
+        );
+        let summary = store
+            .load_run_summary("run_multi_turn")
+            .expect("summary should load");
+        assert_eq!(summary.title, "Second task");
+        assert_eq!(summary.status, RunSummaryStatus::Completed);
+        assert_eq!(summary.summary.as_deref(), Some("RPC final answer"));
+    }
+
+    #[test]
+    fn turn_loop_rpc_handler_deletes_inactive_run_logs() {
+        let workspace = TestWorkspace::new("rpc");
+        let mut handler = AgentTurnLoopRpcHandler::new(final_provider_factory);
+        handler
+            .initialize(
+                serde_json::from_value(initialize_params_for(workspace.path_str()))
+                    .expect("initialize params should deserialize"),
+            )
+            .expect("handler should initialize");
+        handler
+            .send_turn(SendTurnParams {
+                run_id: Some("run_delete_rpc".to_owned()),
+                message: "Say hello".to_owned(),
+                mode: super::RpcRunMode::Ask,
+                attachments: Vec::new(),
+            })
+            .expect("turn should complete before deletion");
+
+        let result = handler
+            .delete_run(DeleteRunParams {
+                run_id: "run_delete_rpc".to_owned(),
+            })
+            .expect("inactive run should delete");
+
+        assert_eq!(result.result.run_id, "run_delete_rpc");
+        assert!(result.result.deleted);
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        assert!(matches!(
+            store.load_run("run_delete_rpc"),
+            Err(RunLogError::RunNotFound { .. })
+        ));
     }
 
     #[test]
@@ -4790,6 +5005,7 @@ mod tests {
         cancellations: Vec<CancelParams>,
         resumes: Vec<ResumeParams>,
         list_runs: Vec<ListRunsParams>,
+        delete_runs: Vec<DeleteRunParams>,
         fim_previews: Vec<FimPreviewParams>,
     }
 
@@ -4902,6 +5118,18 @@ mod tests {
                     changed_files: Vec::new(),
                     verification_status: Some("skipped".to_owned()),
                 }],
+            }))
+        }
+
+        fn delete_run(
+            &mut self,
+            params: DeleteRunParams,
+        ) -> Result<AgentRpcHandlerOutput<DeleteRunResult>, AgentRpcHandlerError> {
+            let run_id = params.run_id.clone();
+            self.delete_runs.push(params);
+            Ok(AgentRpcHandlerOutput::new(DeleteRunResult {
+                run_id,
+                deleted: true,
             }))
         }
 
