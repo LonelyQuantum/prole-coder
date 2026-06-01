@@ -26,6 +26,7 @@ export const CONFIGURE_DEEPSEEK_API_KEY_COMMAND = "prole-coder.configureDeepSeek
 export const CLEAR_DEEPSEEK_API_KEY_COMMAND = "prole-coder.clearDeepSeekApiKey";
 export const SHOW_PROVIDER_STATUS_COMMAND = "prole-coder.showProviderStatus";
 export const SELECT_DEEPSEEK_MODEL_COMMAND = "prole-coder.selectDeepSeekModel";
+const DELETE_DEEPSEEK_API_KEY_CONFIRM_LABEL = "Delete";
 
 export interface CommandRegistry {
   registerCommand(command: string, callback: () => unknown): DisposableLike;
@@ -60,7 +61,7 @@ export interface SecretWindowMessenger {
   ): T | undefined | PromiseLike<T | undefined>;
   createQuickPick<T extends SecretQuickPickItem>(): SecretQuickPickController<T>;
   showInformationMessage(message: string): unknown;
-  showWarningMessage(message: string): unknown;
+  showWarningMessage(message: string, ...items: readonly string[]): unknown;
 }
 
 export interface SecretQuickInputButton {
@@ -118,6 +119,7 @@ export interface RegisterProviderSecretCommandOptions {
   readonly providerConfiguration?: ProviderConfigurationLike | undefined;
   readonly configurationTarget?: unknown;
   readonly renameAliasButton?: SecretQuickInputButton | undefined;
+  readonly deleteKeyButton?: SecretQuickInputButton | undefined;
 }
 
 export interface ProviderSecretRuntimeState {
@@ -246,10 +248,13 @@ async function showDeepSeekApiKeyManager(
   let store = await readDeepSeekApiKeyStore(options.secrets);
   const quickPick = options.window.createQuickPick<DeepSeekApiKeyPickItem>();
   quickPick.title = "Select DeepSeek API Key";
-  quickPick.placeholder = "Choose a key, add a new one, or use the edit button to rename an alias.";
+  quickPick.placeholder = "Choose a key, add one, or use item buttons to rename or delete.";
   quickPick.ignoreFocusOut = true;
   quickPick.matchOnDescription = true;
-  quickPick.items = deepSeekApiKeyPickItems(store, options.renameAliasButton);
+  quickPick.items = deepSeekApiKeyPickItems(store, {
+    deleteKeyButton: options.deleteKeyButton,
+    renameAliasButton: options.renameAliasButton,
+  });
 
   return new Promise((resolve) => {
     let finished = false;
@@ -306,7 +311,11 @@ async function showDeepSeekApiKeyManager(
         actionInProgress = true;
         quickPick.hide();
         void (async () => {
-          finish(await renameDeepSeekApiKeyAlias(options, state, store, event.item.keyId));
+          finish(
+            event.button === options.deleteKeyButton
+              ? await deleteDeepSeekApiKey(options, state, store, event.item.keyId)
+              : await renameDeepSeekApiKeyAlias(options, state, store, event.item.keyId),
+          );
         })();
       }),
     );
@@ -395,6 +404,45 @@ async function renameDeepSeekApiKeyAlias(
   return status;
 }
 
+async function deleteDeepSeekApiKey(
+  options: RegisterProviderSecretCommandOptions,
+  state: ProviderSecretRuntimeState,
+  store: DeepSeekApiKeyStore,
+  keyId: string,
+): Promise<DeepSeekSecretResolution | undefined> {
+  const entry = store.entries.find((candidate) => candidate.id === keyId);
+  if (entry === undefined) {
+    return undefined;
+  }
+
+  const confirmation = await options.window.showWarningMessage(
+    `Delete DeepSeek API key "${entry.alias}"?`,
+    DELETE_DEEPSEEK_API_KEY_CONFIRM_LABEL,
+  );
+  if (confirmation !== DELETE_DEEPSEEK_API_KEY_CONFIRM_LABEL) {
+    return undefined;
+  }
+
+  const activeKeyId = selectedDeepSeekApiKeyEntry(store)?.id;
+  const entries = store.entries.filter((candidate) => candidate.id !== keyId);
+  const nextSelectedKeyId =
+    activeKeyId === keyId
+      ? entries[0]?.id
+      : entries.some((candidate) => candidate.id === store.selectedKeyId)
+        ? store.selectedKeyId
+        : entries[0]?.id;
+  await saveDeepSeekApiKeyStore(options.secrets, {
+    selectedKeyId: nextSelectedKeyId,
+    entries,
+  });
+  const status = await refreshProviderSecretState(options, state);
+  if (activeKeyId === keyId) {
+    await restartRpcAfterSecretChange(options, "DeepSeek API key deleted.");
+  }
+  options.window.showInformationMessage(`DeepSeek API key deleted: ${entry.alias}`);
+  return status;
+}
+
 async function clearSelectedDeepSeekApiKey(
   options: Pick<RegisterProviderSecretCommandOptions, "secrets">,
 ): Promise<void> {
@@ -461,14 +509,19 @@ interface DeepSeekApiKeyPickItem extends SecretQuickPickItem {
 
 function deepSeekApiKeyPickItems(
   store: DeepSeekApiKeyStore,
-  renameAliasButton: SecretQuickInputButton | undefined,
+  buttons: {
+    readonly deleteKeyButton?: SecretQuickInputButton | undefined;
+    readonly renameAliasButton?: SecretQuickInputButton | undefined;
+  },
 ): readonly DeepSeekApiKeyPickItem[] {
   const selected = selectedDeepSeekApiKeyEntry(store);
   const keyItems = store.entries.map((entry) => ({
     label: entry.alias,
     description: `${maskDeepSeekApiKey(entry.apiKey)}${entry.id === selected?.id ? " (current)" : ""}`,
     detail: "Stored in VS Code SecretStorage",
-    buttons: renameAliasButton === undefined ? [] : [renameAliasButton],
+    buttons: [buttons.renameAliasButton, buttons.deleteKeyButton].filter(
+      (button): button is SecretQuickInputButton => button !== undefined,
+    ),
     kind: "key" as const,
     keyId: entry.id,
   }));

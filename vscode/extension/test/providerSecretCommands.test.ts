@@ -140,6 +140,55 @@ test("configure DeepSeek API key renames an existing key alias without restartin
   assert.deepEqual(window.infos.at(-1), "DeepSeek API key alias updated: Team");
 });
 
+test("configure DeepSeek API key deletes a non-selected key without restarting RPC", async () => {
+  const commands = new FakeCommands();
+  const window = new FakeSecretWindow([], [], [{ label: "Personal", button: 1 }], ["Delete"]);
+  const secrets = new FakeSecrets({
+    [DEEPSEEK_API_KEY_STORE_SECRET_ID]: serializeDeepSeekApiKeyStore({
+      selectedKeyId: "work",
+      entries: [
+        {
+          id: "work",
+          alias: "Work",
+          apiKey: "work-secret-value",
+        },
+        {
+          id: "personal",
+          alias: "Personal",
+          apiKey: "personal-secret-value",
+        },
+      ],
+    }),
+  });
+  const rpc = new FakeRpcServer("ready");
+
+  registerProviderSecretCommands({
+    commands,
+    window,
+    secrets,
+    rpcServer: rpc,
+    isRpcIdle: () => true,
+    renameAliasButton: FakeSecretWindow.renameButton,
+    deleteKeyButton: FakeSecretWindow.deleteButton,
+  });
+
+  await commands.run(CONFIGURE_DEEPSEEK_API_KEY_COMMAND);
+
+  const keyStore = parseDeepSeekApiKeyStore(await secrets.get(DEEPSEEK_API_KEY_STORE_SECRET_ID));
+  assert.equal(keyStore.selectedKeyId, "work");
+  assert.deepEqual(
+    keyStore.entries.map((entry) => entry.id),
+    ["work"],
+  );
+  assert.deepEqual(rpc.processEnv, {
+    [DEEPSEEK_API_KEY_ENV]: "work-secret-value",
+  });
+  assert.equal(rpc.stopCount, 0);
+  assert.equal(rpc.startCount, 0);
+  assert.deepEqual(window.warnings.at(-1), 'Delete DeepSeek API key "Personal"?');
+  assert.deepEqual(window.infos.at(-1), "DeepSeek API key deleted: Personal");
+});
+
 test("clear DeepSeek API key falls back to process env without restarting active RPC", async () => {
   const commands = new FakeCommands();
   const window = new FakeSecretWindow([]);
@@ -259,6 +308,7 @@ class FakeCommands {
 
 class FakeSecretWindow {
   static readonly renameButton = { tooltip: "Rename alias" };
+  static readonly deleteButton = { tooltip: "Delete key" };
 
   readonly infos: string[] = [];
   readonly warnings: string[] = [];
@@ -267,6 +317,7 @@ class FakeSecretWindow {
     private readonly inputValues: string[],
     private readonly quickPickLabels: string[] = [],
     private readonly quickPickInteractions: FakeQuickPickInteraction[] = [],
+    private readonly warningSelections: string[] = [],
   ) {}
 
   showInputBox(): string | undefined {
@@ -289,14 +340,18 @@ class FakeSecretWindow {
     this.infos.push(message);
   }
 
-  showWarningMessage(message: string): void {
+  showWarningMessage(message: string, ...items: readonly string[]): string | undefined {
     this.warnings.push(message);
+    if (items.length === 0) {
+      return undefined;
+    }
+    return this.warningSelections.shift();
   }
 }
 
 interface FakeQuickPickInteraction {
   readonly label: string;
-  readonly button?: boolean;
+  readonly button?: boolean | number;
 }
 
 class FakeQuickPick<T extends { readonly label: string; readonly buttons?: readonly SecretQuickInputButton[] }> {
@@ -338,8 +393,9 @@ class FakeQuickPick<T extends { readonly label: string; readonly buttons?: reado
 
       const item = this.items.find((candidate) => candidate.label === interaction.label);
       assert.ok(item, `${interaction.label} should exist in quick pick`);
-      if (interaction.button === true) {
-        const button = item.buttons?.[0];
+      if (interaction.button !== undefined && interaction.button !== false) {
+        const buttonIndex = interaction.button === true ? 0 : interaction.button;
+        const button = item.buttons?.[buttonIndex];
         assert.ok(button, `${interaction.label} should have a button`);
         for (const callback of this.buttonCallbacks) {
           callback({ button, item });
