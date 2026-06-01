@@ -6,6 +6,7 @@ import {
   failedRunList,
   idleRunList,
   isRefreshRunsMessage,
+  deleteRunIdFromMessage,
   loadingRunList,
   readyRunList,
   resumeRunIdFromMessage,
@@ -46,7 +47,7 @@ test("run history leaves result limiting to the RPC server", () => {
   assert.equal(readyRunList({ runs }).runs.length, RUN_LIST_LIMIT + 1);
 });
 
-test("run history parses refresh and resume webview messages defensively", () => {
+test("run history parses refresh, resume, and delete webview messages defensively", () => {
   assert.equal(RUN_LIST_LIMIT, 20);
   assert.equal(isRefreshRunsMessage({ type: "refreshRuns" }), true);
   assert.equal(isRefreshRunsMessage({ type: "refreshRuns", runId: "run_1" }), true);
@@ -54,7 +55,11 @@ test("run history parses refresh and resume webview messages defensively", () =>
   assert.equal(resumeRunIdFromMessage({ type: "resumeRun", runId: " run_1 " }), "run_1");
   assert.equal(resumeRunIdFromMessage({ type: "resumeRun", runId: " " }), undefined);
   assert.equal(resumeRunIdFromMessage({ type: "resumeRun", runId: 1 }), undefined);
+  assert.equal(deleteRunIdFromMessage({ type: "deleteRun", runId: " run_1 " }), "run_1");
+  assert.equal(deleteRunIdFromMessage({ type: "deleteRun", runId: " " }), undefined);
+  assert.equal(deleteRunIdFromMessage({ type: "deleteRun", runId: 1 }), undefined);
   assert.equal(resumeRunIdFromMessage(idleRunList()), undefined);
+  assert.equal(deleteRunIdFromMessage(idleRunList()), undefined);
 });
 
 function runSummary(runId: string) {

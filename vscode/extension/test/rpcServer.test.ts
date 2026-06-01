@@ -6,6 +6,7 @@ import {
   DEFAULT_RPC_COMMAND,
   RPC_APPROVE_METHOD,
   RPC_CANCEL_METHOD,
+  RPC_DELETE_RUN_METHOD,
   RPC_EVENT_BATCH_METHOD,
   RPC_INITIALIZE_METHOD,
   RPC_LIST_RUNS_METHOD,
@@ -318,7 +319,7 @@ test("RPC server manager sends typed agent.sendTurn requests and resolves matchi
   });
 });
 
-test("RPC server manager sends typed run list and resume requests", async () => {
+test("RPC server manager sends typed run list, resume, and delete requests", async () => {
   const factory = new FakeProcessFactory();
   const manager = rpcManagerWithFactory(factory);
   const readyPromise = manager.start();
@@ -387,6 +388,25 @@ test("RPC server manager sends typed run list and resume requests", async () => 
     runId: "run_1",
     nextSeq: 9,
     replayStarted: true,
+  });
+
+  const deletePromise = manager.deleteRun({ runId: "run_1" });
+  await flushMicrotasks();
+  const deleteRequest = child.requestAt(3);
+  assert.equal(deleteRequest.method, RPC_DELETE_RUN_METHOD);
+  assert.deepEqual(deleteRequest.params, { runId: "run_1" });
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    id: deleteRequest.id,
+    result: {
+      runId: "run_1",
+      deleted: true,
+    },
+  });
+
+  assert.deepEqual(await deletePromise, {
+    runId: "run_1",
+    deleted: true,
   });
 });
 
