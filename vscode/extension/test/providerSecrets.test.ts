@@ -137,6 +137,48 @@ test("serializeDeepSeekApiKeyStore validates entries before writing", () => {
   });
 });
 
+test("parseDeepSeekApiKeyStore skips malformed entries defensively", () => {
+  const store = parseDeepSeekApiKeyStore(
+    JSON.stringify({
+      version: 1,
+      selectedKeyId: " duplicate ",
+      keys: [
+        "not an entry",
+        {
+          id: " duplicate ",
+          alias: " First   Key ",
+          apiKey: " first-secret-value ",
+        },
+        {
+          id: "duplicate",
+          alias: "Duplicate",
+          apiKey: "second-secret-value",
+        },
+        {
+          id: "empty-key",
+          alias: "Empty",
+          apiKey: " ",
+        },
+        {
+          id: "missing-key",
+          alias: "Missing",
+        },
+      ],
+    }),
+  );
+
+  assert.deepEqual(store, {
+    selectedKeyId: "duplicate",
+    entries: [
+      {
+        id: "duplicate",
+        alias: "First Key",
+        apiKey: "first-secret-value",
+      },
+    ],
+  });
+});
+
 test("resolveDeepSeekApiKey falls back to process env and reports missing", () => {
   const envResolution = resolveDeepSeekApiKey({
     processEnv: {
