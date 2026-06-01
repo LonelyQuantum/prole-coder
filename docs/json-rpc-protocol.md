@@ -929,6 +929,34 @@ JSON-RPC 标准错误保留标准语义。项目特定错误使用 `-32000` 到 
 }
 ```
 
+Provider 配置错误可以在 `error.data` 中携带恢复动作。VS Code、TUI 等前端必须优先依据结构化字段决定 UX，不解析 `message` 文案：
+
+```ts
+interface RpcRecoverableAction {
+  kind: "configureDeepSeekApiKey";
+  label: string;
+}
+
+interface ProviderConfigurationErrorData {
+  provider: "deepseek";
+  configurationError: "missingApiKey";
+  recoverableAction: RpcRecoverableAction;
+}
+```
+
+例如 DeepSeek API key 缺失时，`agent.sendTurn` / `agent.previewFim` 会返回 `E_PROVIDER_ERROR`，并附带：
+
+```json
+{
+  "provider": "deepseek",
+  "configurationError": "missingApiKey",
+  "recoverableAction": {
+    "kind": "configureDeepSeekApiKey",
+    "label": "Configure API Key"
+  }
+}
+```
+
 ## 端到端示例
 
 Client 发送 turn：
