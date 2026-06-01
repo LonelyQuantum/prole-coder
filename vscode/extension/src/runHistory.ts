@@ -63,6 +63,16 @@ export function readyRunList(
   };
 }
 
+export function deletedRunList(
+  previous: RunListSnapshot,
+  deletedRunId: string,
+  message?: string,
+): RunListSnapshot {
+  const runs = previous.runs.filter((run) => run.runId !== deletedRunId);
+  const selectedRunId = previous.selectedRunId === deletedRunId ? undefined : previous.selectedRunId;
+  return readyRunList({ runs }, selectedRunId, message);
+}
+
 export function failedRunList(
   message: string,
   previous: RunListSnapshot = idleRunList(),

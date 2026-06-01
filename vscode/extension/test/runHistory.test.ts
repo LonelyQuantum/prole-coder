@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   RUN_LIST_LIMIT,
+  deletedRunList,
   failedRunList,
   idleRunList,
   isRefreshRunsMessage,
@@ -38,6 +39,25 @@ test("run history ready snapshots only keep a selected run that still exists", (
   assert.deepEqual(readyRunList({ runs: [runSummary("run_1")] }, "missing"), {
     status: "ready",
     runs: [runSummary("run_1")],
+  });
+});
+
+test("run history delete snapshots remove runs and keep valid selections", () => {
+  const ready = readyRunList(
+    { runs: [runSummary("run_1"), runSummary("run_2"), runSummary("run_3")] },
+    "run_2",
+  );
+
+  assert.deepEqual(deletedRunList(ready, "run_1", "Deleted run_1."), {
+    status: "ready",
+    runs: [runSummary("run_2"), runSummary("run_3")],
+    selectedRunId: "run_2",
+    message: "Deleted run_1.",
+  });
+  assert.deepEqual(deletedRunList(ready, "run_2", "Deleted run_2."), {
+    status: "ready",
+    runs: [runSummary("run_1"), runSummary("run_3")],
+    message: "Deleted run_2.",
   });
 });
 
