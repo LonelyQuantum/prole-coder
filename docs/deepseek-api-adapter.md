@@ -153,7 +153,7 @@ adapter 使用显式错误枚举：
 - DeepSeek 返回非 2xx 状态。
 - JSON 响应或 SSE data 解析失败。
 
-非 2xx 响应保留 HTTP status 和响应 body，便于上层生成用户可读错误。API Key 不进入错误消息。
+HTTP client 启用 reqwest `system-proxy`，让 CLI、RPC server 和 VS Code 插件启动的子进程都尽量复用系统代理配置。发送失败时错误消息会保留 timeout/connect/request/body/decode 等分类和底层 source chain；如果 source 中包含带用户名密码的 URL，会先脱敏。非 2xx 响应保留 HTTP status 和响应 body，便于上层生成用户可读错误。API Key 不进入错误消息。
 
 ## reasoning_content 规则
 
@@ -170,6 +170,7 @@ adapter 只负责序列化和反序列化 `reasoning_content` 字段。是否需
 
 - 配置 Debug 不泄露 API Key。
 - base URL 带路径时 endpoint 拼接正确。
+- HTTP 错误格式化不会泄露 URL 用户名密码。
 - thinking request 序列化。
 - `thinking.type = disabled` 时不会发送 `reasoning_effort`。
 - `tool_choice` 与 thinking mode 的不兼容组合会在本地校验失败。

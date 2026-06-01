@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, env, fmt, pin::Pin, str, time::Duration};
+use std::{
+    collections::BTreeMap, env, error::Error as StdError, fmt, pin::Pin, str, time::Duration,
+};
 
 use futures_util::{Stream, StreamExt};
 use reqwest::StatusCode;
@@ -40,8 +42,12 @@ pub enum DeepSeekApiError {
     ToolChoiceUnsupportedWithThinking,
     #[error("non-stream chat completion call received a streaming request")]
     StreamingRequestInNonStreamCall,
-    #[error("DeepSeek API request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("DeepSeek API request failed: {details}")]
+    Http {
+        details: String,
+        #[source]
+        source: reqwest::Error,
+    },
     #[error("DeepSeek API returned HTTP {status}: {body}")]
     Api { status: StatusCode, body: String },
     #[error("DeepSeek API JSON response is invalid: {source}; body: {body}")]
@@ -58,6 +64,15 @@ pub enum DeepSeekApiError {
     InvalidStreamUtf8(#[from] str::Utf8Error),
     #[error("DeepSeek stream ended with an incomplete SSE event ({buffered_bytes} buffered bytes)")]
     IncompleteStreamEvent { buffered_bytes: usize },
+}
+
+impl DeepSeekApiError {
+    fn http(source: reqwest::Error) -> Self {
+        Self::Http {
+            details: format_reqwest_error(&source),
+            source,
+        }
+    }
 }
 
 pub type ChatCompletionStream =
@@ -214,7 +229,8 @@ impl DeepSeekApiAdapter {
     pub fn new(config: DeepSeekApiConfig) -> Result<Self, DeepSeekApiError> {
         let client = reqwest::Client::builder()
             .timeout(config.timeout())
-            .build()?;
+            .build()
+            .map_err(DeepSeekApiError::http)?;
 
         Ok(Self { client, config })
     }
@@ -245,7 +261,8 @@ impl DeepSeekApiAdapter {
             .bearer_auth(&self.config.api_key)
             .json(&request)
             .send()
-            .await?;
+            .await
+            .map_err(DeepSeekApiError::http)?;
 
         decode_chat_completion_response(response).await
     }
@@ -263,7 +280,8 @@ impl DeepSeekApiAdapter {
             .bearer_auth(&self.config.api_key)
             .json(&request)
             .send()
-            .await?;
+            .await
+            .map_err(DeepSeekApiError::http)?;
 
         decode_chat_completion_stream(response).await
     }
@@ -279,7 +297,8 @@ impl DeepSeekApiAdapter {
             .bearer_auth(&self.config.api_key)
             .json(&request)
             .send()
-            .await?;
+            .await
+            .map_err(DeepSeekApiError::http)?;
 
         decode_fim_completion_response(response).await
     }
@@ -289,7 +308,7 @@ async fn decode_chat_completion_response(
     response: reqwest::Response,
 ) -> Result<ChatCompletionResponse, DeepSeekApiError> {
     let status = response.status();
-    let body = response.text().await?;
+    let body = response.text().await.map_err(DeepSeekApiError::http)?;
 
     if !status.is_success() {
         return Err(DeepSeekApiError::Api { status, body });
@@ -302,7 +321,7 @@ async fn decode_fim_completion_response(
     response: reqwest::Response,
 ) -> Result<FimCompletionResponse, DeepSeekApiError> {
     let status = response.status();
-    let body = response.text().await?;
+    let body = response.text().await.map_err(DeepSeekApiError::http)?;
     if !status.is_success() {
         return Err(DeepSeekApiError::Api { status, body });
     }
@@ -315,7 +334,7 @@ async fn decode_chat_completion_stream(
 ) -> Result<ChatCompletionStream, DeepSeekApiError> {
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await?;
+        let body = response.text().await.map_err(DeepSeekApiError::http)?;
         return Err(DeepSeekApiError::Api { status, body });
     }
 
@@ -325,7 +344,7 @@ async fn decode_chat_completion_stream(
         let mut parser = SseEventParser::new();
 
         while let Some(chunk) = byte_stream.next().await {
-            let chunk = chunk?;
+            let chunk = chunk.map_err(DeepSeekApiError::http)?;
             for event in parser.push_bytes(&chunk)? {
                 let done = event == StreamEvent::Done;
                 yield event;
@@ -340,6 +359,76 @@ async fn decode_chat_completion_stream(
             yield event;
         }
     }))
+}
+
+fn format_reqwest_error(error: &reqwest::Error) -> String {
+    let mut details = Vec::new();
+    details.push(redact_url_credentials(&error.to_string()));
+
+    let mut kinds = Vec::new();
+    if error.is_timeout() {
+        kinds.push("timeout");
+    }
+    if error.is_connect() {
+        kinds.push("connect");
+    }
+    if error.is_request() {
+        kinds.push("request");
+    }
+    if error.is_body() {
+        kinds.push("body");
+    }
+    if error.is_decode() {
+        kinds.push("decode");
+    }
+    if !kinds.is_empty() {
+        details.push(format!("kind: {}", kinds.join("/")));
+    }
+    if let Some(status) = error.status() {
+        details.push(format!("status: {status}"));
+    }
+
+    let mut source = StdError::source(error);
+    while let Some(cause) = source {
+        let cause_message = redact_url_credentials(&cause.to_string());
+        if !cause_message.is_empty() && !details.iter().any(|detail| detail == &cause_message) {
+            details.push(format!("caused by: {cause_message}"));
+        }
+        source = StdError::source(cause);
+    }
+
+    details.join("; ")
+}
+
+fn redact_url_credentials(message: &str) -> String {
+    let mut result = String::with_capacity(message.len());
+    let mut rest = message;
+
+    while let Some(scheme_index) = rest.find("://") {
+        let authority_start = scheme_index + "://".len();
+        result.push_str(&rest[..authority_start]);
+        let after_scheme = &rest[authority_start..];
+        let authority_end = after_scheme
+            .find(|character: char| {
+                character == '/'
+                    || character == '\\'
+                    || character == '?'
+                    || character == '#'
+                    || character.is_whitespace()
+            })
+            .unwrap_or(after_scheme.len());
+        let authority = &after_scheme[..authority_end];
+        if let Some((_, host)) = authority.rsplit_once('@') {
+            result.push_str("[redacted]@");
+            result.push_str(host);
+        } else {
+            result.push_str(authority);
+        }
+        rest = &after_scheme[authority_end..];
+    }
+
+    result.push_str(rest);
+    result
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1120,7 +1209,7 @@ mod tests {
         ChatToolCallAccumulator, ChatToolCallAccumulatorError, ChatToolCallDelta, ChatToolType,
         DeepSeekApiConfig, DeepSeekApiError, DeepSeekModelId, FimCompletionRequest,
         ReasoningEffort, SseEventParser, StreamEvent, StreamOptions, ThinkingConfig, ToolChoice,
-        parse_stream_event_block,
+        parse_stream_event_block, redact_url_credentials,
     };
 
     #[test]
@@ -1168,6 +1257,16 @@ mod tests {
         assert_eq!(
             endpoint.as_str(),
             "https://api.deepseek.com/beta/chat/completions"
+        );
+    }
+
+    #[test]
+    fn request_error_formatting_redacts_url_credentials() {
+        assert_eq!(
+            redact_url_credentials(
+                "proxy failed at https://user:secret@example.test:8443/path and http://plain.test"
+            ),
+            "proxy failed at https://[redacted]@example.test:8443/path and http://plain.test"
         );
     }
 
