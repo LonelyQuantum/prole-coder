@@ -113,9 +113,39 @@ test("runChatParticipantTurn handles terminal events buffered before sendTurn re
   });
 });
 
+test("runChatParticipantTurn preserves run failed recovery actions", async () => {
+  const rpc = new FailedRecoveryChatParticipantRpcClient();
+  const response = new FakeChatResponseStream();
+  const result = await withTimeout(
+    runChatParticipantTurn({
+      rpcClient: rpc,
+      request: {
+        prompt: "hello",
+      },
+      response,
+    }),
+  );
+
+  assert.equal(response.markdownParts.join(""), "\n\nMissing DeepSeek API key.");
+  assert.deepEqual(result.metadata?.["providerConfigurationAction"], {
+    type: "configureDeepSeekApiKey",
+    label: "Configure API Key",
+  });
+});
+
 test("runChatParticipantTurn logs RPC failures before returning chat errors", async () => {
   const rpc = new RejectingChatParticipantRpcClient(
-    new Error("DeepSeek provider configuration failed: DEEPSEEK_API_KEY is required"),
+    new StructuredRpcRequestError(
+      "DeepSeek provider configuration failed: DEEPSEEK_API_KEY is required",
+      {
+        provider: "deepseek",
+        configurationError: "missingApiKey",
+        recoverableAction: {
+          kind: "configureDeepSeekApiKey",
+          label: "Configure API Key",
+        },
+      },
+    ),
   );
   const response = new FakeChatResponseStream();
   const logger = new FakeLogger();
@@ -129,6 +159,10 @@ test("runChatParticipantTurn logs RPC failures before returning chat errors", as
   });
 
   assert.ok(result.errorDetails?.message.includes("DEEPSEEK_API_KEY is required"));
+  assert.deepEqual(result.metadata?.["providerConfigurationAction"], {
+    type: "configureDeepSeekApiKey",
+    label: "Configure API Key",
+  });
   assert.deepEqual(logger.errors, [result.errorDetails?.message]);
 });
 
@@ -199,6 +233,27 @@ class EarlyTerminalChatParticipantRpcClient extends FakeChatParticipantRpcClient
   }
 }
 
+class FailedRecoveryChatParticipantRpcClient extends FakeChatParticipantRpcClient {
+  override async sendTurn(params: SendTurnParams): Promise<SendTurnResult> {
+    this.sendTurns.push(params);
+    queueMicrotask(() => {
+      this.emit(agentEvent(1, "run.failed", {
+        code: "E_PROVIDER_ERROR",
+        message: "Missing DeepSeek API key.",
+        recoverableAction: {
+          kind: "configureDeepSeekApiKey",
+          label: "Configure API Key",
+        },
+      }));
+    });
+    return {
+      runId: "run_chat_1",
+      turnId: "turn_chat_1",
+      accepted: true as const,
+    };
+  }
+}
+
 class RejectingChatParticipantRpcClient extends FakeChatParticipantRpcClient {
   constructor(private readonly error: Error) {
     super();
@@ -207,6 +262,13 @@ class RejectingChatParticipantRpcClient extends FakeChatParticipantRpcClient {
   override async sendTurn(params: SendTurnParams): Promise<SendTurnResult> {
     this.sendTurns.push(params);
     throw this.error;
+  }
+}
+
+class StructuredRpcRequestError extends Error {
+  constructor(message: string, readonly data: unknown) {
+    super(message);
+    this.name = "RpcRequestError";
   }
 }
 
