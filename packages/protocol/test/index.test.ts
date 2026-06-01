@@ -11,6 +11,7 @@ import {
   agentRejectMethod,
   agentCancelMethod,
   agentListRunsMethod,
+  agentDeleteRunMethod,
   agentEventBatchMethod,
   agentPreviewFimMethod,
   type ApprovalRequest,
@@ -18,6 +19,8 @@ import {
   type ApproveResult,
   type CancelParams,
   type CancelResult,
+  type DeleteRunParams,
+  type DeleteRunResult,
   type AgentEventBatchParams,
   type FimPreviewParams,
   type FimPreviewResult,
@@ -130,6 +133,7 @@ test("JSON-RPC method constants match protocol document", () => {
   assert.equal(agentRejectMethod, "agent.reject");
   assert.equal(agentCancelMethod, "agent.cancel");
   assert.equal(agentListRunsMethod, "agent.listRuns");
+  assert.equal(agentDeleteRunMethod, "agent.deleteRun");
   assert.equal(agentPreviewFimMethod, "agent.previewFim");
   assert.equal(agentEventMethod, "agent.event");
   assert.equal(agentEventBatchMethod, "agent.eventBatch");
@@ -332,6 +336,17 @@ test("run summary params and results use stable protocol fields", () => {
   assert.equal(result.runs[0]?.runId, "run_1");
   assert.equal(result.runs[0]?.status, "completed");
   assert.equal(result.runs[0]?.lastSeq, 8);
+
+  const deleteParams = {
+    runId: "run_1",
+  } satisfies DeleteRunParams;
+  const deleteResult = {
+    runId: "run_1",
+    deleted: true,
+  } satisfies DeleteRunResult;
+
+  assert.equal(deleteParams.runId, "run_1");
+  assert.equal(deleteResult.deleted, true);
 });
 
 test("attachments and provider completed payload use phase 2c and 2d fields", () => {

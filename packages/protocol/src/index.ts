@@ -9,6 +9,7 @@ export const agentApproveMethod = "agent.approve" as const;
 export const agentRejectMethod = "agent.reject" as const;
 export const agentCancelMethod = "agent.cancel" as const;
 export const agentListRunsMethod = "agent.listRuns" as const;
+export const agentDeleteRunMethod = "agent.deleteRun" as const;
 export const agentPreviewFimMethod = "agent.previewFim" as const;
 
 export interface ProtocolErrorDefinition {
@@ -508,6 +509,15 @@ export interface RunSummary {
 
 export interface ListRunsResult {
   readonly runs: readonly RunSummary[];
+}
+
+export interface DeleteRunParams {
+  readonly runId: string;
+}
+
+export interface DeleteRunResult {
+  readonly runId: string;
+  readonly deleted: true;
 }
 
 export interface ApproveParams {
