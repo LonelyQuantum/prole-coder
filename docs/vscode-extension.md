@@ -1,6 +1,6 @@
 # 编辑器插件（VS Code Extension）
 
-状态：Phase 3 VS Code 插件核心体验已完成；Phase 4 VS Code 深度集成已完成 14 项深度集成能力；Phase 5 VS Code Codex-like UX 与开发工作流进行中。基础命令、审批弹窗 adapter、RPC server 启动监管、初始化握手、JSON-RPC request client、VS Code/protocol TypeScript 类型共享、RPC/commands 边界测试、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、共享 RPC 全双工事件管线、命令风险动态升级展示、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、VSIX alpha 打包、extension-host E2E、原生 `@prole` Chat Participant、简化审批 UX、自动上下文压缩、`ProleCoder` Output Channel 错误诊断、API key/model 配置、统一 redaction、Git 工作流、Sidebar 连续会话、Run 删除和折叠事件 UX 均已实现；P5-13 结构化 provider 配置错误码与恢复动作仍未完成。
+状态：Phase 3 VS Code 插件核心体验已完成；Phase 4 VS Code 深度集成已完成 14 项深度集成能力；Phase 5 VS Code Codex-like UX 与开发工作流进行中。基础命令、审批弹窗 adapter、RPC server 启动监管、初始化握手、JSON-RPC request client、VS Code/protocol TypeScript 类型共享、RPC/commands 边界测试、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、共享 RPC 全双工事件管线、命令风险动态升级展示、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、VSIX alpha 打包、extension-host E2E、原生 `@prole` Chat Participant、简化审批 UX、自动上下文压缩、`ProleCoder` Output Channel 错误诊断、API key/model 配置、统一 redaction、Git 工作流、Sidebar 连续会话、Run 删除、折叠事件 UX 和结构化 provider 配置错误恢复均已实现；P5-14 持续 UX 测试与体验改进占位仍未完成。
 
 VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server 复用 Rust Agent Core，而不是在 TypeScript 侧重新实现 agent loop、context builder、provider 调用或 tool execution。
 
@@ -149,7 +149,8 @@ Phase 5 Codex-like UX 与开发工作流清单与 `docs/phase-tasks.md` 对齐�
 10. P5-10：Generate PR Description，已完成：根据 upstream/main/master/用户选择的 base、diff/stat 和 commit summary 生成 PR title/body markdown，用带标题的 untitled markdown 预览承载结果，不自动创建 PR。
 11. P5-11：Phase 5 UX 工作流验收，已完成：补齐 P5-6 到 P5-10 的测试、VSIX 验证和文档收敛；Git workflow agent 终态事件已补幂等保护，G4 自动 commit / push / create PR 留作后续增强并接入审批模型。
 12. P5-12：Sidebar 连续会话、Run 删除与折叠事件 UX，已完成：Sidebar resume 后继续同一 run 发送多轮 turn，Run List 可通过 `agent.deleteRun` 删除 inactive run；tool/provider/request 等过程事件默认折叠，assistant 文本和最终摘要保持可见，完整事件 payload 写入 `Output > ProleCoder`。
-13. P5-13：结构化 provider 配置错误码与恢复动作，未完成：将缺少 API key 等 provider 配置失败从前端字符串匹配升级为 RPC 结构化错误码，Sidebar/原生 Chat 和后续 TUI 依据错误码展示配置入口。
+13. P5-13：结构化 provider 配置错误码与恢复动作，已完成：DeepSeek 缺少 API key 的 RPC `E_PROVIDER_ERROR` 返回 `data.provider` / `data.configurationError` / `data.recoverableAction`，Sidebar/原生 Chat Participant 依据 recoverable action 展示或自动触发 Configure API Key，不再解析后端英文错误消息；run failed payload 也支持同一恢复动作。
+14. P5-14：持续 UX 测试与体验改进占位，未完成：根据真实 VS Code 插件试用继续收集 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩等体验问题，作为 Phase 5 整体完成前的持续验收入口。
 
 在这些能力稳定前，不在插件侧重复实现 context builder、tool execution 或 provider 调用。
 

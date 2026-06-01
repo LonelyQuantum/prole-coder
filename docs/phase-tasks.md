@@ -1,6 +1,6 @@
 # 详细任务索引
 
-状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-12 已完成，P5-13 结构化 provider 配置错误码仍未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
+状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-13 已完成，P5-14 持续 UX 测试与体验改进占位仍未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
 
 本文档是详细设计文档里的任务账本。README 保留高层开发计划；这里把各模块文档中出现的“已实现、尚未实现、后续增强、下一步”收敛为可勾选任务，避免后续工作只散落在说明文字里。
 
@@ -109,7 +109,7 @@
 | [x] | P4-14：补齐 end-to-end 集成测试覆盖 | `README.md`、`docs/vscode-extension.md`、`docs/testing.md` | 已完成：`pnpm run vscode:test-electron` 在隔离 user-data/extensions profile 中启动 VS Code test host，并通过 `vscode/extension/test/fixtures/rpcFixtureServer.mjs` 本地 JSON-RPC fixture 覆盖 extension activation、Chat sendTurn、Problems diagnostic attachments、自动审批回传、Cancel、Run List / resume 和 Chat timeline/submission/context 状态；VSIX 安装后的 clean 环境基础交互继续按 `docs/release.md` 的可重复手动路径验收。 |
 ## Phase 5：VS Code Codex-like UX 与开发工作流
 
-状态：进行中。P5-1 到 P5-12 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收、Output Channel、API key/model 配置、错误恢复、只读 Git context、GitLens-like commit / PR 文案生成工作流，以及 Sidebar 连续会话 / Run 删除 / 折叠事件 UX；P5-13 结构化 provider 配置错误码与恢复动作未完成。G4 自动 commit / push / create PR 留作后续增强。
+状态：进行中。P5-1 到 P5-13 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收、Output Channel、API key/model 配置、错误恢复、只读 Git context、GitLens-like commit / PR 文案生成工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX，以及结构化 provider 配置错误码与恢复动作；P5-14 持续 UX 测试与体验改进占位仍未完成。G4 自动 commit / push / create PR 留作后续增强。
 
 | 状态 | 任务 | 来源 | 说明 |
 | --- | --- | --- | --- |
@@ -125,7 +125,8 @@
 | [x] | P5-10：Generate PR Description markdown 生成 | `README.md`、`docs/vscode-extension.md`、`docs/testing.md` | 已完成：基于 upstream tracking branch、`main`、`master` 或用户选择确定 base，采集 branch diff/stat/commit summary，生成 PR title/body markdown；首版提供有标题的 untitled markdown 预览/复制/打开入口，不自动创建 PR。 |
 | [x] | P5-11：Phase 5 UX 工作流验收与文档收敛 | `README.md`、`docs/roadmap.md`、`docs/testing.md` | 已完成：补齐 P5-6 到 P5-10 的单元测试、extension-host 验收、VSIX smoke/alpha 验证和文档一致性检查；Git workflow agent 终态事件已补幂等保护，明确 G4 自动 commit / push / create PR 为后续增强，需要接入审批模型后再做。验收：`pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke`、`pnpm run vsix:alpha`、`git diff --check` 和敏感信息扫描。 |
 | [x] | P5-12：Sidebar 连续会话、Run 删除与折叠事件 UX | `README.md`、`docs/vscode-extension.md`、`docs/json-rpc-protocol.md`、`docs/testing.md` | 已完成：RPC/protocol 新增 `agent.deleteRun`；Run Log 支持删除 inactive run；`agent.sendTurn.runId` 可复用已有 run 并自动递增 `turn_N`，Sidebar Chat 在 resume 后继续同一会话发送多轮 turn；tool/provider/request 等过程事件默认折叠，assistant 文本和最终 `run.completed.summary` 保持可见；完整事件 payload 写入 `Output > ProleCoder` 便于 debug；Turn Loop 默认注入最终回复摘要契约。验收：新增 Rust/TS 单元测试覆盖 deleteRun、多 turn run log、折叠 timeline、typed RPC delete 和 runHistory delete message。 |
-| [ ] | P5-13：结构化 provider 配置错误码与恢复动作 | `docs/json-rpc-protocol.md`、`docs/vscode-extension.md`、`docs/testing.md` | 未完成：将缺少 API key 等 provider 配置失败从前端字符串匹配升级为 RPC 结构化错误码；VS Code Sidebar/原生 Chat 和后续 TUI 依据错误码展示配置入口，避免依赖后端英文错误消息。 |
+| [x] | P5-13：结构化 provider 配置错误码与恢复动作 | `docs/json-rpc-protocol.md`、`docs/vscode-extension.md`、`docs/testing.md` | 已完成：DeepSeek 缺少 API key 的 RPC `E_PROVIDER_ERROR` 返回 `data.provider` / `data.configurationError` / `data.recoverableAction`；VS Code Sidebar 和原生 Chat Participant 依据结构化 recoverable action 展示/触发 API key 配置入口，不再依赖后端英文错误消息；Run failed payload 同样可携带恢复动作。验收：新增 protocol、providerConfigurationUx、Chat Participant 和 CLI 单元测试覆盖结构化错误数据。 |
+| [ ] | P5-14：持续 UX 测试与体验改进占位 | `docs/testing.md`、`docs/vscode-extension.md` | 未完成：保留 Phase 5 的持续验收入口，用于根据真实 VS Code 插件试用继续收集 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩等体验问题；已登记 extension-host E2E 增强项：覆盖 resume 后继续发送新 turn、事件渲染、原生确认后的 run 删除与 Run List 刷新。只有这些手动/自动回归项稳定后，Phase 5 才能整体标记完成。 |
 
 ## Phase 6：TUI 与生态扩展
 
