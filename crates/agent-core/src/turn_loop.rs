@@ -34,6 +34,11 @@ const DEFAULT_MAX_ATTACHMENTS: usize = 32;
 const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 256 * 1024;
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_LINES: usize = 8;
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_BYTES: usize = 2 * 1024;
+const FINAL_RESPONSE_SUMMARY_INSTRUCTION: &str = concat!(
+    "When the task is complete, make the final assistant message a concise work summary for the user. ",
+    "Mention what changed, important files, verification or tests, and any blockers. ",
+    "Do not dump raw tool logs, JSON-RPC events, or intermediate provider/tool chatter; those details are recorded in ProleCoder Output."
+);
 
 #[derive(Debug)]
 pub struct AgentTurnLoop<P, A> {
@@ -416,6 +421,10 @@ where
                 "stable workspace manifest summary",
             ));
         }
+        builder.add_item(ContextItem::project_rules(
+            FINAL_RESPONSE_SUMMARY_INSTRUCTION,
+            "default final response summary contract",
+        ));
         builder.add_item(ContextItem::user_task(input.user_task.clone()));
         for item in &input.context_items {
             builder.add_item(item.clone());
@@ -2363,6 +2372,31 @@ mod tests {
                 "context should include {kind} attachment source"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn turn_loop_injects_final_response_summary_contract() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_final_summary_contract")
+            .expect("run should be created");
+        let provider =
+            ScriptedProvider::new(vec![TurnProviderResponse::final_text("Work summary.")]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Do a small task"), &mut run)
+            .await
+            .expect("turn should complete");
+
+        let prompt = loop_runner.provider.requests[0].messages[0]
+            .content
+            .as_deref()
+            .expect("provider prompt should include context");
+        assert!(prompt.contains("final assistant message"));
+        assert!(prompt.contains("Do not dump raw tool logs"));
     }
 
     #[tokio::test]
