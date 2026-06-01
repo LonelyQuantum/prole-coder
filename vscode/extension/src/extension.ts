@@ -106,6 +106,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       iconPath: new vscode.ThemeIcon("edit"),
       tooltip: "Rename alias",
     },
+    deleteKeyButton: {
+      iconPath: new vscode.ThemeIcon("trash"),
+      tooltip: "Delete key",
+    },
   });
   const gitRepositoryProvider = createVscodeGitRepositoryProvider();
   const markdownSink = createVscodeMarkdownSink();

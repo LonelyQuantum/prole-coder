@@ -4,6 +4,8 @@ import * as vscode from "vscode";
 import type {
   CancelParams,
   CancelResult,
+  DeleteRunParams,
+  DeleteRunResult,
   ListRunsParams,
   ListRunsResult,
   ResumeParams,
@@ -42,6 +44,7 @@ import {
   failedRunList,
   idleRunList,
   isRefreshRunsMessage,
+  deleteRunIdFromMessage,
   loadingRunList,
   readyRunList,
   resumeRunIdFromMessage,
@@ -65,6 +68,7 @@ export interface ChatCancelClient {
 export interface ChatRunHistoryClient {
   listRuns(params?: ListRunsParams): Promise<ListRunsResult>;
   resume(params: ResumeParams): Promise<ResumeResult>;
+  deleteRun(params: DeleteRunParams): Promise<DeleteRunResult>;
 }
 
 export type ChatRpcClient = ChatRpcEventSource & ChatTurnSender & ChatCancelClient & ChatRunHistoryClient;
@@ -134,6 +138,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   private submission: ChatSubmissionSnapshot = idleSubmission();
   private runList: RunListSnapshot = idleRunList();
   private contextViz: ContextVizSnapshot = emptyContextViz();
+  private activeConversationRunId: string | undefined;
   private rpcSubscription: DisposableLike | undefined;
   private viewMessageSubscription: DisposableLike | undefined;
   private view: vscode.WebviewView | undefined;
@@ -147,6 +152,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   ) {
     this.rpcClient = rpcClient;
     this.rpcSubscription = rpcClient?.onEvent((event) => {
+      this.logger?.info(this.redact(formatAgentEventLog(event)));
       this.timeline.append(event);
       const contextViz = contextVizFromEvent(event);
       if (contextViz !== undefined) {
@@ -228,6 +234,12 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       return;
     }
 
+    const deleteRunId = deleteRunIdFromMessage(message);
+    if (deleteRunId !== undefined) {
+      await this.deleteRun(deleteRunId);
+      return;
+    }
+
     const cancelRunId = cancelRunIdFromMessage(message);
     if (cancelRunId !== undefined) {
       await this.cancelTurn(cancelRunId);
@@ -290,9 +302,15 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
         automaticContext,
         this.collectDiagnosticAttachments(),
       );
+      const activeRunId = this.activeConversationRunId;
+      if (activeRunId !== undefined) {
+        this.terminalRuns.delete(activeRunId);
+      }
+      const params = sendTurnParams(parsed.value, attachments);
       const result = await this.rpcClient.sendTurn(
-        sendTurnParams(parsed.value, attachments),
+        activeRunId === undefined ? params : { ...params, runId: activeRunId },
       );
+      this.activeConversationRunId = result.runId;
       void this.refreshRuns("Refreshing runs...");
       const terminal = this.terminalRuns.get(result.runId);
       this.setSubmission(
@@ -382,7 +400,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     this.setRunList(loadingRunList(this.runList, message));
     try {
       const result = await this.rpcClient.listRuns({ limit: RUN_LIST_LIMIT });
-      this.setRunList(readyRunList(result, this.runList.selectedRunId));
+      this.setRunList(readyRunList(result, this.activeConversationRunId ?? this.runList.selectedRunId));
     } catch (error) {
       const messageText = `Failed to load runs: ${errorMessage(error)}`;
       const redacted = this.redact(messageText);
@@ -411,12 +429,48 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     this.setRunList(loadingRunList(this.runList, "Replaying run..."));
     try {
       const result = await this.rpcClient.resume({ runId });
+      this.activeConversationRunId = result.runId;
       const message = result.replayStarted
         ? `Replaying ${result.runId} through seq ${result.nextSeq - 1}.`
         : `No events to replay for ${result.runId}.`;
       this.setRunList(readyRunList({ runs: this.runList.runs }, result.runId, message));
     } catch (error) {
       const messageText = `Failed to resume run: ${errorMessage(error)}`;
+      const redacted = this.redact(messageText);
+      this.logger?.error(redacted);
+      this.setRunList(failedRunList(redacted, this.runList));
+    }
+  }
+
+  private async deleteRun(runId: string): Promise<void> {
+    if (this.rpcClient === undefined) {
+      this.setRunList(
+        failedRunList("Open a trusted workspace before deleting a run.", this.runList),
+      );
+      return;
+    }
+
+    if (this.submission.busy) {
+      this.setRunList(failedRunList("A turn is already running.", this.runList));
+      return;
+    }
+
+    this.setRunList(loadingRunList(this.runList, "Deleting run..."));
+    try {
+      const result = await this.rpcClient.deleteRun({ runId });
+      const runs = this.runList.runs.filter((run) => run.runId !== result.runId);
+      if (this.activeConversationRunId === result.runId) {
+        this.activeConversationRunId = undefined;
+        this.timeline.clear();
+        this.terminalRuns.delete(result.runId);
+        this.setSubmission(idleSubmission());
+        this.setContextViz(emptyContextViz());
+        this.postSnapshot();
+      }
+      this.setRunList(readyRunList({ runs }, undefined, `Deleted ${result.runId}.`));
+      void this.refreshRuns("Refreshing runs...");
+    } catch (error) {
+      const messageText = `Failed to delete run: ${errorMessage(error)}`;
       const redacted = this.redact(messageText);
       this.logger?.error(redacted);
       this.setRunList(failedRunList(redacted, this.runList));
@@ -644,6 +698,13 @@ function renderChatViewHtml(
       overflow: auto;
     }
 
+    .run-entry-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 28px;
+      align-items: stretch;
+      gap: 4px;
+    }
+
     .run-entry {
       display: grid;
       gap: 2px;
@@ -657,6 +718,23 @@ function renderChatViewHtml(
       border-left: 3px solid var(--vscode-editorWidget-border);
       font: var(--vscode-font-size) var(--vscode-font-family);
       text-align: left;
+    }
+
+    .run-delete {
+      width: 28px;
+      min-height: 48px;
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+      border: 1px solid transparent;
+      font: var(--vscode-font-size) var(--vscode-font-family);
+    }
+
+    .run-delete:hover:enabled {
+      background: var(--vscode-button-secondaryHoverBackground);
+    }
+
+    .run-delete:disabled {
+      opacity: 0.55;
     }
 
     .run-entry:hover:enabled,
@@ -1281,6 +1359,8 @@ function renderChatViewHtml(
     }
 
     function renderRunEntry(run, selectedRunId, disabled) {
+      const row = document.createElement("div");
+      row.className = "run-entry-row";
       const button = document.createElement("button");
       const status = typeof run.status === "string" ? run.status : "running";
       button.type = "button";
@@ -1305,8 +1385,22 @@ function renderChatViewHtml(
         meta.append(item);
       }
 
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "run-delete";
+      deleteButton.disabled = disabled;
+      deleteButton.title = "Delete run";
+      deleteButton.setAttribute("aria-label", "Delete run");
+      deleteButton.textContent = "x";
+      deleteButton.addEventListener("click", () => {
+        if (typeof run.runId === "string" && run.runId.length > 0 && confirm("Delete this run?")) {
+          vscodeApi.postMessage({ type: "deleteRun", runId: run.runId });
+        }
+      });
+
       button.append(title, meta);
-      return button;
+      row.append(button, deleteButton);
+      return row;
     }
 
     function runTitle(run) {

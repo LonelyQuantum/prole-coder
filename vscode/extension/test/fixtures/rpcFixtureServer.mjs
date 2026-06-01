@@ -84,6 +84,9 @@ function handleRequest(request) {
     case "agent.resume":
       handleResume(request);
       return;
+    case "agent.deleteRun":
+      handleDeleteRun(request);
+      return;
     default:
       respondError(request.id, -32601, `Unknown method: ${request.method}`);
   }
@@ -92,14 +95,19 @@ function handleRequest(request) {
 function handleSendTurn(request) {
   const params = record(request.params);
   const message = typeof params?.message === "string" ? params.message : "";
-  const runId = message.includes("cancel") ? "run-cancel-1" : "run-approval-1";
-  const turnId = message.includes("cancel") ? "turn-cancel-1" : "turn-approval-1";
+  const runId = typeof params?.runId === "string" && params.runId.length > 0
+    ? params.runId
+    : message.includes("cancel") ? "run-cancel-1" : "run-approval-1";
+  const existing = runs.get(runId);
+  const turnIndex = typeof existing?.eventCount === "number" ? existing.eventCount + 1 : 1;
+  const turnId = message.includes("cancel") ? "turn-cancel-1" : `turn-${turnIndex}`;
   const now = new Date().toISOString();
   runs.set(runId, {
+    ...(existing ?? {}),
     runId,
     title: message || "Untitled fixture run",
     status: "running",
-    startedAt: now,
+    startedAt: existing?.startedAt ?? now,
     updatedAt: now,
     lastSeq: seq,
     eventCount: 0,
@@ -146,6 +154,20 @@ function handleSendTurn(request) {
     });
     updateRun(runId, { lastSeq: seq - 1, eventCount: 4 });
   }, 10);
+}
+
+function handleDeleteRun(request) {
+  const runId = request.params?.runId;
+  if (!runs.has(runId)) {
+    respondError(request.id, -32003, `Run not found: ${runId}`);
+    return;
+  }
+
+  runs.delete(runId);
+  respond(request.id, {
+    runId,
+    deleted: true,
+  });
 }
 
 function handleApprove(request) {
