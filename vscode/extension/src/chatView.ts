@@ -461,10 +461,18 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       return;
     }
 
+    const confirmation = await vscode.window.showWarningMessage(
+      `Delete run ${runId}?`,
+      { modal: true },
+      "Delete",
+    );
+    if (confirmation !== "Delete") {
+      return;
+    }
+
     this.setRunList(loadingRunList(this.runList, "Deleting run..."));
     try {
       const result = await this.rpcClient.deleteRun({ runId });
-      const runs = this.runList.runs.filter((run) => run.runId !== result.runId);
       if (this.activeConversationRunId === result.runId) {
         this.activeConversationRunId = undefined;
         this.timeline.clear();
@@ -473,7 +481,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
         this.setContextViz(emptyContextViz());
         this.postSnapshot();
       }
-      this.setRunList(readyRunList({ runs }, undefined, `Deleted ${result.runId}.`));
+      this.setRunList(deletedRunList(this.runList, result.runId, `Deleted ${result.runId}.`));
       void this.refreshRuns("Refreshing runs...");
     } catch (error) {
       const messageText = `Failed to delete run: ${errorMessage(error)}`;
@@ -1398,8 +1406,9 @@ function renderChatViewHtml(
       deleteButton.title = "Delete run";
       deleteButton.setAttribute("aria-label", "Delete run");
       deleteButton.textContent = "x";
-      deleteButton.addEventListener("click", () => {
-        if (typeof run.runId === "string" && run.runId.length > 0 && confirm("Delete this run?")) {
+      deleteButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (typeof run.runId === "string" && run.runId.length > 0) {
           vscodeApi.postMessage({ type: "deleteRun", runId: run.runId });
         }
       });
