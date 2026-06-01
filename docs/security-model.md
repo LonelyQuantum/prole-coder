@@ -7,7 +7,7 @@
 ## 边界
 
 - API Key 不得进入 run log。
-- VS Code 插件中的 DeepSeek API key 存入 SecretStorage；多 key 管理器只展示 alias 与 masked key，支持选择 active key 和修改 alias，优先级高于进程环境变量；传给 RPC 子进程时只通过 child env 覆盖 active `DEEPSEEK_API_KEY`。DeepSeek model ID 不是密钥，可通过 VS Code 普通设置保存，并在 child env 中覆盖 `DEEPSEEK_MODEL`。
+- VS Code 插件中的 DeepSeek API key 存入 SecretStorage；多 key 管理器只展示 alias 与 masked key，支持选择 active key、修改 alias 和删除指定 key，优先级高于进程环境变量；传给 RPC 子进程时只通过 child env 覆盖 active `DEEPSEEK_API_KEY`。DeepSeek model ID 不是密钥，可通过 VS Code 普通设置保存，并在 child env 中覆盖 `DEEPSEEK_MODEL`。
 - `.env` 和本地状态必须被 git 忽略。
 - tool call 执行前必须校验 schema。
 - 写入应通过 patch application。

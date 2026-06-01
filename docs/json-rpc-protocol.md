@@ -443,6 +443,28 @@ interface ListRunsResult {
 - `limit` 省略时返回全部已知 run；传入时只返回前 N 条。
 - 当前 Rust request loop 已能解析 `agent.listRuns` 并分发给 handler；`AgentTurnLoopRpcHandler` 已能从 Run Log summary metadata 返回列表。
 
+### `agent.deleteRun`
+
+删除当前 workspace 内的本地 run log。
+
+```ts
+interface DeleteRunParams {
+  runId: string;
+}
+
+interface DeleteRunResult {
+  runId: string;
+  deleted: true;
+}
+```
+
+规则：
+
+- `agent.deleteRun` 仅删除通过 run id 校验后的 `.prole-coder/runs/<runId>` 目录；非法 id 不会解析为文件路径。
+- 如果本地 run log 不存在，返回 `E_RUN_NOT_FOUND`。
+- 如果该 run 正在当前 RPC handler 内 active，返回 `E_RUN_ALREADY_ACTIVE`，前端应先取消或等待 run 收口。
+- 当前 Rust request loop 已能解析 `agent.deleteRun` 并分发给 handler；`AgentTurnLoopRpcHandler` 已能删除 inactive run 并保持 list/resume 语义一致。
+
 ### `agent.previewFim`
 
 请求一次 fill-in-the-middle completion preview。该方法用于编辑器 inline completion，不创建 run，也不写入 run log。

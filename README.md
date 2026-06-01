@@ -568,7 +568,7 @@ extension.ts
 
 ## 开发计划
 
-当前进度：Phase 1 Agent Core MVP 功能闭环、Phase 2 的 1M Context Capsule 核心收敛、Phase 3 的 VS Code 插件核心与共享 RPC 交互管线以及 Phase 4 的 VS Code 深度集成均已完成；Phase 5：VS Code Codex-like UX 与开发工作流仍在进行中。Phase 4 保留 14 项深度集成能力；Phase 5 已完成原生 `@prole` Chat Participant、默认右侧 Chat 入口、简化审批 UX、自动上下文压缩、UX 验收、`ProleCoder` Output Channel 错误诊断、插件内 SecretStorage 多 API key 管理器、侧边栏 API key/model 选择入口、统一 redaction 与错误恢复、只读 Git context、commit message 写入 SCM inputBox 和 PR markdown 生成；P5-12 结构化 provider 配置错误码与恢复动作仍未完成。DeepSeek provider、基础工具执行、Context Builder、Run Log、Turn Loop、CLI、RPC、审批、取消、真实 DeepSeek streaming/tool-call 验收、本地 fixture smoke、进程级 CLI smoke、小型真实仓库 CLI 联网验收、合并前测试收敛、Context Capsule、manifest、token estimator、attachments、provider summary、Run Log 体积控制、tool call JSON Schema 校验、200K/500K/900K 离线大上下文验收入口和 Phase 2e 展示型 demo 扩展均已完成；VS Code RPC server 启动监管、JSON-RPC request client、RPC 全双工 reader/writer 与事件发送队列、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、命令风险动态升级、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、命令子进程树清理、VSIX alpha 打包、extension-host 端到端验收、原生 `@prole` Chat Participant、自动上下文压缩、简化审批 UX、Output Channel 错误诊断、API key/model 配置和 Git 工作流均已完成。完成 P5-12 后再进入 Phase 6：TUI 与生态扩展。
+当前进度：Phase 1 Agent Core MVP 功能闭环、Phase 2 的 1M Context Capsule 核心收敛、Phase 3 的 VS Code 插件核心与共享 RPC 交互管线以及 Phase 4 的 VS Code 深度集成均已完成；Phase 5：VS Code Codex-like UX 与开发工作流仍在进行中。Phase 4 保留 14 项深度集成能力；Phase 5 已完成原生 `@prole` Chat Participant、默认右侧 Chat 入口、简化审批 UX、自动上下文压缩、UX 验收、`ProleCoder` Output Channel 错误诊断、插件内 SecretStorage 多 API key 管理器、侧边栏 API key/model 选择入口、统一 redaction 与错误恢复、只读 Git context、commit message 写入 SCM inputBox、PR markdown 生成、Sidebar 连续会话、Run 删除和过程事件默认折叠；P5-13 结构化 provider 配置错误码与恢复动作仍未完成。DeepSeek provider、基础工具执行、Context Builder、Run Log、Turn Loop、CLI、RPC、审批、取消、真实 DeepSeek streaming/tool-call 验收、本地 fixture smoke、进程级 CLI smoke、小型真实仓库 CLI 联网验收、合并前测试收敛、Context Capsule、manifest、token estimator、attachments、provider summary、Run Log 体积控制、tool call JSON Schema 校验、200K/500K/900K 离线大上下文验收入口和 Phase 2e 展示型 demo 扩展均已完成；VS Code RPC server 启动监管、JSON-RPC request client、RPC 全双工 reader/writer 与事件发送队列、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、命令风险动态升级、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、命令子进程树清理、VSIX alpha 打包、extension-host 端到端验收、原生 `@prole` Chat Participant、自动上下文压缩、简化审批 UX、Output Channel 错误诊断、API key/model 配置和 Git 工作流均已完成。完成 P5-13 后再进入 Phase 6：TUI 与生态扩展。
 
 阶段完成口径：README 中某个 Phase 只有在 `docs/phase-tasks.md` 对应 Phase 下的所有任务都标记为 `[x]` 后，才能在高层开发计划中表述为“全部完成”。如果某阶段核心功能已完成但仍有 P1/P2 增强或发布/文档验收项未完成，README 必须继续把该阶段表述为进行中，并列出剩余任务。
 
@@ -699,21 +699,22 @@ extension.ts
 - [x] P5-3：Sidebar Chat 和原生 Chat Participant 自动注入压缩后的对话历史，作为 `explicit_content` attachment 进入已有 Context Capsule 管线，让连续对话自然承接上下文；Sidebar timeline 单条消息会先限长，避免极端长流式输出造成过大的中间文本。
 - [x] P5-4：补齐 UX 收敛单元测试、extension-host E2E、VSIX smoke/alpha 打包验证和文档说明；已通过 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke` 和 `pnpm run vsix:alpha`，并补充 Chat Participant 早到 terminal event 缓冲回归测试。
 - [x] P5-5：VS Code Output Channel 错误诊断：插件创建 `ProleCoder` Output Channel，Sidebar Chat、Run List、原生 `@prole` Chat Participant 和 RPC 启动/运行 warning 的完整错误会写入 Output；activation 层使用统一 notifier 分发日志与 VS Code toast；侧边栏继续显示短状态并通过 hover title 暴露完整文本。
-- [x] P5-6：DeepSeek API key SecretStorage、model selector 与 provider status：插件提供 Configure/Clear API Key、Select DeepSeek Model 和 provider status 入口；API key 配置入口是 SecretStorage 多 key 管理器，列表展示 alias 与 masked key，支持 `+ Add` 添加 key+alias、选择 active key 和行内 edit 按钮修改 alias；status 同时显示 key 来源/alias 与当前 model；Sidebar composer 常驻 Key/Model 按钮；SecretStorage 优先、process env fallback，RPC child env 继承 `process.env` 后覆盖 active `DEEPSEEK_API_KEY` 与选中的 `DEEPSEEK_MODEL`。
+- [x] P5-6：DeepSeek API key SecretStorage、model selector 与 provider status：插件提供 Configure/Clear API Key、Select DeepSeek Model 和 provider status 入口；API key 配置入口是 SecretStorage 多 key 管理器，列表展示 alias 与 masked key，支持 `+ Add` 添加 key+alias、选择 active key、行内 edit 修改 alias 和 trash 删除指定 key；status 同时显示 key 来源/alias 与当前 model；Sidebar composer 常驻 Key/Model 按钮；SecretStorage 优先、process env fallback，RPC child env 继承 `process.env` 后覆盖 active `DEEPSEEK_API_KEY` 与选中的 `DEEPSEEK_MODEL`。
 - [x] P5-7：统一 redaction 与 API key 错误恢复 UX：notifier/logger 统一脱敏 SecretStorage/env key，覆盖 Output Channel、toast 和 RPC startup failure；缺少 `DEEPSEEK_API_KEY` 时 Sidebar/原生 Chat 自动打开配置入口并保留修复按钮；配置/清除 key 或切换 model 后 idle 状态自动重启 RPC，active run 保守提示稍后生效。
 - [x] P5-8：Git context 只读采集与大 diff attachment 管线：优先使用 VS Code Git API 采集 branch/upstream 和 staged diff；git CLI 只作受控 fallback 采集 unstaged diff、diff stat、branch diff、commit summary 和 ref 检测，cwd 来自 repository root。
 - [x] P5-9：Generate Commit Message 写入 Source Control inputBox：基于 staged diff 生成 Conventional Commit 风格候选 message 并写入 `repository.inputBox.value`；staged 为空时才询问是否使用 unstaged context，不自动 commit。
 - [x] P5-10：Generate PR Description markdown 生成：基于 upstream/main/master/用户选择的 base 采集 branch diff/stat/commit summary，生成 PR title/body markdown；首版只提供有标题的 untitled markdown 预览/复制/打开入口，不自动创建 PR。
 - [x] P5-11：Phase 5 UX 工作流验收与文档收敛：补齐 P5-6 到 P5-10 的单元测试、extension-host 验收、VSIX smoke/alpha 验证、`git diff --check`、敏感信息扫描和文档一致性检查；Git workflow agent 终态事件已补幂等保护，G4 自动 commit / push / create PR 留作后续增强并需接入审批模型。
-- [ ] P5-12：结构化 provider 配置错误码与恢复动作：将缺 API key 等配置失败从前端字符串匹配升级为 RPC 结构化错误码，Sidebar/原生 Chat 和后续 TUI 依据错误码展示配置入口。
+- [x] P5-12：Sidebar 连续会话、Run 删除与折叠事件 UX：`agent.sendTurn.runId` 可复用已有 run 并自动递增 `turn_N`，Sidebar resume 后继续同一会话发送多轮 turn；Run List 支持 `agent.deleteRun` 删除 inactive run；tool/provider/request 等过程事件默认折叠，assistant 文本和最终摘要保持可见，完整事件 payload 写入 `Output > ProleCoder` 便于 debug。
+- [ ] P5-13：结构化 provider 配置错误码与恢复动作：将缺 API key 等配置失败从前端字符串匹配升级为 RPC 结构化错误码，Sidebar/原生 Chat 和后续 TUI 依据错误码展示配置入口。
 
 验收标准：
 
 - `ProleCoder: Open Chat` 优先打开 VS Code 原生 Chat 并填入 `@prole`，用户无需手动拖动 Activity Bar view 到右侧。
 - 原生 Chat 和 Sidebar Chat 都通过真实 `agent.sendTurn` 驱动回合，并继续复用 Problems diagnostics、审批回传、Cancel、Run Log 和 Context Capsule。
 - 连续对话会自动生成可审计、受限长度的上下文压缩 attachment；不会在 UI 文案里要求用户手动重开对话来延续上下文。
-- 主审批弹窗保持简单；Sidebar composer 提供 Key/Model 直接入口，完整错误诊断可在 `Output > ProleCoder` 查看。
-- `docs/phase-tasks.md` 的 Phase 5 仍有 P5-12 未完成，README 不能把 Phase 5 表述为整阶段完成；G4 自动 commit / push / create PR 仍是后续增强。
+- 主审批弹窗保持简单；Sidebar composer 提供 Key/Model 直接入口，过程事件默认折叠，完整事件和错误诊断可在 `Output > ProleCoder` 查看。
+- `docs/phase-tasks.md` 的 Phase 5 仍有 P5-13 未完成，README 不能把 Phase 5 表述为整阶段完成；G4 自动 commit / push / create PR 仍是后续增强。
 
 ### Phase 6：TUI 与生态扩展
 

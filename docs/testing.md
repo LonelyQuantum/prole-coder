@@ -65,7 +65,7 @@ pnpm run vscode:test-electron
 - Problems diagnostics 被采集为 `agent.sendTurn.attachments` 的 diagnostic attachment。
 - `tool.approvalRequired` 经过 test-only auto approval requester 回传为真实 `agent.approve`。
 - Chat Cancel UI 边界通过真实 `agent.cancel` 请求收口。
-- Run List refresh 和 `agent.resume` replay 通过同一 `agent.event` 渲染路径更新 timeline。
+- Run List refresh、`agent.resume` replay 和 `agent.deleteRun` run 删除通过同一 typed RPC / `agent.event` 渲染路径更新 timeline。
 
 test-only command 和 auto approval 同时要求 VS Code `ExtensionMode.Test` 以及 `PROLE_CODER_VSCODE_TEST=1` / `PROLE_CODER_VSCODE_TEST_AUTO_APPROVE=1` 环境变量，普通扩展激活不会注册这些测试入口。
 
@@ -79,13 +79,15 @@ Phase 5 P5-1 到 P5-5 的 Codex-like UX 与诊断收敛继续复用 Phase 4 exte
 - `test/electron/index.ts` 覆盖 VS Code manifest 中的 `contributes.chatParticipants`，并通过 `ProleCoder: Open Chat` 入口验证原生 Chat 入口不会依赖手动拖动 Activity Bar view。
 - `pnpm run vsix:smoke` 和 `pnpm run vsix:alpha` 会校验 VSIX manifest 中的 `onChatParticipant:prole-coder.chatParticipant` activation event 以及 `@prole` Chat Participant 贡献点。
 
-Phase 5 P5-6 到 P5-11 的 API key/model 与 Git 工作流已补齐以下确定性覆盖：
+Phase 5 P5-6 到 P5-12 的 API key/model、Git 工作流和 Sidebar 连续会话 UX 已补齐以下确定性覆盖：
 
-- `providerSecrets.test.ts` 覆盖 SecretStorage 多 key store 解析、写入前显式校验、active key 选择、masked key 展示、所有 stored key redaction、process env fallback、missing status、child env 覆盖值、model 配置优先级、`DEEPSEEK_MODEL` 注入和 redaction source。
+- `providerSecrets.test.ts` 覆盖 SecretStorage 多 key store 解析、malformed entry/重复 id/空 key 边界、写入前显式校验、active key 选择、masked key 展示、所有 stored key redaction、process env fallback、missing status、child env 覆盖值、model 配置优先级、`DEEPSEEK_MODEL` 注入和 redaction source。
+- `providerConfigurationUx.test.ts` 覆盖缺少 `DEEPSEEK_API_KEY` 的临时字符串匹配入口，确认不会误判其他 provider 或普通 DeepSeek 请求错误；该逻辑后续由 P5-13 结构化错误码替换。
 - `notifier.test.ts` 覆盖 Output Channel/toast message 统一脱敏 SecretStorage/env key。
-- `providerSecretCommands.test.ts` 覆盖 Key 管理器的 `+ Add` 添加 key+alias、选择已有 active key、行内 edit 按钮修改 alias、Clear API key、Select DeepSeek Model、含 model 的 provider status、idle 状态 RPC restart、active run 场景提示稍后生效。
+- `providerSecretCommands.test.ts` 覆盖 Key 管理器的 `+ Add` 添加 key+alias、选择已有 active key、行内 edit 按钮修改 alias、trash 按钮删除非 active key、Clear API key、Select DeepSeek Model、含 model 的 provider status、idle 状态 RPC restart、active run 场景提示稍后生效。
 - `gitWorkflow.test.ts` 覆盖 staged diff、unstaged fallback、upstream/main base 选择、Generate Commit Message 写入 `repository.inputBox.value` 且不自动 commit、agent 重复 terminal event 只采纳首个终态、Generate PR Description 输出 markdown 且不自动创建 PR。
-- `rpcServer.test.ts` 覆盖 RPC child env 注入和 key 轮换后重启使用新 env；`providerSecretCommands.test.ts` 覆盖 model 切换后的 env 更新与 idle restart；`test/electron/index.ts` 覆盖新增命令在 VS Code test host 中注册。
+- `rpcServer.test.ts` 覆盖 RPC child env 注入、key 轮换后重启使用新 env，以及 typed `agent.deleteRun` request；`providerSecretCommands.test.ts` 覆盖 model 切换后的 env 更新与 idle restart；`test/electron/index.ts` 覆盖新增命令在 VS Code test host 中注册。
+- `chatEvents.test.ts` 覆盖 tool/raw 过程事件默认折叠、terminal summary 保持展开；`runHistory.test.ts` 覆盖 `deleteRun` webview message 解析；Rust `agent-rpc`/`run_log` 测试覆盖同一 run 多 turn 续号和 inactive run 删除。
 - 文档/打包验收已运行 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke`、`pnpm run vsix:alpha`、`git diff --check` 和敏感信息扫描。
 
 ## 新增测试的协作要求

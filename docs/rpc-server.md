@@ -149,6 +149,7 @@ RPC 层不负责重新脱敏 payload。当前 Run Log 写入时已经调用基�
 - `agentRejectMethod`
 - `agentCancelMethod`
 - `agentListRunsMethod`
+- `agentDeleteRunMethod`
 - `agentEventMethod`
 - `JsonRpcRequest<TParams>`
 - `JsonRpcResponse<TResult>`
@@ -161,6 +162,7 @@ RPC 层不负责重新脱敏 payload。当前 Run Log 写入时已经调用基�
 - `CancelParams` / `CancelResult`
 - `ResumeParams` / `ResumeResult`
 - `ListRunsParams` / `ListRunsResult` / `RpcRunSummary`
+- `DeleteRunParams` / `DeleteRunResult`
 - `AgentEventEnvelope<TPayload>`
 - `AgentEventNotification<TPayload>`
 
