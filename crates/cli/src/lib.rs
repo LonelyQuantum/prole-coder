@@ -15,8 +15,8 @@ use prole_coder_agent_core::{
     context::ContextBuildError,
     provider::deepseek_api::{
         ChatCompletionStream, ChatFunctionDefinition, ChatTool, ChatToolCall,
-        ChatToolCallAccumulator, DeepSeekApiAdapter, DeepSeekApiConfig, DeepSeekModelId,
-        FimCompletionRequest, FinishReason, StreamEvent, ThinkingConfig, Usage,
+        ChatToolCallAccumulator, DeepSeekApiAdapter, DeepSeekApiConfig, DeepSeekApiError,
+        DeepSeekModelId, FimCompletionRequest, FinishReason, StreamEvent, ThinkingConfig, Usage,
     },
     reasoning::ReasoningContentMode,
     run_log::{RunLog, RunLogError, RunLogStore},
@@ -49,6 +49,10 @@ use thiserror::Error;
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1_024;
 const DEFAULT_VERIFY_TIMEOUT_MS: u64 = 120_000;
 const CLI_RUN_JSON_RPC_ID: &str = "cli.run";
+const DEEPSEEK_PROVIDER_NAME: &str = "deepseek";
+const MISSING_API_KEY_CONFIGURATION_ERROR: &str = "missingApiKey";
+const CONFIGURE_DEEPSEEK_API_KEY_ACTION_KIND: &str = "configureDeepSeekApiKey";
+const CONFIGURE_DEEPSEEK_API_KEY_ACTION_LABEL: &str = "Configure API Key";
 
 pub fn run_cli<I, S, W, E>(args: I, stdout: &mut W, stderr: &mut E) -> Result<(), CliError>
 where
@@ -986,7 +990,7 @@ impl RpcTurnProviderFactory for CliRpcProviderFactory {
             self.max_output_tokens,
             self.thinking,
         )
-        .map_err(|error| AgentRpcHandlerError::new(RPC_INTERNAL_INVARIANT, error.to_string()))
+        .map_err(cli_provider_rpc_error)
     }
 
     fn preview_fim(
@@ -1015,11 +1019,33 @@ fn fixture_fim_preview_text(params: &FimPreviewParams) -> String {
     }
 }
 
+fn cli_provider_rpc_error(error: CliError) -> AgentRpcHandlerError {
+    match error {
+        CliError::DeepSeek(error) => deepseek_configuration_rpc_error(error),
+        other => AgentRpcHandlerError::new(RPC_INTERNAL_INVARIANT, other.to_string()),
+    }
+}
+
+fn deepseek_configuration_rpc_error(error: DeepSeekApiError) -> AgentRpcHandlerError {
+    let message = format!("DeepSeek provider configuration failed: {error}");
+    let rpc_error = AgentRpcHandlerError::new(RPC_PROVIDER_ERROR, message);
+    match error {
+        DeepSeekApiError::MissingApiKey => rpc_error.with_data(json!({
+            "provider": DEEPSEEK_PROVIDER_NAME,
+            "configurationError": MISSING_API_KEY_CONFIGURATION_ERROR,
+            "recoverableAction": {
+                "kind": CONFIGURE_DEEPSEEK_API_KEY_ACTION_KIND,
+                "label": CONFIGURE_DEEPSEEK_API_KEY_ACTION_LABEL,
+            },
+        })),
+        _ => rpc_error,
+    }
+}
+
 fn deepseek_fim_preview(
     params: &FimPreviewParams,
 ) -> Result<FimPreviewResult, AgentRpcHandlerError> {
-    let config = DeepSeekApiConfig::from_env_for_fim()
-        .map_err(|error| AgentRpcHandlerError::new(RPC_PROVIDER_ERROR, error.to_string()))?;
+    let config = DeepSeekApiConfig::from_env_for_fim().map_err(deepseek_configuration_rpc_error)?;
     let adapter = DeepSeekApiAdapter::new(config)
         .map_err(|error| AgentRpcHandlerError::new(RPC_PROVIDER_ERROR, error.to_string()))?;
     let model = params
@@ -1539,15 +1565,15 @@ mod tests {
         provider::deepseek_api::{
             ChatCompletionChunk, ChatCompletionChunkChoice, ChatCompletionDelta,
             ChatFunctionCallDelta, ChatToolCallDelta, ChatToolType, CompletionTokensDetails,
-            FinishReason, StreamEvent, Usage,
+            DeepSeekApiError, FinishReason, StreamEvent, Usage,
         },
         run_log::{REDACTED_VALUE, RunLogStore},
         test_helpers::TestWorkspace,
         turn_loop::TurnProviderEvent,
     };
     use prole_coder_agent_rpc::{
-        FimPreviewParams, PROTOCOL_VERSION, RPC_APPROVAL_DENIED, RPC_TOOL_EXECUTION_FAILED,
-        RpcTurnProviderFactory,
+        FimPreviewParams, PROTOCOL_VERSION, RPC_APPROVAL_DENIED, RPC_PROVIDER_ERROR,
+        RPC_TOOL_EXECUTION_FAILED, RpcTurnProviderFactory,
     };
     use serde_json::{Value, json};
     use std::{
@@ -1559,7 +1585,8 @@ mod tests {
 
     use super::{
         CliCommand, CliRpcProviderFactory, FixtureKind, ProviderKind, RunCommand, ThinkingKind,
-        deepseek_chat_stream_to_turn_provider_stream, run_cli, run_cli_with_input,
+        deepseek_chat_stream_to_turn_provider_stream, deepseek_configuration_rpc_error, run_cli,
+        run_cli_with_input,
     };
 
     #[test]
@@ -2064,6 +2091,21 @@ mod tests {
 
         assert_eq!(result.model, "fixture-fim");
         assert!(result.text.contains("prole fixture"));
+    }
+
+    #[test]
+    fn deepseek_missing_api_key_rpc_error_exposes_recoverable_action() {
+        let error = deepseek_configuration_rpc_error(DeepSeekApiError::MissingApiKey);
+
+        assert_eq!(error.code, RPC_PROVIDER_ERROR);
+        assert!(error.message.contains("DEEPSEEK_API_KEY is required"));
+        let data = error
+            .data
+            .expect("missing key should include structured data");
+        assert_eq!(data["provider"], "deepseek");
+        assert_eq!(data["configurationError"], "missingApiKey");
+        assert_eq!(data["recoverableAction"]["kind"], "configureDeepSeekApiKey");
+        assert_eq!(data["recoverableAction"]["label"], "Configure API Key");
     }
 
     type InteractiveCliRpc = (
