@@ -26,12 +26,14 @@ import {
   type FimPreviewResult,
   type ListRunsParams,
   type ListRunsResult,
+  type ProviderConfigurationErrorData,
   type ProviderCapabilities,
   type ProviderCompletedPayload,
   type ProviderRequestedPayload,
   type RunCompletedPayload,
   type RunLogPayloadMetadata,
   type RunSummary,
+  type RpcRecoverableAction,
   type RejectParams,
   type RejectResult,
   type ServerCapabilities,
@@ -50,6 +52,7 @@ import {
   riskLevels,
   toolDefinitions,
   toolNames,
+  rpcRecoverableActionKinds,
 } from "../src/index.js";
 
 interface ToolRegistryFixture {
@@ -193,6 +196,21 @@ test("protocol error code registry matches protocol document", () => {
     codes.add(definition.code);
     names.add(definition.name);
   }
+});
+
+test("provider configuration errors expose recoverable actions", () => {
+  const action = {
+    kind: "configureDeepSeekApiKey",
+    label: "Configure API Key",
+  } satisfies RpcRecoverableAction;
+  const data = {
+    provider: "deepseek",
+    configurationError: "missingApiKey",
+    recoverableAction: action,
+  } satisfies ProviderConfigurationErrorData;
+
+  assert.deepEqual(rpcRecoverableActionKinds, ["configureDeepSeekApiKey"]);
+  assert.equal(data.recoverableAction.kind, "configureDeepSeekApiKey");
 });
 
 test("approval request and decision params use stable protocol fields", () => {

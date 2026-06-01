@@ -40,6 +40,22 @@ export const rpcErrorCodes = {
   internalInvariant: -32060,
 } as const;
 
+export const rpcRecoverableActionKinds = ["configureDeepSeekApiKey"] as const;
+export type RpcRecoverableActionKind = (typeof rpcRecoverableActionKinds)[number];
+
+export interface RpcRecoverableAction {
+  readonly kind: RpcRecoverableActionKind;
+  readonly label: string;
+}
+
+export type ProviderConfigurationErrorCode = "missingApiKey";
+
+export interface ProviderConfigurationErrorData {
+  readonly provider: "deepseek";
+  readonly configurationError: ProviderConfigurationErrorCode;
+  readonly recoverableAction: RpcRecoverableAction;
+}
+
 export const protocolErrorDefinitions = [
   { code: jsonRpcErrorCodes.parseError, name: "Parse error" },
   { code: jsonRpcErrorCodes.invalidRequest, name: "Invalid Request" },
