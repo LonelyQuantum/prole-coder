@@ -19,8 +19,13 @@ import {
 import { createVscodeGitRepositoryProvider, createVscodeMarkdownSink } from "./gitWorkflowVscode";
 import { createOutputLogger } from "./logging";
 import { createExtensionNotifier, type ExtensionNotifier } from "./notifier";
-import { registerProviderSecretCommands } from "./providerSecretCommands";
 import {
+  registerProviderSecretCommands,
+  type SecretQuickPickController,
+  type SecretQuickPickItem,
+} from "./providerSecretCommands";
+import {
+  DEEPSEEK_API_KEY_STORE_SECRET_ID,
   DEEPSEEK_API_KEY_SECRET_ID,
   deepSeekEnvOverride,
   providerSecretRedactionValues,
@@ -37,6 +42,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const secretRedactor = new MutableSecretRedactor();
   const initialSecretStatus = resolveDeepSeekApiKey({
     secretValue: await context.secrets.get(DEEPSEEK_API_KEY_SECRET_ID),
+    keyStoreValue: await context.secrets.get(DEEPSEEK_API_KEY_STORE_SECRET_ID),
     processEnv: process.env,
   });
   const providerConfiguration = vscode.workspace.getConfiguration("prole-coder.provider");
@@ -78,9 +84,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       retainContextWhenHidden: true,
     },
   });
+  const secretWindow = {
+    showInputBox: vscode.window.showInputBox.bind(vscode.window),
+    showQuickPick: vscode.window.showQuickPick.bind(vscode.window),
+    createQuickPick: <T extends SecretQuickPickItem>(): SecretQuickPickController<T> =>
+      vscode.window.createQuickPick<vscode.QuickPickItem>() as unknown as SecretQuickPickController<T>,
+    showInformationMessage: vscode.window.showInformationMessage.bind(vscode.window),
+    showWarningMessage: vscode.window.showWarningMessage.bind(vscode.window),
+  };
   const providerSecretCommands = registerProviderSecretCommands({
     commands: vscode.commands,
-    window: vscode.window,
+    window: secretWindow,
     secrets: context.secrets,
     processEnv: process.env,
     redactor: secretRedactor,
@@ -88,6 +102,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     isRpcIdle: () => chatView.isIdle(),
     providerConfiguration,
     configurationTarget: vscode.ConfigurationTarget.Global,
+    renameAliasButton: {
+      iconPath: new vscode.ThemeIcon("edit"),
+      tooltip: "Rename alias",
+    },
   });
   const gitRepositoryProvider = createVscodeGitRepositoryProvider();
   const markdownSink = createVscodeMarkdownSink();

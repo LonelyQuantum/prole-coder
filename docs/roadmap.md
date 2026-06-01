@@ -105,12 +105,12 @@ P0 不追求：
 
 目标：让 VS Code 插件成为 Agent Core 的薄前端，而不是第二套 Agent。
 
-Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 深度集成任务；Phase 5 仍在进行中。P5-1 到 P5-11 已完成原生 Chat 入口、简化审批、自动上下文压缩、UX 验收、Output Channel 错误诊断、插件内 API key/model 配置、统一 redaction/错误恢复、只读 Git context、commit message 写入 SCM inputBox 和 PR markdown 生成；P5-12 结构化 provider 配置错误码与恢复动作仍未完成。Phase 5 全部完成后再进入 Phase 6，与生态扩展一起推进。Marketplace 发布不阻塞 Phase 4/5，当前已具备可安装 VSIX alpha / pre-release 产物和安装说明。Phase 2e 展示型 demo 已经给 VS Code Context Viz / Approval / Run Log UI 提供可观察样本。
+Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 深度集成任务；Phase 5 仍在进行中。P5-1 到 P5-11 已完成原生 Chat 入口、简化审批、自动上下文压缩、UX 验收、Output Channel 错误诊断、插件内多 API key/model 配置、统一 redaction/错误恢复、只读 Git context、commit message 写入 SCM inputBox 和 PR markdown 生成；P5-12 结构化 provider 配置错误码与恢复动作仍未完成。Phase 5 全部完成后再进入 Phase 6，与生态扩展一起推进。Marketplace 发布不阻塞 Phase 4/5，当前已具备可安装 VSIX alpha / pre-release 产物和安装说明。Phase 2e 展示型 demo 已经给 VS Code Context Viz / Approval / Run Log UI 提供可观察样本。
 
 优先事项：
 
 - VSIX dry-run packaging smoke 和 `@vscode/test-electron` 最小 harness 已完成，已提前验证打包、activation、trusted workspace 和 Chat view 基础加载。
-- Phase 5 的 P5-1 到 P5-11 Codex-like UX 与开发工作流已完成：原生 `@prole` Chat Participant、`Open Chat` 右侧 Chat 入口、简化审批 choices、自动上下文压缩 attachment、Output Channel 错误诊断、DeepSeek API key SecretStorage/provider status、Sidebar Key/Model 入口、DeepSeek model selector、统一 redaction 与错误恢复、Git context 只读采集、Generate Commit Message、Generate PR Description 以及测试/文档验收收敛；P5-12 结构化 provider 配置错误码与恢复动作仍未完成。
+- Phase 5 的 P5-1 到 P5-11 Codex-like UX 与开发工作流已完成：原生 `@prole` Chat Participant、`Open Chat` 右侧 Chat 入口、简化审批 choices、自动上下文压缩 attachment、Output Channel 错误诊断、DeepSeek API key SecretStorage 多 key 管理器/provider status、Sidebar Key/Model 入口、DeepSeek model selector、统一 redaction 与错误恢复、Git context 只读采集、Generate Commit Message、Generate PR Description 以及测试/文档验收收敛；P5-12 结构化 provider 配置错误码与恢复动作仍未完成。
 - G4 自动 commit / push / create PR 暂不纳入 Phase 5 完成口径，后续需要接入审批模型后再做。
 - Provider capability model data contract 已完成，首版通过 `agent.initialize` 暴露给前端，不引入 heavy trait。
 - 事件 payload schema、协议 fixture 与 RPC 高频事件批量发送已完成，batch 不改变 Run Log `seq` 和 replay 语义。

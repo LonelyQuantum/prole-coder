@@ -7,17 +7,24 @@ import {
   SELECT_DEEPSEEK_MODEL_COMMAND,
   SHOW_PROVIDER_STATUS_COMMAND,
   registerProviderSecretCommands,
+  type SecretQuickInputButton,
+  type SecretQuickPickItemButtonEvent,
 } from "../src/providerSecretCommands.js";
 import {
   DEEPSEEK_API_KEY_ENV,
+  DEEPSEEK_API_KEY_STORE_SECRET_ID,
   DEEPSEEK_API_KEY_SECRET_ID,
   DEEPSEEK_MODEL_ENV,
+  parseDeepSeekApiKeyStore,
+  serializeDeepSeekApiKeyStore,
 } from "../src/providerSecrets.js";
 import { MutableSecretRedactor } from "../src/redaction.js";
 
 test("configure DeepSeek API key stores SecretStorage value, updates env, and restarts idle RPC", async () => {
   const commands = new FakeCommands();
-  const window = new FakeSecretWindow([" fixture-secret-value "]);
+  const window = new FakeSecretWindow(["Work", " fixture-secret-value "], [], [
+    { label: "+ Add DeepSeek API Key" },
+  ]);
   const secrets = new FakeSecrets();
   const redactor = new MutableSecretRedactor();
   const rpc = new FakeRpcServer("ready");
@@ -32,18 +39,105 @@ test("configure DeepSeek API key stores SecretStorage value, updates env, and re
     redactor,
     rpcServer: rpc,
     isRpcIdle: () => true,
+    renameAliasButton: FakeSecretWindow.renameButton,
   });
 
   await commands.run(CONFIGURE_DEEPSEEK_API_KEY_COMMAND);
 
-  assert.equal(await secrets.get(DEEPSEEK_API_KEY_SECRET_ID), "fixture-secret-value");
+  const keyStore = parseDeepSeekApiKeyStore(await secrets.get(DEEPSEEK_API_KEY_STORE_SECRET_ID));
+  assert.equal(keyStore.entries.length, 1);
+  assert.equal(keyStore.entries[0]?.alias, "Work");
+  assert.equal(keyStore.entries[0]?.apiKey, "fixture-secret-value");
+  assert.equal(keyStore.selectedKeyId, keyStore.entries[0]?.id);
+  assert.equal(await secrets.get(DEEPSEEK_API_KEY_SECRET_ID), undefined);
   assert.deepEqual(rpc.processEnv, {
     [DEEPSEEK_API_KEY_ENV]: "fixture-secret-value",
   });
   assert.equal(rpc.stopCount, 1);
   assert.equal(rpc.startCount, 1);
-  assert.deepEqual(window.infos.at(-1), "DeepSeek API key: VS Code SecretStorage");
+  assert.deepEqual(window.infos.at(-1), "DeepSeek API key: VS Code SecretStorage (Work)");
   assert.equal(redactor.redact("key fixture-secret-value"), "key [redacted]");
+});
+
+test("configure DeepSeek API key selects an existing stored key", async () => {
+  const commands = new FakeCommands();
+  const window = new FakeSecretWindow([], [], [{ label: "Personal" }]);
+  const secrets = new FakeSecrets({
+    [DEEPSEEK_API_KEY_STORE_SECRET_ID]: serializeDeepSeekApiKeyStore({
+      selectedKeyId: "work",
+      entries: [
+        {
+          id: "work",
+          alias: "Work",
+          apiKey: "work-secret-value",
+        },
+        {
+          id: "personal",
+          alias: "Personal",
+          apiKey: "personal-secret-value",
+        },
+      ],
+    }),
+  });
+  const rpc = new FakeRpcServer("ready");
+
+  registerProviderSecretCommands({
+    commands,
+    window,
+    secrets,
+    rpcServer: rpc,
+    isRpcIdle: () => true,
+    renameAliasButton: FakeSecretWindow.renameButton,
+  });
+
+  await commands.run(CONFIGURE_DEEPSEEK_API_KEY_COMMAND);
+
+  const keyStore = parseDeepSeekApiKeyStore(await secrets.get(DEEPSEEK_API_KEY_STORE_SECRET_ID));
+  assert.equal(keyStore.selectedKeyId, "personal");
+  assert.deepEqual(rpc.processEnv, {
+    [DEEPSEEK_API_KEY_ENV]: "personal-secret-value",
+  });
+  assert.equal(rpc.stopCount, 1);
+  assert.equal(rpc.startCount, 1);
+  assert.deepEqual(window.infos.at(-1), "DeepSeek API key: VS Code SecretStorage (Personal)");
+});
+
+test("configure DeepSeek API key renames an existing key alias without restarting RPC", async () => {
+  const commands = new FakeCommands();
+  const window = new FakeSecretWindow(["Team"], [], [{ label: "Work", button: true }]);
+  const secrets = new FakeSecrets({
+    [DEEPSEEK_API_KEY_STORE_SECRET_ID]: serializeDeepSeekApiKeyStore({
+      selectedKeyId: "work",
+      entries: [
+        {
+          id: "work",
+          alias: "Work",
+          apiKey: "work-secret-value",
+        },
+      ],
+    }),
+  });
+  const rpc = new FakeRpcServer("ready");
+
+  registerProviderSecretCommands({
+    commands,
+    window,
+    secrets,
+    rpcServer: rpc,
+    isRpcIdle: () => true,
+    renameAliasButton: FakeSecretWindow.renameButton,
+  });
+
+  await commands.run(CONFIGURE_DEEPSEEK_API_KEY_COMMAND);
+
+  const keyStore = parseDeepSeekApiKeyStore(await secrets.get(DEEPSEEK_API_KEY_STORE_SECRET_ID));
+  assert.equal(keyStore.entries[0]?.alias, "Team");
+  assert.deepEqual(rpc.processEnv, {
+    [DEEPSEEK_API_KEY_ENV]: "work-secret-value",
+  });
+  assert.equal(rpc.stopCount, 0);
+  assert.equal(rpc.startCount, 0);
+  assert.deepEqual(window.infos.at(-1), "DeepSeek API key alias updated: Team");
 });
 
 test("clear DeepSeek API key falls back to process env without restarting active RPC", async () => {
@@ -127,7 +221,9 @@ test("select DeepSeek model stores configuration, updates env, and restarts idle
 
 test("configure DeepSeek API key redacts restart failures", async () => {
   const commands = new FakeCommands();
-  const window = new FakeSecretWindow(["fixture-secret-value"]);
+  const window = new FakeSecretWindow(["Key", "fixture-secret-value"], [], [
+    { label: "+ Add DeepSeek API Key" },
+  ]);
   const redactor = new MutableSecretRedactor();
   const rpc = new FakeRpcServer("ready", new Error("failed with fixture-secret-value"));
 
@@ -138,6 +234,7 @@ test("configure DeepSeek API key redacts restart failures", async () => {
     redactor,
     rpcServer: rpc,
     isRpcIdle: () => true,
+    renameAliasButton: FakeSecretWindow.renameButton,
   });
 
   await commands.run(CONFIGURE_DEEPSEEK_API_KEY_COMMAND);
@@ -161,12 +258,15 @@ class FakeCommands {
 }
 
 class FakeSecretWindow {
+  static readonly renameButton = { tooltip: "Rename alias" };
+
   readonly infos: string[] = [];
   readonly warnings: string[] = [];
 
   constructor(
     private readonly inputValues: string[],
     private readonly quickPickLabels: string[] = [],
+    private readonly quickPickInteractions: FakeQuickPickInteraction[] = [],
   ) {}
 
   showInputBox(): string | undefined {
@@ -181,12 +281,87 @@ class FakeSecretWindow {
     return items.find((item) => item.label === label);
   }
 
+  createQuickPick<T extends { readonly label: string; readonly buttons?: readonly SecretQuickInputButton[] }>(): FakeQuickPick<T> {
+    return new FakeQuickPick<T>(this.quickPickInteractions);
+  }
+
   showInformationMessage(message: string): void {
     this.infos.push(message);
   }
 
   showWarningMessage(message: string): void {
     this.warnings.push(message);
+  }
+}
+
+interface FakeQuickPickInteraction {
+  readonly label: string;
+  readonly button?: boolean;
+}
+
+class FakeQuickPick<T extends { readonly label: string; readonly buttons?: readonly SecretQuickInputButton[] }> {
+  title: string | undefined;
+  placeholder: string | undefined;
+  ignoreFocusOut = false;
+  matchOnDescription = false;
+  items: readonly T[] = [];
+  selectedItems: readonly T[] = [];
+
+  private readonly acceptCallbacks: Array<() => unknown> = [];
+  private readonly hideCallbacks: Array<() => unknown> = [];
+  private readonly buttonCallbacks: Array<(event: SecretQuickPickItemButtonEvent<T>) => unknown> = [];
+
+  constructor(private readonly interactions: FakeQuickPickInteraction[]) {}
+
+  onDidAccept(callback: () => unknown): { dispose(): void } {
+    this.acceptCallbacks.push(callback);
+    return { dispose: () => undefined };
+  }
+
+  onDidHide(callback: () => unknown): { dispose(): void } {
+    this.hideCallbacks.push(callback);
+    return { dispose: () => undefined };
+  }
+
+  onDidTriggerItemButton(callback: (event: SecretQuickPickItemButtonEvent<T>) => unknown): { dispose(): void } {
+    this.buttonCallbacks.push(callback);
+    return { dispose: () => undefined };
+  }
+
+  show(): void {
+    const interaction = this.interactions.shift();
+    queueMicrotask(() => {
+      if (interaction === undefined) {
+        this.hide();
+        return;
+      }
+
+      const item = this.items.find((candidate) => candidate.label === interaction.label);
+      assert.ok(item, `${interaction.label} should exist in quick pick`);
+      if (interaction.button === true) {
+        const button = item.buttons?.[0];
+        assert.ok(button, `${interaction.label} should have a button`);
+        for (const callback of this.buttonCallbacks) {
+          callback({ button, item });
+        }
+        return;
+      }
+
+      this.selectedItems = [item];
+      for (const callback of this.acceptCallbacks) {
+        callback();
+      }
+    });
+  }
+
+  hide(): void {
+    for (const callback of this.hideCallbacks) {
+      callback();
+    }
+  }
+
+  dispose(): void {
+    return undefined;
   }
 }
 

@@ -81,9 +81,9 @@ Phase 5 P5-1 到 P5-5 的 Codex-like UX 与诊断收敛继续复用 Phase 4 exte
 
 Phase 5 P5-6 到 P5-11 的 API key/model 与 Git 工作流已补齐以下确定性覆盖：
 
-- `providerSecrets.test.ts` 覆盖 SecretStorage 优先、process env fallback、missing status、child env 覆盖值、model 配置优先级、`DEEPSEEK_MODEL` 注入和 redaction source。
+- `providerSecrets.test.ts` 覆盖 SecretStorage 多 key store 解析、写入前显式校验、active key 选择、masked key 展示、所有 stored key redaction、process env fallback、missing status、child env 覆盖值、model 配置优先级、`DEEPSEEK_MODEL` 注入和 redaction source。
 - `notifier.test.ts` 覆盖 Output Channel/toast message 统一脱敏 SecretStorage/env key。
-- `providerSecretCommands.test.ts` 覆盖 Configure/Clear API key、Select DeepSeek Model、含 model 的 provider status、idle 状态 RPC restart、active run 场景提示稍后生效。
+- `providerSecretCommands.test.ts` 覆盖 Key 管理器的 `+ Add` 添加 key+alias、选择已有 active key、行内 edit 按钮修改 alias、Clear API key、Select DeepSeek Model、含 model 的 provider status、idle 状态 RPC restart、active run 场景提示稍后生效。
 - `gitWorkflow.test.ts` 覆盖 staged diff、unstaged fallback、upstream/main base 选择、Generate Commit Message 写入 `repository.inputBox.value` 且不自动 commit、agent 重复 terminal event 只采纳首个终态、Generate PR Description 输出 markdown 且不自动创建 PR。
 - `rpcServer.test.ts` 覆盖 RPC child env 注入和 key 轮换后重启使用新 env；`providerSecretCommands.test.ts` 覆盖 model 切换后的 env 更新与 idle restart；`test/electron/index.ts` 覆盖新增命令在 VS Code test host 中注册。
 - 文档/打包验收已运行 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke`、`pnpm run vsix:alpha`、`git diff --check` 和敏感信息扫描。
