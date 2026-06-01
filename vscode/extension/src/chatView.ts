@@ -30,8 +30,10 @@ import {
 import { diagnosticAttachmentsFromProblems } from "./diagnostics";
 import type { ProleLogger } from "./logging";
 import {
-  CONFIGURE_DEEPSEEK_API_KEY_ACTION_LABEL,
-  isDeepSeekApiKeyRequiredMessage,
+  isConfigureDeepSeekApiKeyAction,
+  providerConfigurationActionFromError,
+  providerConfigurationActionFromPayload,
+  type ProviderConfigurationAction,
 } from "./providerConfigurationUx";
 import {
   CONFIGURE_DEEPSEEK_API_KEY_COMMAND,
@@ -41,6 +43,7 @@ import type { MessageRedactor } from "./redaction";
 import type { AgentEventEnvelope, DisposableLike } from "./rpcServer";
 import {
   RUN_LIST_LIMIT,
+  deletedRunList,
   failedRunList,
   idleRunList,
   isRefreshRunsMessage,
@@ -103,7 +106,7 @@ type ChatSubmissionStatus = "idle" | "sending" | "running" | "completed" | "fail
 type TerminalSubmissionStatus = Extract<ChatSubmissionStatus, "completed" | "failed" | "canceled">;
 
 export interface ChatSubmissionAction {
-  readonly type: "configureDeepSeekApiKey";
+  readonly type: ProviderConfigurationAction["type"];
   readonly label: string;
 }
 
@@ -122,6 +125,7 @@ interface TerminalRunState {
   readonly status: TerminalSubmissionStatus;
   readonly message: string;
   readonly error?: string;
+  readonly action?: ChatSubmissionAction;
 }
 
 export interface ChatViewTestState {
@@ -327,16 +331,18 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     } catch (error) {
       const messageText = `Failed to send turn: ${errorMessage(error)}`;
       const redacted = this.redact(messageText);
-      const missingApiKey = isDeepSeekApiKeyRequiredMessage(messageText);
+      const action = chatSubmissionActionFromProviderAction(
+        providerConfigurationActionFromError(error),
+      );
       this.logger?.error(redacted);
       this.setSubmission({
         ...idleSubmission(),
         status: "failed",
         message: redacted,
         error: redacted,
-        ...(missingApiKey ? { action: configureDeepSeekApiKeyAction() } : {}),
+        ...(action === undefined ? {} : { action }),
       });
-      if (missingApiKey) {
+      if (isConfigureDeepSeekApiKeyAction(action)) {
         await this.configureDeepSeekApiKey();
       }
     }
@@ -1765,10 +1771,16 @@ function idleSubmission(): ChatSubmissionSnapshot {
   };
 }
 
-function configureDeepSeekApiKeyAction(): ChatSubmissionAction {
+function chatSubmissionActionFromProviderAction(
+  action: ProviderConfigurationAction | undefined,
+): ChatSubmissionAction | undefined {
+  if (action === undefined) {
+    return undefined;
+  }
+
   return {
-    type: "configureDeepSeekApiKey",
-    label: CONFIGURE_DEEPSEEK_API_KEY_ACTION_LABEL,
+    type: action.type,
+    label: action.label,
   };
 }
 
@@ -1782,6 +1794,7 @@ function terminalSubmission(
     status: terminal.status,
     message: terminal.message,
     ...(terminal.error === undefined ? {} : { error: terminal.error }),
+    ...(terminal.action === undefined ? {} : { action: terminal.action }),
     runId,
     ...(turnId === undefined ? {} : { turnId }),
   };
@@ -1797,10 +1810,14 @@ function terminalRunState(event: AgentEventEnvelope): TerminalRunState | undefin
 
   if (event.type === "run.failed") {
     const message = terminalMessage(event, "Run failed.");
+    const action = chatSubmissionActionFromProviderAction(
+      providerConfigurationActionFromPayload(event.payload),
+    );
     return {
       status: "failed",
       message,
       error: message,
+      ...(action === undefined ? {} : { action }),
     };
   }
 

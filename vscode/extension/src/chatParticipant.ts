@@ -16,7 +16,10 @@ import {
 } from "./chatParticipantCore";
 import { diagnosticAttachmentsFromProblems } from "./diagnostics";
 import type { ProleLogger } from "./logging";
-import { isDeepSeekApiKeyRequiredMessage } from "./providerConfigurationUx";
+import {
+  isConfigureDeepSeekApiKeyAction,
+  providerConfigurationActionFromMetadata,
+} from "./providerConfigurationUx";
 import { CONFIGURE_DEEPSEEK_API_KEY_COMMAND } from "./providerSecretCommands";
 import type { MessageRedactor } from "./redaction";
 
@@ -47,7 +50,8 @@ export function registerProleChatParticipant(
         ...(redactor === undefined ? {} : { redactor }),
         token,
       });
-      if (isDeepSeekApiKeyRequiredMessage(result.errorDetails?.message ?? "")) {
+      const action = providerConfigurationActionFromMetadata(result.metadata);
+      if (isConfigureDeepSeekApiKeyAction(action)) {
         await vscode.commands.executeCommand(CONFIGURE_DEEPSEEK_API_KEY_COMMAND);
       }
       return result;

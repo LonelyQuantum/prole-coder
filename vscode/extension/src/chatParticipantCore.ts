@@ -14,6 +14,11 @@ import {
 } from "./automaticContext";
 import { DEFAULT_CHAT_MODE, sendTurnParams } from "./chatInput";
 import type { ProleLogger } from "./logging";
+import {
+  providerConfigurationActionFromError,
+  providerConfigurationActionFromPayload,
+  type ProviderConfigurationAction,
+} from "./providerConfigurationUx";
 import type { MessageRedactor } from "./redaction";
 import type { AgentEventEnvelope, DisposableLike } from "./rpcServer";
 
@@ -159,8 +164,9 @@ export async function runChatParticipantTurn(
       `ProleCoder turn failed: ${errorMessage(error)}`,
       options.redactor,
     );
+    const action = providerConfigurationActionFromError(error);
     options.logger?.error(message);
-    return errorResult(message, runId);
+    return errorResult(message, runId, action);
   } finally {
     eventSubscription.dispose();
     cancellationSubscription?.dispose();
@@ -220,8 +226,9 @@ function handleParticipantEvent(
       return;
     case "run.failed": {
       const message = redactMessage(terminalMessage(payload, "Run failed."), redactor);
+      const action = providerConfigurationActionFromPayload(payload);
       response.markdown(`\n\n${message}`);
-      finish(errorResult(message, event.runId));
+      finish(errorResult(message, event.runId, action));
       return;
     }
     case "run.canceled": {
@@ -271,12 +278,17 @@ function terminalMessage(payload: Record<string, unknown> | undefined, fallback:
   );
 }
 
-function errorResult(message: string, runId?: string): ChatParticipantResult {
+function errorResult(
+  message: string,
+  runId?: string,
+  action?: ProviderConfigurationAction,
+): ChatParticipantResult {
   return {
     errorDetails: { message },
     metadata: {
       status: "failed",
       ...(runId === undefined ? {} : { runId }),
+      ...(action === undefined ? {} : { providerConfigurationAction: action }),
     },
   };
 }
