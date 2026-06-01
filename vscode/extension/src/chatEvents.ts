@@ -28,6 +28,7 @@ export interface ChatTimelineItem {
   readonly title: string;
   readonly body?: string | undefined;
   readonly detail?: string | undefined;
+  readonly defaultCollapsed?: boolean;
 }
 
 export interface ChatTimelineSnapshot {
@@ -169,6 +170,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         tone: "running",
         title: "Run started",
         body: joinParts([label("Mode", textField(payload, "mode")), label("Workspace", textField(payload, "workspaceRoot"))]),
+        defaultCollapsed: true,
       };
     case "turn.started":
       return {
@@ -177,6 +179,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         tone: "running",
         title: "Turn started",
         body: textField(payload, "userTask") ?? textField(payload, "prompt") ?? compactJson(event.payload),
+        defaultCollapsed: true,
       };
     case "context.built":
       return {
@@ -190,6 +193,20 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
           label("Sources", arrayCount(payload, "includedSources")),
           label("Omitted", arrayCount(payload, "omittedSources")),
         ]),
+        defaultCollapsed: true,
+      };
+    case "provider.requested":
+      return {
+        ...base,
+        kind: "provider",
+        tone: "running",
+        title: "Provider request",
+        body: joinParts([
+          label("Iteration", valueText(payload, "iteration")),
+          label("Messages", valueText(payload, "messageCount")),
+          label("Reasoning", valueText(payload, "reasoningState")),
+        ]),
+        defaultCollapsed: true,
       };
     case "provider.completed":
       return {
@@ -203,6 +220,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
           label("Duration", suffix(valueText(payload, "durationMs"), "ms")),
           label("Total tokens", nestedValueText(payload, "usage", "totalTokens")),
         ]),
+        defaultCollapsed: true,
       };
     case "tool.requested":
       return {
@@ -215,6 +233,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
           label("Reasons", arrayText(payload, "riskReasons")),
           label("Args", valueText(payload, "argumentsPreview")),
         ]),
+        defaultCollapsed: true,
       };
     case "tool.approvalRequired":
       return {
@@ -230,6 +249,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
           label("Command", textField(payload, "command")),
           label("Paths", arrayText(payload, "paths")),
         ]),
+        defaultCollapsed: true,
       };
     case "tool.approvalResolved": {
       const decision = textField(payload, "decision") ?? "resolved";
@@ -239,6 +259,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         tone: approvalTone(decision),
         title: `Approval ${decision}`,
         body: joinParts([label("Tool", textField(payload, "toolName")), label("Reason", textField(payload, "reason"))]),
+        defaultCollapsed: true,
       };
     }
     case "tool.started":
@@ -248,6 +269,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         tone: "running",
         title: `Tool started: ${toolName(payload)}`,
         body: label("Call", textField(payload, "toolCallId")),
+        defaultCollapsed: true,
       };
     case "tool.completed": {
       const status = textField(payload, "status");
@@ -261,6 +283,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
           textField(payload, "summary"),
           label("Files", nestedValueText(payload, "result", "files")),
         ]),
+        defaultCollapsed: true,
       };
     }
     case "run.completed":
@@ -294,6 +317,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         tone: "neutral",
         title: event.type,
         body: compactJson(event.payload),
+        defaultCollapsed: true,
       };
   }
 }

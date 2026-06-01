@@ -876,6 +876,27 @@ function renderChatViewHtml(
       background: var(--vscode-input-background);
     }
 
+    details.item > summary {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 6px;
+      cursor: pointer;
+      list-style-position: inside;
+    }
+
+    details.item > summary .meta,
+    details.item > summary .title {
+      min-width: 0;
+    }
+
+    details.item > summary .meta {
+      grid-column: 1 / -1;
+    }
+
+    details.item > summary .title {
+      grid-column: 1 / -1;
+    }
+
     .item.running {
       border-left-color: var(--vscode-progressBar-background);
     }
@@ -953,6 +974,7 @@ function renderChatViewHtml(
     .provider-action:focus,
     .refresh-runs:focus,
     .run-entry:focus,
+    .run-delete:focus,
     .context-tab:focus {
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: 1px;
@@ -1594,7 +1616,8 @@ function renderChatViewHtml(
     }
 
     function renderItem(item) {
-      const article = document.createElement("article");
+      const collapsed = item.defaultCollapsed === true;
+      const article = document.createElement(collapsed ? "details" : "article");
       article.className = "item " + item.kind + " " + item.tone;
 
       const meta = document.createElement("div");
@@ -1611,7 +1634,13 @@ function renderChatViewHtml(
       title.className = "title";
       title.textContent = item.title;
 
-      article.append(meta, title);
+      if (collapsed) {
+        const summary = document.createElement("summary");
+        summary.append(meta, title);
+        article.append(summary);
+      } else {
+        article.append(meta, title);
+      }
       if (item.body) {
         const body = document.createElement("div");
         body.className = "body";
@@ -1695,6 +1724,24 @@ function terminalMessage(event: AgentEventEnvelope, fallback: string): string {
   const payload = isRecord(event.payload) ? event.payload : undefined;
   const message = payload?.["message"] ?? payload?.["reason"] ?? payload?.["summary"];
   return typeof message === "string" && message.length > 0 ? message : fallback;
+}
+
+function formatAgentEventLog(event: AgentEventEnvelope): string {
+  const turn = event.turnId === undefined ? "" : ` turn=${event.turnId}`;
+  return `agent.event #${event.seq} ${event.type} run=${event.runId}${turn} ${stringifyLogPayload(event.payload)}`;
+}
+
+function stringifyLogPayload(payload: unknown): string {
+  try {
+    const serialized = JSON.stringify(payload);
+    return truncateLogText(serialized === undefined ? "undefined" : serialized);
+  } catch {
+    return truncateLogText(String(payload));
+  }
+}
+
+function truncateLogText(value: string): string {
+  return value.length <= 4096 ? value : `${value.slice(0, 4093)}...`;
 }
 
 function cancelRunIdFromMessage(message: unknown): string | undefined {

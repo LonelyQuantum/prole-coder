@@ -61,7 +61,9 @@ test("chat timeline renders tool lifecycle and terminal events", () => {
     ["Tool requested: shell", "Tool started: shell", "Tool completed: shell", "Run completed"],
   );
   assert.equal(snapshot.items[2]?.tone, "success");
+  assert.equal(snapshot.items[2]?.defaultCollapsed, true);
   assert.equal(snapshot.items[3]?.kind, "terminal");
+  assert.equal(snapshot.items[3]?.defaultCollapsed, undefined);
   assert.equal(snapshot.latestStatus, "Completed");
 });
 
@@ -128,6 +130,7 @@ test("chat timeline renders raw unknown events with compact payloads", () => {
 
   assert.equal(item.kind, "raw");
   assert.equal(item.title, "custom.event");
+  assert.equal(item.defaultCollapsed, true);
   assert.ok(item.body?.includes("unmapped"));
 });
 
