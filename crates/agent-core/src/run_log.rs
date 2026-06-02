@@ -219,6 +219,15 @@ pub trait RunLogWriter {
         turn_id: Option<String>,
         payload: Value,
     ) -> Result<RunLogEvent, RunLogError>;
+
+    fn write_diagnostic_file(
+        &mut self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<Option<PathBuf>, RunLogError> {
+        let _ = (relative_path, contents);
+        Ok(None)
+    }
 }
 
 /// `RunLog` is a single-writer append handle.
@@ -295,6 +304,14 @@ impl RunLog {
     pub fn load(&self) -> Result<Vec<RunLogEvent>, RunLogError> {
         read_events(&self.run_id, &self.events_path)
     }
+
+    pub fn write_run_diagnostic_file(
+        &mut self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<PathBuf, RunLogError> {
+        write_run_diagnostic_file(&self.events_path, relative_path, contents)
+    }
 }
 
 impl RunLogWriter for RunLog {
@@ -309,6 +326,15 @@ impl RunLogWriter for RunLog {
         payload: Value,
     ) -> Result<RunLogEvent, RunLogError> {
         self.append(event_type, turn_id, payload)
+    }
+
+    fn write_diagnostic_file(
+        &mut self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<Option<PathBuf>, RunLogError> {
+        self.write_run_diagnostic_file(relative_path, contents)
+            .map(Some)
     }
 }
 
@@ -359,6 +385,15 @@ impl SerializedRunLog {
         self.lock()?.load()
     }
 
+    pub fn write_run_diagnostic_file(
+        &self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<PathBuf, RunLogError> {
+        self.lock()?
+            .write_run_diagnostic_file(relative_path, contents)
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, RunLog>, RunLogError> {
         self.inner
             .lock()
@@ -380,6 +415,14 @@ impl RunLogWriter for SerializedRunLog {
         payload: Value,
     ) -> Result<RunLogEvent, RunLogError> {
         self.append(event_type, turn_id, payload)
+    }
+
+    fn write_diagnostic_file(
+        &mut self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<Option<PathBuf>, RunLogError> {
+        SerializedRunLog::write_run_diagnostic_file(self, relative_path, contents).map(Some)
     }
 }
 
@@ -592,6 +635,49 @@ fn append_event(path: &Path, event: &RunLogEvent) -> Result<(), RunLogError> {
         source,
     })?;
     Ok(())
+}
+
+fn write_run_diagnostic_file(
+    events_path: &Path,
+    relative_path: &Path,
+    contents: &str,
+) -> Result<PathBuf, RunLogError> {
+    let relative_path = normalize_workspace_relative_path(relative_path)?;
+    let run_dir = events_path
+        .parent()
+        .ok_or_else(|| RunLogError::InvalidStatePath {
+            path: events_path.to_path_buf(),
+        })?;
+    let path = run_dir.join(relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| RunLogError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|source| RunLogError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    file.write_all(contents.as_bytes())
+        .map_err(|source| RunLogError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    file.write_all(b"\n").map_err(|source| RunLogError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    file.flush().map_err(|source| RunLogError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(path)
 }
 
 fn write_summary(path: &Path, summary: &RunSummary) -> Result<(), RunLogError> {
@@ -1082,6 +1168,32 @@ mod tests {
         assert_eq!(payload["cacheHitTokens"], 42);
         assert_eq!(payload["nested"]["refresh_token"], REDACTED_VALUE);
         assert_eq!(payload["stdout"], format!("visible {REDACTED_VALUE}"));
+    }
+
+    #[test]
+    fn run_log_writes_diagnostic_files_inside_run_directory() {
+        let workspace = TestWorkspace::new("run-log");
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        let mut run = store
+            .create_run("run_diagnostic")
+            .expect("run should be created");
+
+        let path = run
+            .write_run_diagnostic_file(
+                std::path::Path::new("diagnostics/invalid-tool-arguments.json"),
+                "hello diagnostic",
+            )
+            .expect("diagnostic file should be written");
+
+        assert!(path.starts_with(store.runs_dir().join("run_diagnostic")));
+        assert_eq!(
+            fs::read_to_string(path).expect("diagnostic file should be readable"),
+            "hello diagnostic\n"
+        );
+        assert!(matches!(
+            run.write_run_diagnostic_file(std::path::Path::new("../outside.txt"), "bad"),
+            Err(RunLogError::InvalidStatePath { .. })
+        ));
     }
 
     #[test]
