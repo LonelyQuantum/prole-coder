@@ -87,10 +87,10 @@ Phase 5 P5-6 到 P5-13 的 API key/model、Git 工作流、Sidebar 连续会话�
 - `providerSecretCommands.test.ts` 覆盖 Key 管理器的 `+ Add` 添加 key+alias、选择已有 active key、行内 edit 按钮修改 alias、trash 按钮删除非 active key、Clear API key、Select DeepSeek Model、含 model 的 provider status、idle 状态 RPC restart、active run 场景提示稍后生效。
 - `gitWorkflow.test.ts` 覆盖 staged diff、unstaged fallback、upstream/main base 选择、Generate Commit Message 写入 `repository.inputBox.value` 且不自动 commit、agent 重复 terminal event 只采纳首个终态、Generate PR Description 输出 markdown 且不自动创建 PR。
 - `rpcServer.test.ts` 覆盖 RPC child env 注入、key 轮换后重启使用新 env，以及 typed `agent.deleteRun` request；`providerSecretCommands.test.ts` 覆盖 model 切换后的 env 更新与 idle restart；`test/electron/index.ts` 覆盖新增命令在 VS Code test host 中注册。
-- `chatEvents.test.ts` 覆盖 tool/raw 过程事件默认折叠、terminal summary 保持展开；`runHistory.test.ts` 覆盖 `deleteRun` webview message 解析；`chatApprovals.test.ts` 覆盖内联审批消息解析；`webviewSerialization.test.ts` 覆盖 webview 初始 JSON 的 `undefined` 与 `<` 转义；Rust `agent-rpc`/`run_log` 测试覆盖同一 run 多 turn 续号和 inactive run 删除；`prole-coder-cli` 测试覆盖 DeepSeek missing API key RPC structured data。
+- `chatEvents.test.ts` 覆盖 tool/raw 过程事件默认折叠、用户消息/DeepSeek 回复默认可见、过程事件收敛到 Work log，以及无 assistant 时 `run.completed` 摘要仍可见；`runHistory.test.ts` 覆盖 `deleteRun` webview message 解析；`chatApprovals.test.ts` 覆盖内联审批消息解析；`webviewSerialization.test.ts` 覆盖 webview 初始 JSON 的 `undefined` 与 `<` 转义；Rust `agent-rpc`/`run_log` 测试覆盖同一 run 多 turn 续号和 inactive run 删除；`prole-coder-cli` 测试覆盖 DeepSeek missing API key RPC structured data。
 - 文档/打包验收已运行 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke`、`pnpm run vsix:alpha`、`git diff --check` 和敏感信息扫描。
 
-P5-14 作为持续 UX 测试与体验改进占位，保留真实插件试用后的回归入口；新增 Runs、Key/Model、审批、Chat、Output 日志或上下文压缩体验问题时，应先补可重复测试或手动验收说明，再在 `docs/phase-tasks.md` 中更新完成口径。当前已登记的 E2E 增强项是：在 extension-host 中覆盖 resume 后继续发送新 turn、事件渲染、webview 内联确认完成 run 删除及 Run List 刷新、Sidebar 内联审批卡片、对话专属视图、过程事件默认折叠和 Enter / Shift+Enter 输入行为。
+P5-14 作为持续 UX 测试与体验改进占位，保留真实插件试用后的回归入口；新增 Runs、Key/Model、审批、Chat、Output 日志或上下文压缩体验问题时，应先补可重复测试或手动验收说明，再在 `docs/phase-tasks.md` 中更新完成口径。当前已登记的 E2E 增强项是：在 extension-host 中覆盖 resume 后继续发送新 turn、事件渲染、webview 内联确认完成 run 删除及 Run List 刷新、Sidebar 内联审批卡片、对话专属视图、Work log 折叠展示和 Enter / Shift+Enter 输入行为。
 
 ## 新增测试的协作要求
 

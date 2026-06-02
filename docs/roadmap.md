@@ -105,7 +105,7 @@ P0 不追求：
 
 目标：让 VS Code 插件成为 Agent Core 的薄前端，而不是第二套 Agent。
 
-Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 深度集成任务；Phase 5 仍在进行中。P5-1 到 P5-13 已完成原生 Chat 入口、简化审批、自动上下文压缩、UX 验收、Output Channel 错误诊断、插件内多 API key/model 配置、统一 redaction/错误恢复、只读 Git context、commit message 写入 SCM inputBox、PR markdown 生成、Sidebar 连续会话、Run 删除和折叠事件 UX、结构化 provider 配置错误码与恢复动作；P5-14 已补充对话专属视图、内联审批/删除确认和输入快捷键回归，但持续 UX 测试与体验改进占位仍未完成。Phase 5 全部完成后再进入 Phase 6，与生态扩展一起推进。Marketplace 发布不阻塞 Phase 4/5，当前已具备可安装 VSIX alpha / pre-release 产物和安装说明。Phase 2e 展示型 demo 已经给 VS Code Context Viz / Approval / Run Log UI 提供可观察样本。
+Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 深度集成任务；Phase 5 仍在进行中。P5-1 到 P5-13 已完成原生 Chat 入口、简化审批、自动上下文压缩、UX 验收、Output Channel 错误诊断、插件内多 API key/model 配置、统一 redaction/错误恢复、只读 Git context、commit message 写入 SCM inputBox、PR markdown 生成、Sidebar 连续会话、Run 删除和折叠事件 UX、结构化 provider 配置错误码与恢复动作；P5-14 已补充对话专属视图、内联审批/删除确认、默认只显示用户消息与 DeepSeek 回复的对话流、Work log 折叠展示和输入快捷键回归，但持续 UX 测试与体验改进占位仍未完成。Phase 5 全部完成后再进入 Phase 6，与生态扩展一起推进。Marketplace 发布不阻塞 Phase 4/5，当前已具备可安装 VSIX alpha / pre-release 产物和安装说明。Phase 2e 展示型 demo 已经给 VS Code Context Viz / Approval / Run Log UI 提供可观察样本。
 
 优先事项：
 
@@ -121,7 +121,7 @@ Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 
 - 配置界面依赖 Provider capability model；provider、model、预算、审批策略和 RPC 命令配置都不得保存 API Key。
 - P5-12 已完成：Sidebar Chat 复用 `agent.sendTurn.runId` 继续同一 run 多轮对话，支持 `agent.deleteRun` 删除 inactive run；tool/provider/request 等过程事件默认折叠，完整 payload 写入 `Output > ProleCoder`。
 - P5-13 已完成：provider 配置失败从前端字符串匹配升级为 RPC 结构化错误数据，缺少 DeepSeek API key 时返回 `E_PROVIDER_ERROR` 和 `data.recoverableAction`，供 VS Code/TUI 统一展示配置动作。
-- P5-14：持续 UX 测试与体验改进占位，用于真实插件试用后的 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩问题回归；已补齐 Sidebar 对话专属视图、webview 内联 approval/delete 确认、过程事件默认折叠和 Enter / Shift+Enter 输入行为。
+- P5-14：持续 UX 测试与体验改进占位，用于真实插件试用后的 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩问题回归；已补齐 Sidebar 对话专属视图、webview 内联 approval/delete 确认、默认只显示用户消息与 DeepSeek 回复的对话流、默认折叠 Work log 和 Enter / Shift+Enter 输入行为。
 - 真实 hunk 级 patch 审批首版限定 `apply_patch`，再扩展 Core/RPC 审批决策和 Run Log 记录。
 - FIM completion preview 依赖 Provider capability model，优先评估 VS Code 原生 inline completion 接入。
 - VSIX alpha / pre-release 交付已完成，`pnpm run vsix:alpha` 会生成可安装 pre-release VSIX 和 SHA-256 校验和；end-to-end 集成测试已通过本地 JSON-RPC fixture server 覆盖 Chat sendTurn、Cancel、Problems diagnostics、自动审批、Run List / resume。

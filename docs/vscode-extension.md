@@ -1,6 +1,6 @@
 # 编辑器插件（VS Code Extension）
 
-状态：Phase 3 VS Code 插件核心体验已完成；Phase 4 VS Code 深度集成已完成 14 项深度集成能力；Phase 5 VS Code Codex-like UX 与开发工作流进行中。基础命令、RPC server 启动监管、初始化握手、JSON-RPC request client、VS Code/protocol TypeScript 类型共享、RPC/commands 边界测试、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、共享 RPC 全双工事件管线、命令风险动态升级展示、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、VSIX alpha 打包、extension-host E2E、原生 `@prole` Chat Participant、简化审批 UX、自动上下文压缩、`ProleCoder` Output Channel 错误诊断、API key/model 配置、统一 redaction、Git 工作流、Sidebar 连续会话、Run 删除、折叠事件 UX 和结构化 provider 配置错误恢复均已实现；P5-14 已补充 Sidebar 对话专属视图、内联审批/删除确认和输入快捷键回归，但持续 UX 测试与体验改进占位仍未完成。
+状态：Phase 3 VS Code 插件核心体验已完成；Phase 4 VS Code 深度集成已完成 14 项深度集成能力；Phase 5 VS Code Codex-like UX 与开发工作流进行中。基础命令、RPC server 启动监管、初始化握手、JSON-RPC request client、VS Code/protocol TypeScript 类型共享、RPC/commands 边界测试、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、共享 RPC 全双工事件管线、命令风险动态升级展示、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、VSIX alpha 打包、extension-host E2E、原生 `@prole` Chat Participant、简化审批 UX、自动上下文压缩、`ProleCoder` Output Channel 错误诊断、API key/model 配置、统一 redaction、Git 工作流、Sidebar 连续会话、Run 删除、折叠事件 UX 和结构化 provider 配置错误恢复均已实现；P5-14 已补充 Sidebar 对话专属视图、内联审批/删除确认、默认对话流、Work log 折叠展示和输入快捷键回归，但持续 UX 测试与体验改进占位仍未完成。
 
 VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server 复用 Rust Agent Core，而不是在 TypeScript 侧重新实现 agent loop、context builder、provider 调用或 tool execution。
 
@@ -45,7 +45,7 @@ VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server
 
 - 在 Activity Bar 暴露 ProleCoder view container 和 Chat view。
 - 通过 `RpcServerManager.onEvent()` 订阅 live `agent.event`。
-- 使用 `ChatEventTimeline` 把 `assistant.delta`、tool lifecycle、approval、context/provider 和 terminal event 转换为 timeline item；tool/provider/request 等过程事件默认折叠，assistant 文本和 terminal summary 默认可见。
+- 使用 `ChatEventTimeline` 把 `assistant.delta`、tool lifecycle、approval、context/provider 和 terminal event 转换为 timeline item；默认对话流只显示 `You` 用户消息、`DeepSeek` 回复和失败/取消错误，tool/provider/context/run completed 等过程事件收敛进默认折叠的 Work log，Work log 摘要在运行中只暴露当前工作状态。
 - 同一 run/turn 的连续 `assistant.delta` 会合并为一条 assistant 消息，避免流式输出刷屏。
 - 提供 prompt 输入、mode 选择和运行中 Cancel 按钮；通过 Webview `submitTurn` 消息调用 typed `RpcServerManager.sendTurn()`，发送时把 Problems 快照转换为 diagnostic attachments，并按协议 attachment 上限优先保留 error；如果当前已 resume/发送过 run，会复用该 `runId` 继续同一会话并由后端递增 `turn_N`；accepted 后等待同一 run 的 terminal event 收口输入状态，Cancel 会调用 typed `RpcServerManager.cancel()`。
 - Run List 支持 `agent.listRuns` / `agent.resume` / `agent.deleteRun`，可回放历史 run、继续多轮会话，也可删除 inactive run。
@@ -150,7 +150,7 @@ Phase 5 Codex-like UX 与开发工作流清单与 `docs/phase-tasks.md` 对齐�
 11. P5-11：Phase 5 UX 工作流验收，已完成：补齐 P5-6 到 P5-10 的测试、VSIX 验证和文档收敛；Git workflow agent 终态事件已补幂等保护，G4 自动 commit / push / create PR 留作后续增强并接入审批模型。
 12. P5-12：Sidebar 连续会话、Run 删除与折叠事件 UX，已完成：Sidebar resume 后继续同一 run 发送多轮 turn，Run List 可通过 `agent.deleteRun` 删除 inactive run；tool/provider/request 等过程事件默认折叠，assistant 文本和最终摘要保持可见，完整事件 payload 写入 `Output > ProleCoder`。
 13. P5-13：结构化 provider 配置错误码与恢复动作，已完成：DeepSeek 缺少 API key 的 RPC `E_PROVIDER_ERROR` 返回 `data.provider` / `data.configurationError` / `data.recoverableAction`，Sidebar/原生 Chat Participant 依据 recoverable action 展示或自动触发 Configure API Key，不再解析后端英文错误消息；run failed payload 也支持同一恢复动作。
-14. P5-14：持续 UX 测试与体验改进占位，未完成：已补齐进入 run 后的 Sidebar 对话专属视图、内联 approval/delete 确认、过程事件强制默认折叠、Enter 发送 / Shift+Enter 换行；后续继续根据真实 VS Code 插件试用收集 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩等体验问题，作为 Phase 5 整体完成前的持续验收入口。
+14. P5-14：持续 UX 测试与体验改进占位，未完成：已补齐进入 run 后的 Sidebar 对话专属视图、内联 approval/delete 确认、默认只显示用户消息与 DeepSeek 回复的对话流、默认折叠 Work log、Enter 发送 / Shift+Enter 换行；后续继续根据真实 VS Code 插件试用收集 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩等体验问题，作为 Phase 5 整体完成前的持续验收入口。
 
 在这些能力稳定前，不在插件侧重复实现 context builder、tool execution 或 provider 调用。
 
