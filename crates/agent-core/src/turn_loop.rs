@@ -1,4 +1,10 @@
-use std::{collections::HashSet, future::Future, path::Path, pin::Pin, time::Instant};
+use std::{
+    collections::HashSet,
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+    time::Instant,
+};
 
 use futures_util::{Stream, StreamExt};
 use serde::{Serialize, de::DeserializeOwned};
@@ -34,6 +40,7 @@ const DEFAULT_MAX_ATTACHMENTS: usize = 32;
 const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 256 * 1024;
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_LINES: usize = 8;
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_BYTES: usize = 2 * 1024;
+const TOOL_ARGUMENT_DIAGNOSTIC_MAX_BYTES: usize = 128 * 1024;
 const FINAL_RESPONSE_SUMMARY_INSTRUCTION: &str = concat!(
     "When the task is complete, make the final assistant message a concise work summary for the user. ",
     "Mention what changed, important files, verification or tests, and any blockers. ",
@@ -125,7 +132,9 @@ where
                 AgentTurnLoopError::RunLog(_) | AgentTurnLoopError::EventSink(_)
             )
         {
-            let (event_type, payload) = terminal_error_event(error);
+            let diagnostic_file =
+                write_invalid_tool_arguments_diagnostic_file(run_log, turn_id.as_str(), error);
+            let (event_type, payload) = terminal_error_event(error, diagnostic_file.as_deref());
             let append_result =
                 append_turn_event(run_log, event_sink, event_type, Some(turn_id), payload);
             if let Err(append_error) = append_result {
@@ -1627,6 +1636,7 @@ pub enum AgentTurnLoopError {
         tool_call_id: String,
         name: String,
         source: serde_json::Error,
+        raw_arguments: Option<String>,
     },
     #[error("tool call `{tool_call_id}` for `{name}` failed JSON Schema validation: {source}")]
     InvalidToolArgumentSchema {
@@ -1761,6 +1771,7 @@ fn parse_tool_arguments_value(tool_call: &ChatToolCall) -> Result<Value, AgentTu
             tool_call_id: tool_call.id.clone(),
             name: tool_call.function.name.clone(),
             source,
+            raw_arguments: Some(tool_call.function.arguments.clone()),
         }
     })
 }
@@ -1788,6 +1799,7 @@ fn parse_tool_arguments<T: DeserializeOwned>(
             tool_call_id: tool_call.id.clone(),
             name: tool_call.function.name.clone(),
             source,
+            raw_arguments: None,
         }
     })
 }
@@ -2123,7 +2135,112 @@ fn provider_error_or_canceled(
     }
 }
 
-fn terminal_error_event(error: &AgentTurnLoopError) -> (&'static str, Value) {
+fn write_invalid_tool_arguments_diagnostic_file(
+    run_log: &mut (impl RunLogWriter + ?Sized),
+    turn_id: &str,
+    error: &AgentTurnLoopError,
+) -> Option<String> {
+    let run_id = run_log.run_id().to_owned();
+    let (relative_path, payload) = invalid_tool_arguments_diagnostic(&run_id, turn_id, error)?;
+    let contents = match serde_json::to_string_pretty(&payload) {
+        Ok(contents) => contents,
+        Err(source) => {
+            eprintln!(
+                "failed to serialize diagnostic for `{}`: {source}",
+                error.code()
+            );
+            return None;
+        }
+    };
+
+    match run_log.write_diagnostic_file(&relative_path, &contents) {
+        Ok(Some(path)) => Some(path.display().to_string()),
+        Ok(None) => None,
+        Err(source) => {
+            eprintln!(
+                "failed to write diagnostic for `{}`: {source}",
+                error.code()
+            );
+            None
+        }
+    }
+}
+
+fn invalid_tool_arguments_diagnostic(
+    run_id: &str,
+    turn_id: &str,
+    error: &AgentTurnLoopError,
+) -> Option<(PathBuf, Value)> {
+    let AgentTurnLoopError::InvalidToolArguments {
+        tool_call_id,
+        name,
+        source,
+        raw_arguments: Some(raw_arguments),
+    } = error
+    else {
+        return None;
+    };
+    let (raw_arguments, raw_arguments_truncated) =
+        diagnostic_raw_arguments(redact_text(raw_arguments));
+    let file_name = diagnostic_file_name("invalid-tool-arguments", tool_call_id);
+
+    Some((
+        Path::new("diagnostics").join(file_name),
+        json!({
+            "type": "invalid_tool_arguments",
+            "code": error.code(),
+            "message": error.to_string(),
+            "runId": run_id,
+            "turnId": turn_id,
+            "toolCallId": tool_call_id,
+            "toolName": name,
+            "jsonError": source.to_string(),
+            "rawArguments": raw_arguments,
+            "rawArgumentsTruncated": raw_arguments_truncated,
+        }),
+    ))
+}
+
+fn diagnostic_raw_arguments(text: String) -> (String, bool) {
+    if text.len() <= TOOL_ARGUMENT_DIAGNOSTIC_MAX_BYTES {
+        return (text, false);
+    }
+
+    let mut end = TOOL_ARGUMENT_DIAGNOSTIC_MAX_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let omitted = text.len() - end;
+    (
+        format!("{}\n[truncated {omitted} bytes]", &text[..end]),
+        true,
+    )
+}
+
+fn diagnostic_file_name(prefix: &str, id: &str) -> String {
+    let mut safe = id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(80)
+        .collect::<String>();
+    if safe.is_empty() {
+        safe.push_str("tool_call");
+    }
+    let hash = crate::hashing::sha256_hex(id.as_bytes());
+    let short_hash = hash.get(..12).unwrap_or(hash.as_str());
+    format!("{prefix}-{safe}-{short_hash}.json")
+}
+
+fn terminal_error_event(
+    error: &AgentTurnLoopError,
+    diagnostic_file: Option<&str>,
+) -> (&'static str, Value) {
     match error {
         AgentTurnLoopError::ApprovalCanceled {
             approval_id,
@@ -2152,19 +2269,21 @@ fn terminal_error_event(error: &AgentTurnLoopError) -> (&'static str, Value) {
                 "reason": reason,
             }),
         ),
-        _ => (
-            "run.failed",
-            json!({
-                "code": error.code(),
-                "message": error.to_string(),
-            }),
-        ),
+        _ => {
+            let mut payload = Map::new();
+            payload.insert("code".to_owned(), json!(error.code()));
+            payload.insert("message".to_owned(), json!(error.to_string()));
+            if let Some(diagnostic_file) = diagnostic_file {
+                payload.insert("diagnosticFile".to_owned(), json!(diagnostic_file));
+            }
+            ("run.failed", Value::Object(payload))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, fs};
+    use std::{collections::VecDeque, fs, path::PathBuf};
 
     use futures_util::stream;
     use serde_json::json;
@@ -2173,7 +2292,7 @@ mod tests {
         context::ContextItem,
         provider::deepseek_api::ChatToolCall,
         reasoning::ReasoningContentMode,
-        run_log::{RunLogEvent, RunLogStore},
+        run_log::{REDACTED_VALUE, RunLogEvent, RunLogStore},
         test_helpers::TestWorkspace,
     };
 
@@ -2186,6 +2305,18 @@ mod tests {
         TurnProviderRequest, TurnProviderResponse, TurnProviderStream,
         TurnProviderStreamingSummary, TurnProviderUsage, turn_provider_response_stream,
     };
+
+    #[test]
+    fn diagnostic_file_names_include_hash_for_sanitized_collisions() {
+        let left = super::diagnostic_file_name("invalid-tool-arguments", "call/a");
+        let right = super::diagnostic_file_name("invalid-tool-arguments", "call:a");
+
+        assert!(left.starts_with("invalid-tool-arguments-call_a-"));
+        assert!(right.starts_with("invalid-tool-arguments-call_a-"));
+        assert_ne!(left, right);
+        assert!(left.ends_with(".json"));
+        assert!(right.ends_with(".json"));
+    }
 
     #[tokio::test]
     async fn turn_loop_runs_read_tool_and_continues_to_final_answer() {
@@ -2777,6 +2908,72 @@ mod tests {
         assert!(events.iter().any(|event| {
             event.event_type == "run.failed" && event.payload["code"] == "E_INVALID_TOOL_ARGUMENTS"
         }));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_writes_diagnostic_file_for_malformed_tool_arguments() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "hello\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_malformed_tool_args")
+            .expect("run should be created");
+        let raw_secret = format!("sk-{}", "this-malformed-secret-123");
+        let malformed_arguments =
+            format!("{{\"unifiedDiff\":\"--- a/README.md\\n+++ b/README.md\\n{raw_secret}");
+        let provider = ScriptedProvider::new(vec![TurnProviderResponse::tool_calls(
+            None,
+            Some("I should edit the README.".to_owned()),
+            vec![ChatToolCall::function(
+                "call_bad_json",
+                "apply_patch",
+                malformed_arguments,
+            )],
+        )]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let error = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Edit README"), &mut run)
+            .await
+            .expect_err("malformed tool JSON should fail the turn");
+
+        assert!(matches!(
+            error,
+            AgentTurnLoopError::InvalidToolArguments {
+                raw_arguments: Some(_),
+                ..
+            }
+        ));
+        let events = store
+            .load_run("run_turn_malformed_tool_args")
+            .expect("events should load");
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.requested")
+        );
+        let failed = events
+            .iter()
+            .find(|event| {
+                event.event_type == "run.failed"
+                    && event.payload["code"] == "E_INVALID_TOOL_ARGUMENTS"
+            })
+            .expect("run.failed should be recorded");
+        let diagnostic_file = failed.payload["diagnosticFile"]
+            .as_str()
+            .expect("run.failed should include diagnosticFile");
+        let diagnostic_path = PathBuf::from(diagnostic_file);
+        assert!(diagnostic_path.is_file());
+
+        let contents =
+            fs::read_to_string(&diagnostic_path).expect("diagnostic file should be readable");
+        assert!(contents.contains("invalid_tool_arguments"));
+        assert!(contents.contains("call_bad_json"));
+        assert!(contents.contains("apply_patch"));
+        assert!(contents.contains("unifiedDiff"));
+        assert!(!contents.contains(&raw_secret));
+        assert!(contents.contains(REDACTED_VALUE));
     }
 
     #[tokio::test]
