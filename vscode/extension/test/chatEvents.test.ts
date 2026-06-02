@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ChatEventTimeline, createTimelineItem } from "../src/chatEvents.js";
+import {
+  ChatEventTimeline,
+  createTimelineItem,
+  isWorkLogItem,
+  presentTimelineItems,
+} from "../src/chatEvents.js";
 import type { AgentEventEnvelope } from "../src/rpcServer.js";
 
 test("chat timeline merges assistant delta events for the same turn", () => {
@@ -29,6 +34,52 @@ test("chat timeline keeps assistant delta events for different turns separate", 
     snapshot.items.map((item) => item.body),
     ["first", "second"],
   );
+});
+
+test("chat timeline presents user and DeepSeek messages while folding work events", () => {
+  const timeline = new ChatEventTimeline();
+
+  timeline.append(agentEvent(1, "run.started", { mode: "ask" }));
+  timeline.append(agentEvent(2, "turn.started", { userTask: "Read the code" }));
+  timeline.append(agentEvent(3, "context.built", { inputTokens: 123 }));
+  timeline.append(agentEvent(4, "assistant.delta", { text: "I read it." }));
+  timeline.append(agentEvent(5, "tool.requested", { name: "read_file" }));
+  const snapshot = timeline.append(agentEvent(6, "run.completed", { summary: "I read it." }));
+
+  assert.deepEqual(
+    snapshot.visibleItems?.map((item) => item.title),
+    ["You", "DeepSeek"],
+  );
+  assert.deepEqual(
+    snapshot.workItems?.map((item) => item.type),
+    ["run.started", "context.built", "tool.requested", "run.completed"],
+  );
+  assert.equal(snapshot.items.find((item) => item.type === "turn.started")?.kind, "user");
+});
+
+test("chat timeline keeps completed summary visible when no assistant message exists", () => {
+  const completed = createTimelineItem(agentEvent(1, "run.completed", { summary: "done" }));
+  const presentation = presentTimelineItems([completed]);
+
+  assert.deepEqual(
+    presentation.visibleItems.map((item) => item.type),
+    ["run.completed"],
+  );
+  assert.equal(presentation.workItems.length, 0);
+});
+
+test("chat timeline keeps failure and cancellation visible outside work log", () => {
+  const failure = createTimelineItem(agentEvent(1, "run.failed", { message: "boom" }));
+  const canceled = createTimelineItem(agentEvent(2, "run.canceled", { reason: "stop" }));
+  const presentation = presentTimelineItems([failure, canceled]);
+
+  assert.equal(isWorkLogItem(failure, true), false);
+  assert.equal(isWorkLogItem(canceled, true), false);
+  assert.deepEqual(
+    presentation.visibleItems.map((item) => item.type),
+    ["run.failed", "run.canceled"],
+  );
+  assert.equal(presentation.workItems.length, 0);
 });
 
 test("chat timeline renders tool lifecycle and terminal events", () => {
