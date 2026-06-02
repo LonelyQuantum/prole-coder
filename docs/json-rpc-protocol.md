@@ -557,8 +557,11 @@ interface RunFailed {
   code: string;
   message: string;
   details?: unknown;
+  diagnosticFile?: string;
 }
 ```
+
+当 tool-call `function.arguments` 本身不是合法 JSON 时，Agent Core 会把脱敏后的原始累计 arguments 写入当前 run 目录下的诊断文件，并在 `diagnosticFile` 返回该本地文件路径。该字段只用于本地排查，不要求前端把文件内容重新发送给模型。
 
 ### `run.canceled`
 
@@ -900,7 +903,7 @@ JSON-RPC 标准错误保留标准语义。项目特定错误使用 `-32000` 到 
 | -32002 | `E_WORKSPACE_UNTRUSTED` | 当前 workspace 未信任，请求操作被禁用。 |
 | -32003 | `E_RUN_NOT_FOUND` | 请求的 run 不存在于本地状态。 |
 | -32004 | `E_RUN_ALREADY_ACTIVE` | 已存在冲突的 active run。 |
-| -32010 | `E_INVALID_TOOL_ARGUMENTS` | tool-call 参数未通过 schema 校验。 |
+| -32010 | `E_INVALID_TOOL_ARGUMENTS` | tool-call 参数不是合法 JSON，或未通过 schema 校验。 |
 | -32011 | `E_APPROVAL_NOT_FOUND` | approval id 未知、已过期或已使用。 |
 | -32012 | `E_APPROVAL_DENIED` | 审批被拒绝，操作无法继续。 |
 | -32020 | `E_CONTEXT_BUDGET_EXCEEDED` | 必需上下文无法放入配置的预算。 |

@@ -358,6 +358,7 @@ Schema 校验不能只作为 typed deserialization 失败后的补救，因为 R
 
 - 当前实现只支持受限 unified diff；后续需要支持更完整的 git patch 语法，包括 rename、copy、mode change 和更严格的 no-newline 语义。
 - 已增加 VS Code patch 预览和 `apply_patch` hunk 级审批；后续继续增强冲突诊断、失败时的精确 hunk mismatch 信息，以及 rename/copy/mode change 等更完整 patch 语法下的审批边界。
+- 为大 patch / 大文件写入设计分块式工具参数协议：provider 可以流式产生 chunk，本地写入 run-scoped 临时文件，最后通过 commit/apply 调用统一进入 schema 校验、路径安全、审批和 hunk 边界；不要在 chunk 过程中边接收边执行写入。
 - 用修改前快照生成 reverse patch，并在 run log 中保存 patch id、审批 id 和可审计回滚信息。
 - 如果需要抵抗磁盘写入中途失败，应进一步引入临时文件、原子替换或备份恢复机制；当前 staging 主要保证解析和 hunk 校验失败不会产生半应用 patch。
 - 明确二进制文件和生成文件策略，避免文本 patch 意外改写不可审计内容。

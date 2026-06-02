@@ -72,7 +72,7 @@ provider stream 中的 content delta 会立即写入 `assistant.delta`，payload
 
 `Completed.content` 是最终 assistant 消息文本的权威来源，用于 `run.completed.summary` 或 assistant tool-call replay。`assistant.delta` 是展示和 run log 增量事件，不反向推断最终文本；当 provider 已经发送过可见 content delta 时，Turn Loop 不会在 `Completed` 时重复写一份完整 `assistant.delta`。因此 reasoning delta 不进入用户可见 summary，tool call 前的可见文本如果存在，应由 provider 同时保留在最终 `Completed.content` 中。
 
-DeepSeek streaming tool call delta 在 CLI provider wrapper 内通过 `ChatToolCallAccumulator` 拼装为完整 `ChatToolCall` 后才进入 `Completed.tool_calls`。Turn Loop 不直接处理 provider 私有 delta 形态，只要求 provider 在 `Completed` 中提供完整、可校验、可执行的工具调用列表。
+DeepSeek streaming tool call delta 在 CLI provider wrapper 内通过 `ChatToolCallAccumulator` 拼装为完整 `ChatToolCall` 后才进入 `Completed.tool_calls`。Turn Loop 不直接处理 provider 私有 delta 形态，只要求 provider 在 `Completed` 中提供完整、可校验、可执行的工具调用列表。如果累计后的 `function.arguments` 不是合法 JSON，Turn Loop 会以 `E_INVALID_TOOL_ARGUMENTS` 失败，并把脱敏后的累计 arguments 写入当前 run 的 `diagnostics/invalid-tool-arguments-<sanitizedToolCallId>-<hash>.json`，同时在 `run.failed.diagnosticFile` 暴露该本地路径。
 
 `run.started` 记录规范化后的 workspace root，用于本地审计和前端展示当前 run 绑定的工作区。该路径只应进入本地 run log 和本机前端事件流，不应被上传到公开仓库或远程日志。
 
@@ -105,7 +105,7 @@ RPC active run 的 Run Log 使用 `SerializedRunLog`：后台 Turn Loop worker �
 - Turn Loop 每次成功追加 Run Log 事件后，会把同一条事件交给 `TurnEventSink`，sink 看到的事件序列与本地 `events.jsonl` 一致。
 - `SerializedRunLog` 并发 append 测试验证多个 clone 同时写同一 run 时仍生成连续 `seq`。
 - DeepSeek wrapper 能把 streaming tool call delta 拼成完整工具调用，并在缺少必要 metadata 时失败。
-- tool call arguments 会先按工具注册表 JSON Schema 校验，再进入 typed deserialization；未知字段和错误类型会返回 `E_INVALID_TOOL_ARGUMENTS`。
+- tool call arguments 会先解析为 JSON，再按工具注册表 JSON Schema 校验，最后进入 typed deserialization；malformed JSON、未知字段和错误类型会返回 `E_INVALID_TOOL_ARGUMENTS`，malformed JSON 还会写入脱敏诊断文件。
 
 这些测试验证的是模块集成骨架，不需要真实 DeepSeek API Key，也不会联网。真实 tool call delta 形态由 `live_streaming_tool_call_accumulator_smoke_test` 作为手动 opt-in live test 验收。
 
