@@ -1163,9 +1163,37 @@ function renderChatViewHtml(
       background: var(--vscode-editorWidget-background);
     }
 
+    .item.user,
     .item.assistant {
       border-radius: 6px;
+    }
+
+    .item.user {
+      margin-left: 24px;
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+      border-color: transparent;
+    }
+
+    .item.assistant {
       background: var(--vscode-input-background);
+    }
+
+    .item.user .meta,
+    .item.assistant .meta {
+      display: none;
+    }
+
+    .item.user .title,
+    .item.assistant .title {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+    }
+
+    .item.work-log {
+      background: transparent;
+      border-style: dashed;
+      opacity: 0.9;
     }
 
     details.item > summary {
@@ -1239,6 +1267,45 @@ function renderChatViewHtml(
 
     details.item:not([open]) > .body {
       display: none;
+    }
+
+    .work-log-body {
+      display: grid;
+      gap: 0;
+    }
+
+    .work-log-row {
+      display: grid;
+      gap: 3px;
+      padding: 6px 0;
+      border-top: 1px solid var(--vscode-editorWidget-border);
+    }
+
+    .work-log-row:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .work-log-row-meta {
+      display: flex;
+      gap: 6px;
+      min-width: 0;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+    }
+
+    .work-log-row-title {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      font-weight: 600;
+    }
+
+    .work-log-row-body {
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      line-height: 1.35;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }
 
     .approval-host {
@@ -1549,6 +1616,8 @@ function renderChatViewHtml(
     const initialApproval = ${initialApproval};
     const runModes = ${safeScriptJson(CHAT_RUN_MODES)};
     const defaultMode = ${safeScriptJson(DEFAULT_CHAT_MODE)};
+    const WORK_LOG_RENDER_LIMIT = 80;
+    const WORK_LOG_STATUS_IGNORED_TYPES = new Set(["run.completed"]);
     const vscodeApi = acquireVsCodeApi();
     const shellRoot = document.querySelector(".shell");
     const showRunsButton = document.getElementById("show-runs");
@@ -1674,6 +1743,8 @@ function renderChatViewHtml(
     function render(snapshot) {
       currentSnapshot = snapshot && typeof snapshot === "object" ? snapshot : initialSnapshot;
       const items = Array.isArray(currentSnapshot.items) ? currentSnapshot.items : [];
+      const visibleItems = timelineVisibleItems(currentSnapshot, items);
+      const workItems = timelineWorkItems(currentSnapshot, items);
       statusTitle.textContent = currentSnapshot.latestStatus || "ProleCoder";
       statusSubtitle.textContent = currentSnapshot.latestRunId
         ? currentSnapshot.latestRunId + " - " + currentSnapshot.eventCount + " events"
@@ -1681,7 +1752,7 @@ function renderChatViewHtml(
       eventsRoot.replaceChildren();
       syncConversationChrome();
 
-      if (items.length === 0) {
+      if (visibleItems.length === 0 && workItems.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty";
         empty.textContent = "No run events yet.";
@@ -1689,8 +1760,11 @@ function renderChatViewHtml(
         return;
       }
 
-      for (const item of items) {
+      for (const item of visibleItems) {
         eventsRoot.append(renderItem(item));
+      }
+      if (workItems.length > 0) {
+        eventsRoot.append(renderWorkLog(workItems));
       }
     }
 
@@ -2261,6 +2335,7 @@ function renderChatViewHtml(
         promptInput.value = "";
       }
       syncConversationChrome();
+      syncWorkLogSummary();
     }
 
     function renderSubmissionAction(action) {
@@ -2320,6 +2395,157 @@ function renderChatViewHtml(
         return submissionRunId || latestRunId || selectedRunId;
       }
       return currentSubmission && currentSubmission.busy === true ? "pending" : "";
+    }
+
+    function timelineVisibleItems(snapshot, items) {
+      if (snapshot && Array.isArray(snapshot.visibleItems)) {
+        return snapshot.visibleItems;
+      }
+
+      // Fallback only; chatEvents.presentTimelineItems is the authoritative grouping source.
+      const hasAssistant = items.some((item) => item && item.kind === "assistant");
+      return items.filter((item) => !isWorkLogItem(item, hasAssistant));
+    }
+
+    function timelineWorkItems(snapshot, items) {
+      if (snapshot && Array.isArray(snapshot.workItems)) {
+        return snapshot.workItems;
+      }
+
+      // Fallback only; chatEvents.presentTimelineItems is the authoritative grouping source.
+      const hasAssistant = items.some((item) => item && item.kind === "assistant");
+      return items.filter((item) => isWorkLogItem(item, hasAssistant));
+    }
+
+    function isWorkLogItem(item, hasAssistant) {
+      if (!item || typeof item !== "object") {
+        return true;
+      }
+      if (item.kind === "user" || item.kind === "assistant") {
+        return false;
+      }
+      if (item.type === "run.failed" || item.type === "run.canceled") {
+        return false;
+      }
+      if (item.type === "run.completed" && hasAssistant !== true) {
+        return false;
+      }
+      return true;
+    }
+
+    function renderWorkLog(items) {
+      const details = document.createElement("details");
+      details.className = "item work-log neutral";
+      details.open = false;
+
+      const summary = document.createElement("summary");
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const count = document.createElement("span");
+      count.className = "seq";
+      count.textContent = items.length + " events";
+      const latest = latestWorkItem(items);
+      const latestType = document.createElement("span");
+      latestType.className = "type";
+      latestType.textContent = latest && typeof latest.type === "string" ? latest.type : "work";
+      meta.append(count, latestType);
+
+      const title = document.createElement("div");
+      title.className = "title";
+      title.textContent = workLogTitle(items);
+      summary.append(meta, title);
+      details.append(summary);
+
+      const body = document.createElement("div");
+      body.className = "body work-log-body";
+      const displayedItems = workLogDisplayItems(items);
+      const hiddenCount = items.length - displayedItems.length;
+      if (hiddenCount > 0) {
+        body.append(renderWorkLogNotice(hiddenCount));
+      }
+      for (const item of displayedItems) {
+        body.append(renderWorkLogRow(item));
+      }
+      details.append(body);
+      return details;
+    }
+
+    function workLogDisplayItems(items) {
+      return items.length <= WORK_LOG_RENDER_LIMIT ? items : items.slice(items.length - WORK_LOG_RENDER_LIMIT);
+    }
+
+    function renderWorkLogNotice(hiddenCount) {
+      const row = document.createElement("div");
+      row.className = "work-log-row neutral";
+      const meta = document.createElement("div");
+      meta.className = "work-log-row-meta";
+      meta.textContent = "work log";
+      const title = document.createElement("div");
+      title.className = "work-log-row-title";
+      title.textContent = hiddenCount + " earlier events hidden";
+      row.append(meta, title);
+      return row;
+    }
+
+    function renderWorkLogRow(item) {
+      const row = document.createElement("div");
+      row.className = "work-log-row " + (typeof item.tone === "string" ? item.tone : "neutral");
+
+      const meta = document.createElement("div");
+      meta.className = "work-log-row-meta";
+      const seq = document.createElement("span");
+      seq.textContent = item.seq === item.lastSeq ? "#" + item.seq : "#" + item.seq + "-" + item.lastSeq;
+      const type = document.createElement("span");
+      type.textContent = typeof item.type === "string" ? item.type : "event";
+      meta.append(seq, type);
+
+      const title = document.createElement("div");
+      title.className = "work-log-row-title";
+      title.textContent = typeof item.title === "string" ? item.title : "Work event";
+      row.append(meta, title);
+
+      if (typeof item.body === "string" && item.body.length > 0) {
+        const body = document.createElement("div");
+        body.className = "work-log-row-body";
+        body.textContent = item.body;
+        row.append(body);
+      }
+
+      return row;
+    }
+
+    function workLogTitle(items) {
+      const latest = latestWorkItem(items);
+      const busy = currentSubmission && currentSubmission.busy === true;
+      if (busy && latest && typeof latest.title === "string" && latest.title.length > 0) {
+        return "Working: " + latest.title;
+      }
+      return "Work log";
+    }
+
+    function latestWorkItem(items) {
+      for (let index = items.length - 1; index >= 0; index -= 1) {
+        const item = items[index];
+        if (shouldUseWorkItemForStatus(item)) {
+          return item;
+        }
+      }
+      return items.length > 0 ? items[items.length - 1] : undefined;
+    }
+
+    function shouldUseWorkItemForStatus(item) {
+      return item && WORK_LOG_STATUS_IGNORED_TYPES.has(item.type) !== true;
+    }
+
+    function syncWorkLogSummary() {
+      const title = document.querySelector(".item.work-log > summary .title");
+      if (!title) {
+        return;
+      }
+
+      const snapshot = currentSnapshot && typeof currentSnapshot === "object" ? currentSnapshot : initialSnapshot;
+      const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+      title.textContent = workLogTitle(timelineWorkItems(snapshot, items));
     }
 
     function renderItem(item) {
