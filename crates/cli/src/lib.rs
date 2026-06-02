@@ -2039,9 +2039,9 @@ mod tests {
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "run.completed"
-                    && line["params"]["runId"] == "run_cli_rpc"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.completed" && event["runId"] == "run_cli_rpc"
+                })
             },
             Duration::from_secs(30),
         );
@@ -2054,10 +2054,11 @@ mod tests {
         assert_eq!(lines[1]["id"], "turn_1");
         assert_eq!(lines[1]["result"]["accepted"], true);
         assert!(lines.iter().any(|line| {
-            line["method"] == "agent.event"
-                && line["params"]["type"] == "run.completed"
-                && line["params"]["payload"]["summary"]
-                    == "Fixture provider completed without tool calls."
+            line_has_agent_event(line, |event| {
+                event["type"] == "run.completed"
+                    && event["payload"]["summary"]
+                        == "Fixture provider completed without tool calls."
+            })
         }));
 
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
@@ -2243,6 +2244,20 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    fn line_has_agent_event(line: &Value, predicate: impl Fn(&Value) -> bool) -> bool {
+        if line["method"] == "agent.event" {
+            return predicate(&line["params"]);
+        }
+
+        if line["method"] == "agent.eventBatch"
+            && let Some(events) = line["params"]["events"].as_array()
+        {
+            return events.iter().any(predicate);
+        }
+
+        false
     }
 
     #[test]
