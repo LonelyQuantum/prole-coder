@@ -133,6 +133,7 @@ test("chat timeline renders approval and failure events with warning or danger t
     agentEvent(2, "run.failed", {
       code: "E_INVALID_TOOL_ARGUMENTS",
       message: "invalid tool call",
+      diagnosticFile: "C:\\workspace\\.prole-coder\\runs\\run_1\\diagnostics\\invalid-tool-arguments-call_1.json",
     }),
   );
 
@@ -143,6 +144,7 @@ test("chat timeline renders approval and failure events with warning or danger t
   assert.equal(failure.kind, "terminal");
   assert.equal(failure.tone, "danger");
   assert.ok(failure.body?.includes("invalid tool call"));
+  assert.ok(failure.body?.includes("Diagnostic file:"));
 });
 
 test("chat timeline trims old items while preserving event count", () => {

@@ -305,7 +305,11 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "terminal",
         tone: "danger",
         title: "Run failed",
-        body: joinParts([label("Code", textField(payload, "code")), textField(payload, "message")]),
+        body: joinParts([
+          label("Code", textField(payload, "code")),
+          textField(payload, "message"),
+          label("Diagnostic file", textField(payload, "diagnosticFile")),
+        ]),
       };
     case "run.canceled":
       return {
