@@ -568,7 +568,7 @@ extension.ts
 
 ## 开发计划
 
-当前进度：Phase 1 Agent Core MVP 功能闭环、Phase 2 的 1M Context Capsule 核心收敛、Phase 3 的 VS Code 插件核心与共享 RPC 交互管线以及 Phase 4 的 VS Code 深度集成均已完成；Phase 5：VS Code Codex-like UX 与开发工作流仍在进行中。Phase 4 保留 14 项深度集成能力；Phase 5 已完成原生 `@prole` Chat Participant、默认右侧 Chat 入口、简化审批 UX、自动上下文压缩、UX 验收、`ProleCoder` Output Channel 错误诊断、插件内 SecretStorage 多 API key 管理器、侧边栏 API key/model 选择入口、统一 redaction 与错误恢复、只读 Git context、commit message 写入 SCM inputBox、PR markdown 生成、Sidebar 连续会话、Run 删除、过程事件默认折叠，以及结构化 provider 配置错误码与恢复动作；P5-14 持续 UX 测试与体验改进占位仍未完成。DeepSeek provider、基础工具执行、Context Builder、Run Log、Turn Loop、CLI、RPC、审批、取消、真实 DeepSeek streaming/tool-call 验收、本地 fixture smoke、进程级 CLI smoke、小型真实仓库 CLI 联网验收、合并前测试收敛、Context Capsule、manifest、token estimator、attachments、provider summary、Run Log 体积控制、tool call JSON Schema 校验、200K/500K/900K 离线大上下文验收入口和 Phase 2e 展示型 demo 扩展均已完成；VS Code RPC server 启动监管、JSON-RPC request client、RPC 全双工 reader/writer 与事件发送队列、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、命令风险动态升级、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、命令子进程树清理、VSIX alpha 打包、extension-host 端到端验收、原生 `@prole` Chat Participant、自动上下文压缩、简化审批 UX、Output Channel 错误诊断、API key/model 配置、Git 工作流和结构化 provider 配置错误恢复均已完成。完成 P5-14 后再进入 Phase 6：TUI 与生态扩展。
+当前进度：Phase 1 Agent Core MVP 功能闭环、Phase 2 的 1M Context Capsule 核心收敛、Phase 3 的 VS Code 插件核心与共享 RPC 交互管线以及 Phase 4 的 VS Code 深度集成均已完成；Phase 5：VS Code Codex-like UX 与开发工作流仍在进行中。Phase 4 保留 14 项深度集成能力；Phase 5 已完成原生 `@prole` Chat Participant、默认右侧 Chat 入口、简化审批 UX、自动上下文压缩、UX 验收、`ProleCoder` Output Channel 错误诊断、插件内 SecretStorage 多 API key 管理器、侧边栏 API key/model 选择入口、统一 redaction 与错误恢复、只读 Git context、commit message 写入 SCM inputBox、PR markdown 生成、Sidebar 连续会话、Run 删除、过程事件默认折叠，以及结构化 provider 配置错误码与恢复动作；P5-14 已补充对话专属视图、内联审批/删除确认和 Enter/Shift+Enter 输入回归，但持续 UX 测试与体验改进占位仍未完成。DeepSeek provider、基础工具执行、Context Builder、Run Log、Turn Loop、CLI、RPC、审批、取消、真实 DeepSeek streaming/tool-call 验收、本地 fixture smoke、进程级 CLI smoke、小型真实仓库 CLI 联网验收、合并前测试收敛、Context Capsule、manifest、token estimator、attachments、provider summary、Run Log 体积控制、tool call JSON Schema 校验、200K/500K/900K 离线大上下文验收入口和 Phase 2e 展示型 demo 扩展均已完成；VS Code RPC server 启动监管、JSON-RPC request client、RPC 全双工 reader/writer 与事件发送队列、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、命令风险动态升级、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、命令子进程树清理、VSIX alpha 打包、extension-host 端到端验收、原生 `@prole` Chat Participant、自动上下文压缩、简化审批 UX、Output Channel 错误诊断、API key/model 配置、Git 工作流和结构化 provider 配置错误恢复均已完成。完成 P5-14 后再进入 Phase 6：TUI 与生态扩展。
 
 阶段完成口径：README 中某个 Phase 只有在 `docs/phase-tasks.md` 对应 Phase 下的所有任务都标记为 `[x]` 后，才能在高层开发计划中表述为“全部完成”。如果某阶段核心功能已完成但仍有 P1/P2 增强或发布/文档验收项未完成，README 必须继续把该阶段表述为进行中，并列出剩余任务。
 
@@ -597,7 +597,7 @@ extension.ts
 - [x] Agent Turn Loop：串联 Context Builder、provider、reasoning、工具执行、审批、验证和 run log，并通过本地 fixture 端到端 smoke test。
 - [x] CLI `run` / `rpc` 最小闭环：支持 fixture/deepseek provider、工作区参数、JSON event、审批、验证命令、JSON-RPC error 输出、进程级 CLI fixture smoke 和小型真实仓库 CLI 联网验收。
 - [x] Agent RPC Server：实现 stdio 事件桥接、双向 request loop、真实 Turn Loop handler、实时事件输出、pending approval 队列、审批超时和取消语义。
-- [x] 审批前端基础：实现 CLI prompt、RPC approve/reject/cancel 分发、TypeScript 协议类型、TUI prompt 状态机和 VS Code modal approval adapter。
+- [x] 审批前端基础：实现 CLI prompt、RPC approve/reject/cancel 分发、TypeScript 协议类型、TUI prompt 状态机和 VS Code legacy modal approval adapter；后续默认 UX 已改为 Sidebar 内联审批。
 - [x] Phase 1 合并前第一轮测试增强：完成 `pnpm run check` 基线验证、patch 失败恢复、reasoning 边界、CancellationToken 并发和 CLI event stream 顺序测试。
 - [x] 合并前测试基础设施收敛：提取共享 `agent-core::test_helpers::TestWorkspace`，统一当前分散在 agent-core、agent-rpc、cli、demo/live 测试中的临时工作区 helper。
 - [x] 合并前 live 测试配置收敛：统一 live API key 测试 helper，测试侧按 `PROLE_CODER_DEEPSEEK_API_KEY`、`DEEPSEEK_API_KEY`、`.secrets/deepseek-api-key` 的顺序读取。
@@ -647,7 +647,7 @@ extension.ts
 - [x] VS Code RPC/commands 边界测试补齐：已覆盖 `RpcServerManager` 启动异常、stdio 缺失、无效 JSON、process error、stop、onEvent dispose、stderr preview、sendRequest 写入失败等路径，以及 openChat 启动失败、非 Error 错误、不可持久审批 approve 和审批消息 paths 拼接。
 - [x] Sidebar Chat 与 `agent.event` 渲染：已贡献 ProleCoder Activity Bar view 和 Webview Sidebar Chat，订阅 `RpcServerManager.onEvent()` 并展示 assistant delta、tool lifecycle、审批、context/provider 和 terminal event；assistant delta 会按 run/turn 合并为一条消息。
 - [x] 文本输入发送 turn，并通过 `agent.sendTurn` 驱动真实 Agent 回合：Sidebar Chat 已提供 prompt 输入和 mode 选择，Webview 通过 typed `RpcServerManager.sendTurn()` 调用真实 `agent.sendTurn`，并在 accepted 后等待同一 run 的 terminal event 收口输入状态。
-- [x] VS Code 审批 UI 接入真实 RPC pending queue：`ApprovalEventController` 订阅 `tool.approvalRequired`，复用 VS Code modal approval adapter，并通过 typed `RpcServerManager.approve()` / `reject()` 回传到 `agent.approve` / `agent.reject`。
+- [x] VS Code 审批 UI 接入真实 RPC pending queue：`ApprovalEventController` 订阅 `tool.approvalRequired`，复用 VS Code approval adapter，并通过 typed `RpcServerManager.approve()` / `reject()` 回传到 `agent.approve` / `agent.reject`；后续默认 UX 已改为 Sidebar 内联审批卡片。
 - [x] 命令风险分类器和动态风险升级：Agent Core 已在 shell 审批前识别依赖安装、网络访问、远程 git、删除和发布命令，升级 `tool.requested` / `tool.approvalRequired` 的风险，并通过 `riskReasons` 在 CLI/TUI/VS Code 审批展示升级原因。
 - [x] 更强进程树清理策略：命令类工具启动时建立可收束的进程树边界，Unix 使用独立 process group，Windows 使用新 process group、ParentProcessId descendant 枚举和 `taskkill /T /F` 兜底，取消和超时会清理 shell/search/git 等工具的子进程树。
 - [x] Native diff editor 展示 patch，并为 hunk 级审批预留交互边界：VS Code 侧缓存 `tool.requested` 的 `apply_patch` unified diff，在对应 `tool.approvalRequired` 前用 VS Code 原生 diff editor 展示虚拟补丁结果，并生成稳定 hunk approval boundary 供后续细粒度审批复用。
@@ -661,7 +661,7 @@ extension.ts
 - 关闭 stdin、writer 失败或插件停用会取消 active run，并在 run log 中收口到 terminal event。
 - 更强进程树清理策略完成并通过可执行测试或清晰的手动验收说明。已新增 descendant process 取消回归测试。
 - Sidebar Chat 能展示 `assistant.delta`、tool lifecycle 和 terminal event；Chat 输入能发送真实 `agent.sendTurn` 并收到最终结果。已完成首版输入发送和事件流收口。
-- VS Code 审批弹窗能消费 `tool.approvalRequired`，并把 approve/reject 回传到 `agent.approve` / `agent.reject`。已完成首版真实 RPC pending queue 接入。
+- VS Code 审批 UI 能消费 `tool.approvalRequired`，并把 approve/reject 回传到 `agent.approve` / `agent.reject`。已完成真实 RPC pending queue 接入，当前默认使用 Sidebar 内联审批卡片。
 - Sidebar Chat 能展示最近 run 列表，并通过 `agent.resume` 回放历史事件。已完成首版 Run List / resume 接入。
 - Sidebar Chat 能可视化 `context.built` 的 token 分段、来源纳入/省略和 manifest/cache/estimator metadata。已完成首版 Context Capsule 可视化。
 - `docs/phase-tasks.md` 的 Phase 3 条目全部标记为 `[x]` 后，README 才能把 Phase 3 表述为整阶段完成。当前 Phase 3 已满足该条件。
@@ -675,10 +675,10 @@ extension.ts
 - [x] P4-5：RPC 高频事件输出节流与批量发送策略，实时 wire 层支持 `agent.eventBatch`，Run Log 与 replay 仍保持逐事件 `seq` 事实来源。
 - [x] P4-6：`agent.cancel` 类型化 helper 与 Chat Cancel UI，已新增 `RpcServerManager.cancel()`、Cancel 按钮和运行中 composer 状态收口。
 - [x] P4-7：Problems 面板 diagnostics 通过 diagnostic attachments 进入 Context Builder，VS Code 发送 turn 时会采集当前 Problems 快照，按协议 attachment 上限裁剪并优先保留 error。
-- [x] P4-8：Terminal command approval，审批 payload 支持命令、cwd、风险等级、风险原因、上一条 shell 输出摘要和持久化语义；P5-2 后主审批 modal 不再暴露复杂持久化选项。
+- [x] P4-8：Terminal command approval，审批 payload 支持命令、cwd、风险等级、风险原因、上一条 shell 输出摘要和持久化语义；P5-2 后主审批 UI 不再暴露复杂持久化选项。
 - [x] P4-9：审批持久化存储，RPC 队列支持 session/workspace 持久批准，并继续禁止 network/destructive 风险持久化。
 - [x] P4-10：provider、model、预算、审批策略和 RPC 命令配置界面，已新增 Open Settings 命令，打开 VS Code 设置并展示 RPC server capability、默认模型、预算、审批能力、RPC command/state；配置只包含非敏感 RPC/FIM 选项，不保存 API Key。
-- [x] P4-11：真实 hunk 级 patch 审批，首版限定 `apply_patch`，Core/RPC 支持 selected hunk 决策、校验未知/重复 hunk、Run Log 记录 selected/all 范围，VS Code modal 可选择 hunks 并通过 `agent.approve.hunks` 回传；审批事件 payload 已同步协议 fixture。
+- [x] P4-11：真实 hunk 级 patch 审批，首版限定 `apply_patch`，Core/RPC 支持 selected hunk 决策、校验未知/重复 hunk、Run Log 记录 selected/all 范围，VS Code 审批 UI 可选择 hunks 并通过 `agent.approve.hunks` 回传；审批事件 payload 已同步协议 fixture。
 - [x] P4-12：FIM completion preview，已新增 `agent.previewFim` RPC、DeepSeek beta FIM adapter、fixture provider 预览和 VS Code inline completion provider，模型选择只依赖 server capability 的 `supportsFim`。
 - [x] P4-13：VSIX alpha / pre-release 打包与插件安装说明，已新增 `pnpm run vsix:alpha`，在 `target/vsix/` 生成可安装 pre-release VSIX 与 SHA-256 校验和，并在 `docs/release.md` 记录 clean 环境安装验收路径。
 - [x] P4-14：补齐 end-to-end 集成测试覆盖，已在 `pnpm run vscode:test-electron` 中接入本地 JSON-RPC fixture server，覆盖 Chat sendTurn、Cancel、Problems diagnostics、自动审批回传、Run List / resume 和隔离 VS Code profile 启动；VSIX 安装后的 clean 环境基础交互继续按 `docs/release.md` 的 P4-13 路径手动验收。
@@ -695,7 +695,7 @@ extension.ts
 ### Phase 5：VS Code Codex-like UX 与开发工作流
 
 - [x] P5-1：原生 VS Code Chat Participant `@prole`，让常规入口默认打开 VS Code Chat 侧栏体验；保留 Activity Bar Webview 作为 Run List / Context Capsule / diff 等高级面板。
-- [x] P5-2：简化审批 UX，主审批动作收敛为 Approve / Reject，`apply_patch` 多 hunk 时保留 Select Hunks 边界；持久化策略继续由后端策略控制，不在主弹窗里暴露复杂选项。
+- [x] P5-2：简化审批 UX，主审批动作收敛为 Approve / Reject，`apply_patch` 多 hunk 时保留 hunk 选择边界；持久化策略继续由后端策略控制，不在主审批 UI 里暴露复杂选项。
 - [x] P5-3：Sidebar Chat 和原生 Chat Participant 自动注入压缩后的对话历史，作为 `explicit_content` attachment 进入已有 Context Capsule 管线，让连续对话自然承接上下文；Sidebar timeline 单条消息会先限长，避免极端长流式输出造成过大的中间文本。
 - [x] P5-4：补齐 UX 收敛单元测试、extension-host E2E、VSIX smoke/alpha 打包验证和文档说明；已通过 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke` 和 `pnpm run vsix:alpha`，并补充 Chat Participant 早到 terminal event 缓冲回归测试。
 - [x] P5-5：VS Code Output Channel 错误诊断：插件创建 `ProleCoder` Output Channel，Sidebar Chat、Run List、原生 `@prole` Chat Participant 和 RPC 启动/运行 warning 的完整错误会写入 Output；activation 层使用统一 notifier 分发日志与 VS Code toast；侧边栏继续显示短状态并通过 hover title 暴露完整文本。
@@ -707,14 +707,14 @@ extension.ts
 - [x] P5-11：Phase 5 UX 工作流验收与文档收敛：补齐 P5-6 到 P5-10 的单元测试、extension-host 验收、VSIX smoke/alpha 验证、`git diff --check`、敏感信息扫描和文档一致性检查；Git workflow agent 终态事件已补幂等保护，G4 自动 commit / push / create PR 留作后续增强并需接入审批模型。
 - [x] P5-12：Sidebar 连续会话、Run 删除与折叠事件 UX：`agent.sendTurn.runId` 可复用已有 run 并自动递增 `turn_N`，Sidebar resume 后继续同一会话发送多轮 turn；Run List 支持 `agent.deleteRun` 删除 inactive run；tool/provider/request 等过程事件默认折叠，assistant 文本和最终摘要保持可见，完整事件 payload 写入 `Output > ProleCoder` 便于 debug。
 - [x] P5-13：结构化 provider 配置错误码与恢复动作：DeepSeek 缺少 API key 的 RPC `E_PROVIDER_ERROR` 返回结构化 `data.recoverableAction`，Sidebar/原生 Chat 依据恢复动作展示或触发 Configure API Key 入口，不再依赖后端英文错误消息；run failed payload 也可携带同一恢复动作。
-- [ ] P5-14：持续 UX 测试与体验改进占位：保留 Phase 5 的持续验收入口，用于根据真实 VS Code 插件试用继续收集 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩等体验问题。
+- [ ] P5-14：持续 UX 测试与体验改进占位：保留 Phase 5 的持续验收入口；已根据真实试用补齐 Sidebar 对话专属视图、内联 approval/delete 确认、过程事件强制默认折叠以及 Enter 发送 / Shift+Enter 换行，后续继续收集 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩等体验问题。
 
 验收标准：
 
 - `ProleCoder: Open Chat` 优先打开 VS Code 原生 Chat 并填入 `@prole`，用户无需手动拖动 Activity Bar view 到右侧。
 - 原生 Chat 和 Sidebar Chat 都通过真实 `agent.sendTurn` 驱动回合，并继续复用 Problems diagnostics、审批回传、Cancel、Run Log 和 Context Capsule。
 - 连续对话会自动生成可审计、受限长度的上下文压缩 attachment；不会在 UI 文案里要求用户手动重开对话来延续上下文。
-- 主审批弹窗保持简单；Sidebar composer 提供 Key/Model 直接入口，过程事件默认折叠，完整事件和错误诊断可在 `Output > ProleCoder` 查看。
+- 主审批保持简单并默认在 Sidebar 内联卡片中完成；Sidebar composer 提供 Key/Model 直接入口，过程事件默认折叠，完整事件和错误诊断可在 `Output > ProleCoder` 查看。
 - `docs/phase-tasks.md` 的 Phase 5 仍有 P5-14 未完成，README 不能把 Phase 5 表述为整阶段完成；G4 自动 commit / push / create PR 仍是后续增强。
 
 ### Phase 6：TUI 与生态扩展

@@ -41,7 +41,7 @@
 - streaming tool call 增量拼装验证：adapter 已区分 `ChatToolCallDelta` 与完整 `ChatToolCall`，`ChatToolCallAccumulator` 会按 `index` 拼接 arguments 并拒绝缺失或冲突元数据；`live_streaming_tool_call_accumulator_smoke_test` 已用真实 DeepSeek streaming 验收工具调用 delta 形态。
 - Agent RPC Server 双向 request loop：`agent-rpc` 已支持 newline-delimited JSON-RPC request 读取、初始化顺序检查、`agent.initialize` / `agent.sendTurn` / `agent.resume` 分发、response/error 写回、EOF shutdown，以及 handler 返回事件的 `agent.event` 有序输出。
 - RPC/CLI 实时事件输出：`AgentTurnLoop::run_turn_with_event_sink` 会在 Run Log 事件追加成功后立即调用 `TurnEventSink`；`StdioEventBridge` 已实现该接口，CLI `--json` 输出顺序与本地 `events.jsonl` 的 `seq` 一致，不再等 run 完成后批量回放。
-- CLI/RPC/TUI/VS Code 审批基础：Turn Loop 会写入 `tool.approvalRequired` 和 `tool.approvalResolved`；CLI 二进制支持 stdin/stderr 交互式 y/n 审批；RPC request loop 已分发 `agent.approve` / `agent.reject`；TypeScript 协议类型已补齐；TUI prompt 状态机和 VS Code modal approval adapter 已有测试覆盖。
+- CLI/RPC/TUI/VS Code 审批基础：Turn Loop 会写入 `tool.approvalRequired` 和 `tool.approvalResolved`；CLI 二进制支持 stdin/stderr 交互式 y/n 审批；RPC request loop 已分发 `agent.approve` / `agent.reject`；TypeScript 协议类型已补齐；TUI prompt 状态机、VS Code legacy modal adapter 和默认 Sidebar 内联审批入口已有测试覆盖。
 - 真实 RPC Turn Loop handler：`AgentTurnLoopRpcHandler` 已通过 provider factory 复用 Core Turn Loop，`agent.sendTurn` 会创建 run log、驱动 provider 和工具执行，并把结果事件交给 request loop；CLI `rpc` 子命令已提供 stdio 入口。
 - RPC 真实审批等待队列：`AgentTurnLoopRpcHandler` 会在 `tool.approvalRequired` 处登记 pending approval，后台 Turn Loop worker 等待 `agent.approve` / `agent.reject`，批准后继续执行工具，拒绝后记录 `tool.approvalResolved` 和 `run.failed`。
 - RPC 审批超时/取消：pending approval 已记录过期时间；`agent.cancel` 和 request loop EOF shutdown 会取消等待审批的 active run，超时会自动解析为 expired，这些路径都会记录 `tool.approvalResolved` 和 `run.canceled`。
@@ -105,7 +105,7 @@ P0 不追求：
 
 目标：让 VS Code 插件成为 Agent Core 的薄前端，而不是第二套 Agent。
 
-Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 深度集成任务；Phase 5 仍在进行中。P5-1 到 P5-13 已完成原生 Chat 入口、简化审批、自动上下文压缩、UX 验收、Output Channel 错误诊断、插件内多 API key/model 配置、统一 redaction/错误恢复、只读 Git context、commit message 写入 SCM inputBox、PR markdown 生成、Sidebar 连续会话、Run 删除和折叠事件 UX、结构化 provider 配置错误码与恢复动作；P5-14 持续 UX 测试与体验改进占位仍未完成。Phase 5 全部完成后再进入 Phase 6，与生态扩展一起推进。Marketplace 发布不阻塞 Phase 4/5，当前已具备可安装 VSIX alpha / pre-release 产物和安装说明。Phase 2e 展示型 demo 已经给 VS Code Context Viz / Approval / Run Log UI 提供可观察样本。
+Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 深度集成任务；Phase 5 仍在进行中。P5-1 到 P5-13 已完成原生 Chat 入口、简化审批、自动上下文压缩、UX 验收、Output Channel 错误诊断、插件内多 API key/model 配置、统一 redaction/错误恢复、只读 Git context、commit message 写入 SCM inputBox、PR markdown 生成、Sidebar 连续会话、Run 删除和折叠事件 UX、结构化 provider 配置错误码与恢复动作；P5-14 已补充对话专属视图、内联审批/删除确认和输入快捷键回归，但持续 UX 测试与体验改进占位仍未完成。Phase 5 全部完成后再进入 Phase 6，与生态扩展一起推进。Marketplace 发布不阻塞 Phase 4/5，当前已具备可安装 VSIX alpha / pre-release 产物和安装说明。Phase 2e 展示型 demo 已经给 VS Code Context Viz / Approval / Run Log UI 提供可观察样本。
 
 优先事项：
 
@@ -116,12 +116,12 @@ Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 
 - 事件 payload schema、协议 fixture 与 RPC 高频事件批量发送已完成，batch 不改变 Run Log `seq` 和 replay 语义。
 - `agent.cancel` 类型化 helper 与 Chat Cancel UI 已接入，并与 Terminal approval 做轻量 composer UX review。
 - Problems 面板诊断已通过 diagnostic attachments 进入 Context Builder，插件不新增独立 diagnostics 状态同步 RPC。
-- Terminal command approval 已支持命令、cwd、风险等级、风险原因、输出摘要字段和持久化语义；P5-2 后 VS Code 主审批弹窗保持 Approve / Reject。
+- Terminal command approval 已支持命令、cwd、风险等级、风险原因、输出摘要字段和持久化语义；P5-2 后 VS Code 主审批动作保持 Approve / Reject，P5-14 默认改为 Sidebar 内联审批卡片。
 - 审批持久化存储已支持 session/workspace，继续禁止 network/destructive 风险持久化。
 - 配置界面依赖 Provider capability model；provider、model、预算、审批策略和 RPC 命令配置都不得保存 API Key。
 - P5-12 已完成：Sidebar Chat 复用 `agent.sendTurn.runId` 继续同一 run 多轮对话，支持 `agent.deleteRun` 删除 inactive run；tool/provider/request 等过程事件默认折叠，完整 payload 写入 `Output > ProleCoder`。
 - P5-13 已完成：provider 配置失败从前端字符串匹配升级为 RPC 结构化错误数据，缺少 DeepSeek API key 时返回 `E_PROVIDER_ERROR` 和 `data.recoverableAction`，供 VS Code/TUI 统一展示配置动作。
-- P5-14：持续 UX 测试与体验改进占位，用于真实插件试用后的 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩问题回归。
+- P5-14：持续 UX 测试与体验改进占位，用于真实插件试用后的 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩问题回归；已补齐 Sidebar 对话专属视图、webview 内联 approval/delete 确认、过程事件默认折叠和 Enter / Shift+Enter 输入行为。
 - 真实 hunk 级 patch 审批首版限定 `apply_patch`，再扩展 Core/RPC 审批决策和 Run Log 记录。
 - FIM completion preview 依赖 Provider capability model，优先评估 VS Code 原生 inline completion 接入。
 - VSIX alpha / pre-release 交付已完成，`pnpm run vsix:alpha` 会生成可安装 pre-release VSIX 和 SHA-256 校验和；end-to-end 集成测试已通过本地 JSON-RPC fixture server 覆盖 Chat sendTurn、Cancel、Problems diagnostics、自动审批、Run List / resume。

@@ -108,12 +108,12 @@ pending
 - TypeScript：`packages/protocol/src/index.ts`、`vscode/extension/src/approvalFlow.ts`、`vscode/extension/src/commands.ts`。
 - JSON-RPC 事件：`docs/json-rpc-protocol.md` 中的 `tool.requested`、`tool.approvalRequired`、`tool.approvalResolved`、`agent.approve`、`agent.reject`、`agent.cancel`。
 
-当前 Rust 和 TypeScript 已定义风险等级、审批要求、持久化枚举和状态机转换规则。Agent Turn Loop 已能在工具执行前写入 `tool.approvalRequired`，根据审批策略等待批准、拒绝、取消、过期或持久批准复用，并写入 `tool.approvalResolved`。CLI 二进制已有 stdin/stderr prompt；`agent-rpc` request loop 已能分发 `agent.approve` / `agent.reject` / `agent.cancel`；`AgentTurnLoopRpcHandler` 已实现单 active run 的 pending approval 队列和 session/workspace 持久批准存储。Agent Core 已在 shell 工具审批前执行命令风险分类：依赖安装、网络访问、远程 git 和发布命令会升级到 `network`，删除、强制 push、git reset/clean 等会升级到 `destructive`，并在 `tool.requested` / `tool.approvalRequired` 中写入 `riskReasons`、`command`、`cwd` 和上一条 shell 输出摘要。VS Code 插件已有 modal approval adapter 并接入真实 RPC pending queue；`apply_patch` 审批会先打开 VS Code 原生 diff 预览，可选择 hunk 后通过 `agent.approve.hunks` 回传，RPC/Core 会校验并只应用已批准 hunks；TUI 已有可测试的 prompt 状态机。
+当前 Rust 和 TypeScript 已定义风险等级、审批要求、持久化枚举和状态机转换规则。Agent Turn Loop 已能在工具执行前写入 `tool.approvalRequired`，根据审批策略等待批准、拒绝、取消、过期或持久批准复用，并写入 `tool.approvalResolved`。CLI 二进制已有 stdin/stderr prompt；`agent-rpc` request loop 已能分发 `agent.approve` / `agent.reject` / `agent.cancel`；`AgentTurnLoopRpcHandler` 已实现单 active run 的 pending approval 队列和 session/workspace 持久批准存储。Agent Core 已在 shell 工具审批前执行命令风险分类：依赖安装、网络访问、远程 git 和发布命令会升级到 `network`，删除、强制 push、git reset/clean 等会升级到 `destructive`，并在 `tool.requested` / `tool.approvalRequired` 中写入 `riskReasons`、`command`、`cwd` 和上一条 shell 输出摘要。VS Code 插件已有 legacy modal approval adapter 和默认 Sidebar 内联 approval card，并接入真实 RPC pending queue；`apply_patch` 审批会先打开 VS Code 原生 diff 预览，可选择 hunk 后通过 `agent.approve.hunks` 回传，RPC/Core 会校验并只应用已批准 hunks；TUI 已有可测试的 prompt 状态机。
 
 ## 后续增强
 
 - 扩展 RPC 审批队列到多 active run、跨进程恢复和前端断连后的自动取消；当前实现只支持单 active run 的内存等待队列。
 - 扩展 patch 的动态风险升级；`shell` 的动态风险升级已覆盖下载依赖、访问网络、删除文件、发布和远程 git 操作，`apply_patch` 已支持 hunk 级批准。
-- 扩展持久批准的可审计 metadata、清理入口和高级 UI 管理；`network` 和 `destructive` 仍不允许持久化，VS Code 主审批弹窗不重新暴露 session/workspace 选项。
+- 扩展持久批准的可审计 metadata、清理入口和高级 UI 管理；`network` 和 `destructive` 仍不允许持久化，VS Code 主审批 UI 不重新暴露 session/workspace 选项。
 - 继续增强 TUI 的真实 RPC pending 队列接入；VS Code 已能消费 `tool.approvalRequired` 并发送 `agent.approve` / `agent.reject`。
-- 增加跨前端一致性测试，确保同一工具请求在 CLI、TUI 和 VS Code 中展示的风险、路径、命令、风险原因和持久化能力语义一致；VS Code 主审批弹窗保持简化的 Approve / Reject。
+- 增加跨前端一致性测试，确保同一工具请求在 CLI、TUI 和 VS Code 中展示的风险、路径、命令、风险原因和持久化能力语义一致；VS Code 主审批 UI 保持简化的 Approve / Reject。
