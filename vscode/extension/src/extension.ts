@@ -145,11 +145,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerTestCommands(context, chatView);
   if (rpcServer !== undefined && workspaceRoot !== undefined) {
     const patchDiffPreviewController = createPatchDiffPreviewController(context, rpcServer, workspaceRoot);
+    const approvalRequester = testApprovalRequester(context) ?? inlineChatApprovalRequester(chatView);
     const approvalController = new ApprovalEventController(
       rpcServer,
       vscode.window,
       notifier,
-      testApprovalRequester(context),
+      approvalRequester,
       patchDiffPreviewController,
     );
     context.subscriptions.push(patchDiffPreviewController, approvalController);
@@ -240,4 +241,8 @@ function testApprovalRequester(context: vscode.ExtensionContext): ApprovalReques
     approvalId: request.approvalId,
     persist: "never",
   });
+}
+
+function inlineChatApprovalRequester(chatView: ProleChatViewProvider): ApprovalRequester {
+  return (_window, request) => chatView.requestApproval(request);
 }

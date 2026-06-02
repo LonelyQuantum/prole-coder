@@ -20,8 +20,14 @@ import {
   automaticContextAttachmentFromTimeline,
   mergeTurnAttachments,
 } from "./automaticContext";
+import {
+  approvalDecisionFromWebviewMessage,
+  chatApprovalSnapshotFromRequest,
+  type ChatApprovalSnapshot,
+} from "./chatApprovals";
 import { CHAT_RUN_MODES, DEFAULT_CHAT_MODE, parseChatTurnSubmission, sendTurnParams } from "./chatInput";
 import { ChatEventTimeline, type ChatTimelineSnapshot } from "./chatEvents";
+import type { ApprovalPromptDecision, ApprovalPromptRequest } from "./commands";
 import {
   contextVizFromEvent,
   emptyContextViz,
@@ -53,6 +59,7 @@ import {
   resumeRunIdFromMessage,
   type RunListSnapshot,
 } from "./runHistory";
+import { safeScriptJson } from "./webviewSerialization";
 
 export const CHAT_VIEW_ID = "prole-coder.chat";
 
@@ -96,11 +103,17 @@ interface ContextWebviewMessage {
   readonly context: ContextVizSnapshot;
 }
 
+interface ApprovalWebviewMessage {
+  readonly type: "approval";
+  readonly approval?: ChatApprovalSnapshot;
+}
+
 type ExtensionToWebviewMessage =
   | SnapshotWebviewMessage
   | SubmissionWebviewMessage
   | RunsWebviewMessage
-  | ContextWebviewMessage;
+  | ContextWebviewMessage
+  | ApprovalWebviewMessage;
 
 type ChatSubmissionStatus = "idle" | "sending" | "running" | "completed" | "failed" | "canceled";
 type TerminalSubmissionStatus = Extract<ChatSubmissionStatus, "completed" | "failed" | "canceled">;
@@ -133,6 +146,12 @@ export interface ChatViewTestState {
   readonly submission: ChatSubmissionSnapshot;
   readonly runs: RunListSnapshot;
   readonly context: ContextVizSnapshot;
+  readonly approval?: ChatApprovalSnapshot;
+}
+
+interface PendingApprovalState {
+  readonly request: ApprovalPromptRequest;
+  resolve(decision: ApprovalPromptDecision): void;
 }
 
 export class ProleChatViewProvider implements vscode.WebviewViewProvider, DisposableLike {
@@ -143,6 +162,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   private runList: RunListSnapshot = idleRunList();
   private contextViz: ContextVizSnapshot = emptyContextViz();
   private activeConversationRunId: string | undefined;
+  private pendingApproval: PendingApprovalState | undefined;
   private rpcSubscription: DisposableLike | undefined;
   private viewMessageSubscription: DisposableLike | undefined;
   private view: vscode.WebviewView | undefined;
@@ -163,6 +183,9 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
         this.contextViz = contextViz;
       }
       const terminal = this.updateSubmissionForEvent(event);
+      if (terminal) {
+        this.rejectPendingApproval("run ended before approval was resolved");
+      }
       this.postSnapshot();
       if (contextViz !== undefined) {
         this.postContext();
@@ -190,11 +213,13 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       this.submission,
       this.runList,
       this.contextViz,
+      this.pendingApprovalSnapshot(),
     );
     this.postSnapshot();
     this.postSubmission();
     this.postRuns();
     this.postContext();
+    this.postApproval();
     void this.refreshRuns();
   }
 
@@ -207,11 +232,13 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   }
 
   testState(): ChatViewTestState {
+    const approval = this.pendingApprovalSnapshot();
     return {
       timeline: this.timeline.snapshot(),
       submission: this.submission,
       runs: this.runList,
       context: this.contextViz,
+      ...(approval === undefined ? {} : { approval }),
     };
   }
 
@@ -220,15 +247,43 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   }
 
   dispose(): void {
+    this.rejectPendingApproval("approval view disposed");
     this.rpcSubscription?.dispose();
     this.viewMessageSubscription?.dispose();
     this.rpcSubscription = undefined;
     this.viewMessageSubscription = undefined;
   }
 
+  requestApproval(request: ApprovalPromptRequest): Promise<ApprovalPromptDecision> {
+    this.rejectPendingApproval("superseded by a newer approval request");
+    void this.openChatView();
+
+    return new Promise((resolve) => {
+      this.pendingApproval = {
+        request,
+        resolve,
+      };
+      this.postApproval();
+    });
+  }
+
   private async handleWebviewMessage(message: unknown): Promise<void> {
     if (isRefreshRunsMessage(message)) {
       await this.refreshRuns();
+      return;
+    }
+
+    if (isShowRunsMessage(message)) {
+      this.showRuns();
+      return;
+    }
+
+    const approvalDecision =
+      this.pendingApproval === undefined
+        ? undefined
+        : approvalDecisionFromWebviewMessage(message, this.pendingApproval.request);
+    if (approvalDecision !== undefined) {
+      this.resolvePendingApproval(approvalDecision);
       return;
     }
 
@@ -380,6 +435,15 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     void this.view?.webview.postMessage(message);
   }
 
+  private postApproval(): void {
+    const approval = this.pendingApprovalSnapshot();
+    const message: ExtensionToWebviewMessage = {
+      type: "approval",
+      ...(approval === undefined ? {} : { approval }),
+    };
+    void this.view?.webview.postMessage(message);
+  }
+
   private setSubmission(submission: ChatSubmissionSnapshot): void {
     this.submission = submission;
     this.postSubmission();
@@ -393,6 +457,12 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   private setContextViz(contextViz: ContextVizSnapshot): void {
     this.contextViz = contextViz;
     this.postContext();
+  }
+
+  private pendingApprovalSnapshot(): ChatApprovalSnapshot | undefined {
+    return this.pendingApproval === undefined
+      ? undefined
+      : chatApprovalSnapshotFromRequest(this.pendingApproval.request);
   }
 
   private async refreshRuns(message = "Loading runs..."): Promise<void> {
@@ -461,15 +531,6 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       return;
     }
 
-    const confirmation = await vscode.window.showWarningMessage(
-      `Delete run ${runId}?`,
-      { modal: true },
-      "Delete",
-    );
-    if (confirmation !== "Delete") {
-      return;
-    }
-
     this.setRunList(loadingRunList(this.runList, "Deleting run..."));
     try {
       const result = await this.rpcClient.deleteRun({ runId });
@@ -489,6 +550,23 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       this.logger?.error(redacted);
       this.setRunList(failedRunList(redacted, this.runList));
     }
+  }
+
+  private showRuns(): void {
+    if (this.submission.busy) {
+      return;
+    }
+
+    this.activeConversationRunId = undefined;
+    this.timeline.clear();
+    this.setSubmission(idleSubmission());
+    this.setContextViz(emptyContextViz());
+    this.postSnapshot();
+    this.setRunList({
+      status: this.runList.status,
+      runs: this.runList.runs,
+      ...(this.runList.message === undefined ? {} : { message: this.runList.message }),
+    });
   }
 
   private async cancelTurn(runId: string): Promise<void> {
@@ -580,6 +658,35 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     }
   }
 
+  private resolvePendingApproval(decision: ApprovalPromptDecision): void {
+    if (
+      this.pendingApproval === undefined ||
+      this.pendingApproval.request.approvalId !== decision.approvalId
+    ) {
+      return;
+    }
+
+    const pending = this.pendingApproval;
+    this.pendingApproval = undefined;
+    this.postApproval();
+    pending.resolve(decision);
+  }
+
+  private rejectPendingApproval(reason: string): void {
+    if (this.pendingApproval === undefined) {
+      return;
+    }
+
+    const pending = this.pendingApproval;
+    this.pendingApproval = undefined;
+    this.postApproval();
+    pending.resolve({
+      kind: "reject",
+      approvalId: pending.request.approvalId,
+      reason,
+    });
+  }
+
   private redact(message: string): string {
     return this.redactor?.redact(message) ?? message;
   }
@@ -599,12 +706,14 @@ function renderChatViewHtml(
   submission: ChatSubmissionSnapshot,
   runList: RunListSnapshot,
   contextViz: ContextVizSnapshot,
+  approval: ChatApprovalSnapshot | undefined,
 ): string {
   const nonce = nonceValue();
   const initialSnapshot = safeScriptJson(snapshot);
   const initialSubmission = safeScriptJson(submission);
   const initialRuns = safeScriptJson(runList);
   const initialContext = safeScriptJson(contextViz);
+  const initialApproval = safeScriptJson(approval);
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -628,6 +737,53 @@ function renderChatViewHtml(
       display: flex;
       min-height: 100vh;
       flex-direction: column;
+    }
+
+    .shell.conversation-active .status,
+    .shell.conversation-active .runs,
+    .shell.conversation-active .context-viz {
+      display: none;
+    }
+
+    .conversation-bar {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
+      background: var(--vscode-sideBarSectionHeader-background);
+    }
+
+    .shell.conversation-active .conversation-bar {
+      display: flex;
+    }
+
+    .conversation-back {
+      width: 26px;
+      height: 26px;
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+      border: 1px solid transparent;
+      border-radius: 3px;
+      cursor: pointer;
+      font: var(--vscode-font-size) var(--vscode-font-family);
+    }
+
+    .conversation-back:hover:enabled {
+      background: var(--vscode-button-secondaryHoverBackground);
+    }
+
+    .conversation-back:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
+    .conversation-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
     }
 
     .status {
@@ -749,6 +905,50 @@ function renderChatViewHtml(
 
     .run-delete:disabled {
       opacity: 0.55;
+    }
+
+    .run-delete-confirm {
+      grid-column: 1 / -1;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 7px;
+      color: var(--vscode-descriptionForeground);
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-editorWidget-border);
+      font-size: 12px;
+    }
+
+    .run-delete-confirm span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .run-delete-confirm button {
+      min-width: 52px;
+      height: 24px;
+      border: 1px solid transparent;
+      border-radius: 3px;
+      cursor: pointer;
+      font: var(--vscode-font-size) var(--vscode-font-family);
+    }
+
+    .run-delete-confirm .confirm-delete {
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+    }
+
+    .run-delete-confirm .confirm-cancel {
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+    }
+
+    .run-delete-confirm .confirm-delete:hover,
+    .run-delete-confirm .confirm-cancel:hover {
+      filter: brightness(1.08);
     }
 
     .run-entry:hover:enabled,
@@ -1037,6 +1237,117 @@ function renderChatViewHtml(
       overflow-wrap: anywhere;
     }
 
+    details.item:not([open]) > .body {
+      display: none;
+    }
+
+    .approval-host {
+      display: none;
+      padding: 8px 10px 0;
+      border-top: 1px solid var(--vscode-sideBarSectionHeader-border);
+      background: var(--vscode-sideBar-background);
+    }
+
+    .approval-host.active {
+      display: grid;
+    }
+
+    .approval-card {
+      display: grid;
+      gap: 8px;
+      padding: 8px;
+      background: var(--vscode-editorWidget-background);
+      border: 1px solid var(--vscode-editorWidget-border);
+      border-left: 3px solid var(--vscode-editorWarning-foreground);
+    }
+
+    .approval-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .approval-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+
+    .approval-risk {
+      flex: 0 0 auto;
+      color: var(--vscode-editorWarning-foreground);
+      font-size: 11px;
+    }
+
+    .approval-detail,
+    .approval-meta,
+    .approval-output {
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .approval-hunks {
+      display: grid;
+      gap: 4px;
+      max-height: 150px;
+      overflow: auto;
+    }
+
+    .approval-hunk {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: start;
+      gap: 6px;
+      color: var(--vscode-foreground);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .approval-hunk span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .approval-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+    }
+
+    .approval-action {
+      min-width: 64px;
+      height: 26px;
+      border: 1px solid transparent;
+      border-radius: 3px;
+      cursor: pointer;
+      font: var(--vscode-font-size) var(--vscode-font-family);
+    }
+
+    .approval-action.approve {
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+    }
+
+    .approval-action.reject {
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+    }
+
+    .approval-action:hover:enabled {
+      filter: brightness(1.08);
+    }
+
+    .approval-action:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
     .composer {
       display: grid;
       gap: 8px;
@@ -1064,9 +1375,13 @@ function renderChatViewHtml(
     .send:focus,
     .cancel:focus,
     .provider-action:focus,
+    .conversation-back:focus,
     .refresh-runs:focus,
     .run-entry:focus,
     .run-delete:focus,
+    .run-delete-confirm button:focus,
+    .approval-action:focus,
+    .approval-hunk input:focus,
     .context-tab:focus {
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: 1px;
@@ -1189,11 +1504,15 @@ function renderChatViewHtml(
 </head>
 <body>
   <main class="shell">
+    <section id="conversation-bar" class="conversation-bar" aria-label="Conversation">
+      <button id="show-runs" class="conversation-back" type="button" title="Back to runs" tabindex="-1">&lt;</button>
+      <div id="conversation-title" class="conversation-title">Conversation</div>
+    </section>
     <section class="status" aria-live="polite">
       <div id="status-title" class="status-title">ProleCoder</div>
       <div id="status-subtitle" class="status-subtitle">No run events yet.</div>
     </section>
-    <section class="runs" aria-label="Runs">
+    <section id="runs-section" class="runs" aria-label="Runs">
       <div class="runs-header">
         <div class="runs-title">Runs</div>
         <button id="refresh-runs" class="refresh-runs" type="button">Refresh</button>
@@ -1209,6 +1528,7 @@ function renderChatViewHtml(
       <div id="context-body" class="context-body"></div>
     </section>
     <section id="events" class="events" aria-label="Run events"></section>
+    <section id="approval" class="approval-host" aria-live="polite"></section>
     <form id="composer" class="composer">
       <textarea id="prompt" class="prompt" rows="3" placeholder="Ask ProleCoder" aria-label="Chat message"></textarea>
       <div class="composer-row">
@@ -1226,9 +1546,13 @@ function renderChatViewHtml(
     const initialSubmission = ${initialSubmission};
     const initialRuns = ${initialRuns};
     const initialContext = ${initialContext};
+    const initialApproval = ${initialApproval};
     const runModes = ${safeScriptJson(CHAT_RUN_MODES)};
     const defaultMode = ${safeScriptJson(DEFAULT_CHAT_MODE)};
     const vscodeApi = acquireVsCodeApi();
+    const shellRoot = document.querySelector(".shell");
+    const showRunsButton = document.getElementById("show-runs");
+    const conversationTitleRoot = document.getElementById("conversation-title");
     const eventsRoot = document.getElementById("events");
     const runListRoot = document.getElementById("run-list");
     const runMessageRoot = document.getElementById("run-message");
@@ -1245,7 +1569,14 @@ function renderChatViewHtml(
     const sendButton = document.getElementById("send");
     const cancelButton = document.getElementById("cancel");
     const submissionRoot = document.getElementById("submission");
+    const approvalRoot = document.getElementById("approval");
+    let currentSnapshot = initialSnapshot;
+    let currentSubmission = initialSubmission;
+    let currentRuns = initialRuns;
     let currentContext = initialContext;
+    let currentApproval = initialApproval;
+    let pendingRunDeleteId = "";
+    const resolvedApprovalIds = new Set();
     let contextSourceTab = "included";
 
     for (const mode of runModes) {
@@ -1270,6 +1601,13 @@ function renderChatViewHtml(
       if (message && message.type === "context") {
         renderContext(message.context);
       }
+      if (message && message.type === "approval") {
+        renderApproval(message.approval);
+      }
+    });
+
+    showRunsButton.addEventListener("click", () => {
+      vscodeApi.postMessage({ type: "showRuns" });
     });
 
     refreshRunsButton.addEventListener("click", () => {
@@ -1307,6 +1645,12 @@ function renderChatViewHtml(
       setComposerBusy(true, false);
       submissionRoot.className = "submission sending";
       submissionRoot.textContent = "Sending turn...";
+      currentSubmission = {
+        busy: true,
+        status: "sending",
+        message: "Sending turn...",
+      };
+      syncConversationChrome();
       vscodeApi.postMessage({
         type: "submitTurn",
         message,
@@ -1315,7 +1659,7 @@ function renderChatViewHtml(
     });
 
     promptInput.addEventListener("keydown", (event) => {
-      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      if (event.key === "Enter" && event.shiftKey !== true && event.isComposing !== true) {
         event.preventDefault();
         composer.requestSubmit();
       }
@@ -1325,14 +1669,17 @@ function renderChatViewHtml(
     renderSubmission(initialSubmission);
     renderRuns(initialRuns);
     renderContext(initialContext);
+    renderApproval(initialApproval);
 
     function render(snapshot) {
-      const items = Array.isArray(snapshot.items) ? snapshot.items : [];
-      statusTitle.textContent = snapshot.latestStatus || "ProleCoder";
-      statusSubtitle.textContent = snapshot.latestRunId
-        ? snapshot.latestRunId + " - " + snapshot.eventCount + " events"
+      currentSnapshot = snapshot && typeof snapshot === "object" ? snapshot : initialSnapshot;
+      const items = Array.isArray(currentSnapshot.items) ? currentSnapshot.items : [];
+      statusTitle.textContent = currentSnapshot.latestStatus || "ProleCoder";
+      statusSubtitle.textContent = currentSnapshot.latestRunId
+        ? currentSnapshot.latestRunId + " - " + currentSnapshot.eventCount + " events"
         : "No run events yet.";
       eventsRoot.replaceChildren();
+      syncConversationChrome();
 
       if (items.length === 0) {
         const empty = document.createElement("div");
@@ -1349,6 +1696,7 @@ function renderChatViewHtml(
 
     function renderRuns(snapshot) {
       const state = snapshot && typeof snapshot === "object" ? snapshot : initialRuns;
+      currentRuns = state;
       const runs = Array.isArray(state.runs) ? state.runs : [];
       const status = typeof state.status === "string" ? state.status : "idle";
       const loading = status === "loading";
@@ -1358,6 +1706,10 @@ function renderChatViewHtml(
       runMessageRoot.textContent = runMessage;
       runMessageRoot.title = runMessage;
       runListRoot.replaceChildren();
+      if (pendingRunDeleteId.length > 0 && !runs.some((run) => run.runId === pendingRunDeleteId)) {
+        pendingRunDeleteId = "";
+      }
+      syncConversationChrome();
 
       if (runs.length === 0) {
         const empty = document.createElement("div");
@@ -1377,13 +1729,15 @@ function renderChatViewHtml(
       row.className = "run-entry-row";
       const button = document.createElement("button");
       const status = typeof run.status === "string" ? run.status : "running";
+      const runId = typeof run.runId === "string" ? run.runId : "";
+      const confirmingDelete = runId.length > 0 && pendingRunDeleteId === runId;
       button.type = "button";
       button.className = "run-entry " + status + (run.runId === selectedRunId ? " selected" : "");
-      button.disabled = disabled;
-      button.title = typeof run.runId === "string" ? run.runId : "";
+      button.disabled = disabled || confirmingDelete;
+      button.title = runId;
       button.addEventListener("click", () => {
-        if (typeof run.runId === "string" && run.runId.length > 0) {
-          vscodeApi.postMessage({ type: "resumeRun", runId: run.runId });
+        if (runId.length > 0) {
+          vscodeApi.postMessage({ type: "resumeRun", runId });
         }
       });
 
@@ -1405,17 +1759,67 @@ function renderChatViewHtml(
       deleteButton.disabled = disabled;
       deleteButton.title = "Delete run";
       deleteButton.setAttribute("aria-label", "Delete run");
-      deleteButton.textContent = "x";
+      deleteButton.textContent = confirmingDelete ? "-" : "x";
       deleteButton.addEventListener("click", (event) => {
         event.stopPropagation();
-        if (typeof run.runId === "string" && run.runId.length > 0) {
-          vscodeApi.postMessage({ type: "deleteRun", runId: run.runId });
+        if (runId.length === 0) {
+          return;
         }
+        pendingRunDeleteId = confirmingDelete ? "" : runId;
+        renderRuns(currentRuns);
       });
 
       button.append(title, meta);
       row.append(button, deleteButton);
+      if (confirmingDelete) {
+        row.append(renderRunDeleteConfirm(runId));
+      }
       return row;
+    }
+
+    function renderRunDeleteConfirm(runId) {
+      const confirmRoot = document.createElement("div");
+      confirmRoot.className = "run-delete-confirm";
+      const label = document.createElement("span");
+      label.textContent = "Delete this run?";
+
+      const confirmButton = document.createElement("button");
+      confirmButton.type = "button";
+      confirmButton.className = "confirm-delete";
+      confirmButton.textContent = "Delete";
+      confirmButton.addEventListener("click", () => {
+        pendingRunDeleteId = "";
+        optimisticallyDeleteRun(runId);
+        vscodeApi.postMessage({ type: "deleteRun", runId });
+      });
+
+      const cancelButton = document.createElement("button");
+      cancelButton.type = "button";
+      cancelButton.className = "confirm-cancel";
+      cancelButton.textContent = "Cancel";
+      cancelButton.addEventListener("click", () => {
+        pendingRunDeleteId = "";
+        renderRuns(currentRuns);
+      });
+
+      confirmRoot.append(label, confirmButton, cancelButton);
+      return confirmRoot;
+    }
+
+    function optimisticallyDeleteRun(runId) {
+      const runs = Array.isArray(currentRuns.runs)
+        ? currentRuns.runs.filter((run) => run.runId !== runId)
+        : [];
+      const selectedRunId =
+        currentRuns && typeof currentRuns.selectedRunId === "string" && currentRuns.selectedRunId !== runId
+          ? currentRuns.selectedRunId
+          : undefined;
+      renderRuns({
+        status: "loading",
+        runs,
+        ...(selectedRunId === undefined ? {} : { selectedRunId }),
+        message: "Deleting run...",
+      });
     }
 
     function runTitle(run) {
@@ -1661,8 +2065,180 @@ function renderChatViewHtml(
       return value.length > 18 ? value.slice(0, 18) + "..." : value;
     }
 
+    function renderApproval(approval) {
+      const nextApproval = approval && typeof approval === "object" ? approval : undefined;
+      currentApproval =
+        nextApproval !== undefined && resolvedApprovalIds.has(nextApproval.approvalId)
+          ? undefined
+          : nextApproval;
+      approvalRoot.replaceChildren();
+      if (currentApproval === undefined) {
+        approvalRoot.className = "approval-host";
+        return;
+      }
+
+      approvalRoot.className = "approval-host active";
+      approvalRoot.append(renderApprovalCard(currentApproval));
+    }
+
+    function renderApprovalCard(approval) {
+      const card = document.createElement("div");
+      card.className = "approval-card";
+
+      const heading = document.createElement("div");
+      heading.className = "approval-heading";
+      const title = document.createElement("div");
+      title.className = "approval-title";
+      title.textContent = typeof approval.title === "string" ? approval.title : "Approval required";
+      const risk = document.createElement("div");
+      risk.className = "approval-risk";
+      risk.textContent = typeof approval.risk === "string" ? approval.risk : "risk";
+      heading.append(title, risk);
+      card.append(heading);
+
+      const detail = document.createElement("div");
+      detail.className = "approval-detail";
+      detail.textContent = approvalDetailText(approval);
+      card.append(detail);
+
+      const meta = approvalMetaText(approval);
+      if (meta.length > 0) {
+        const metaRoot = document.createElement("div");
+        metaRoot.className = "approval-meta";
+        metaRoot.textContent = meta;
+        card.append(metaRoot);
+      }
+
+      if (typeof approval.outputSummary === "string" && approval.outputSummary.length > 0) {
+        const output = document.createElement("div");
+        output.className = "approval-output";
+        output.textContent = "Output: " + approval.outputSummary;
+        card.append(output);
+      }
+
+      const hunkInputs = [];
+      const hunks = Array.isArray(approval.hunks) ? approval.hunks : [];
+      if (hunks.length > 0) {
+        const hunkRoot = document.createElement("div");
+        hunkRoot.className = "approval-hunks";
+        for (const hunk of hunks) {
+          const label = document.createElement("label");
+          label.className = "approval-hunk";
+          const input = document.createElement("input");
+          input.type = "checkbox";
+          input.checked = true;
+          input.dataset.hunkId = hunk.id;
+          const text = document.createElement("span");
+          text.textContent = hunkLabel(hunk);
+          label.append(input, text);
+          hunkRoot.append(label);
+          hunkInputs.push(input);
+        }
+        card.append(hunkRoot);
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "approval-actions";
+      const rejectButton = document.createElement("button");
+      rejectButton.type = "button";
+      rejectButton.className = "approval-action reject";
+      rejectButton.textContent = "Reject";
+      rejectButton.addEventListener("click", () => {
+        markApprovalResolved(approval.approvalId);
+        vscodeApi.postMessage({
+          type: "approvalDecision",
+          approvalId: approval.approvalId,
+          decision: "reject",
+        });
+        renderApproval(undefined);
+      });
+
+      const approveButton = document.createElement("button");
+      approveButton.type = "button";
+      approveButton.className = "approval-action approve";
+      approveButton.textContent = "Approve";
+      approveButton.addEventListener("click", () => {
+        markApprovalResolved(approval.approvalId);
+        const message = {
+          type: "approvalDecision",
+          approvalId: approval.approvalId,
+          decision: "approve",
+        };
+        if (hunkInputs.length > 0) {
+          message.approvedHunks = selectedHunkIds(hunkInputs);
+        }
+        vscodeApi.postMessage(message);
+        renderApproval(undefined);
+      });
+
+      const updateApproveState = () => {
+        approveButton.disabled = hunkInputs.length > 0 && selectedHunkIds(hunkInputs).length === 0;
+      };
+      for (const input of hunkInputs) {
+        input.addEventListener("change", updateApproveState);
+      }
+      updateApproveState();
+
+      actions.append(rejectButton, approveButton);
+      card.append(actions);
+      return card;
+    }
+
+    function markApprovalResolved(approvalId) {
+      if (typeof approvalId === "string" && approvalId.length > 0) {
+        resolvedApprovalIds.add(approvalId);
+      }
+    }
+
+    function approvalDetailText(approval) {
+      const lines = [];
+      if (typeof approval.detail === "string" && approval.detail.length > 0) {
+        lines.push(approval.detail);
+      }
+      if (typeof approval.toolName === "string" && approval.toolName.length > 0) {
+        lines.push("Tool: " + approval.toolName);
+      }
+      return lines.join("\\n");
+    }
+
+    function approvalMetaText(approval) {
+      const lines = [];
+      if (typeof approval.command === "string" && approval.command.length > 0) {
+        lines.push("Command: " + approval.command);
+      }
+      if (typeof approval.cwd === "string" && approval.cwd.length > 0) {
+        lines.push("Cwd: " + approval.cwd);
+      }
+      if (Array.isArray(approval.paths) && approval.paths.length > 0) {
+        lines.push("Paths: " + approval.paths.join(", "));
+      }
+      if (Array.isArray(approval.riskReasons) && approval.riskReasons.length > 0) {
+        lines.push("Reasons: " + approval.riskReasons.join(", "));
+      }
+      return lines.join("\\n");
+    }
+
+    function selectedHunkIds(inputs) {
+      return inputs
+        .filter((input) => input.checked && typeof input.dataset.hunkId === "string")
+        .map((input) => input.dataset.hunkId);
+    }
+
+    function hunkLabel(hunk) {
+      const index = typeof hunk.hunkIndex === "number" ? hunk.hunkIndex + 1 : 1;
+      const oldStart = typeof hunk.oldStart === "number" ? hunk.oldStart : 0;
+      const oldCount = typeof hunk.oldCount === "number" ? hunk.oldCount : 0;
+      const newStart = typeof hunk.newStart === "number" ? hunk.newStart : 0;
+      const newCount = typeof hunk.newCount === "number" ? hunk.newCount : 0;
+      const section = typeof hunk.section === "string" && hunk.section.length > 0
+        ? " - " + hunk.section
+        : "";
+      return hunk.filePath + " hunk " + index + " (-" + oldStart + "," + oldCount + " +" + newStart + "," + newCount + ")" + section;
+    }
+
     function renderSubmission(submission) {
       const state = submission && typeof submission === "object" ? submission : initialSubmission;
+      currentSubmission = state;
       const status = typeof state.status === "string" ? state.status : "idle";
       const busy = state.busy === true;
       const runId = typeof state.runId === "string" ? state.runId : "";
@@ -1684,6 +2260,7 @@ function renderChatViewHtml(
       if (status === "running") {
         promptInput.value = "";
       }
+      syncConversationChrome();
     }
 
     function renderSubmissionAction(action) {
@@ -1724,10 +2301,34 @@ function renderChatViewHtml(
       cancelButton.disabled = cancelable !== true;
     }
 
+    function syncConversationChrome() {
+      const runId = activeConversationRunId();
+      const active = runId.length > 0;
+      shellRoot.classList.toggle("conversation-active", active);
+      conversationTitleRoot.textContent = "Conversation";
+      showRunsButton.disabled = currentSubmission && currentSubmission.busy === true;
+    }
+
+    function activeConversationRunId() {
+      const submissionRunId =
+        currentSubmission && typeof currentSubmission.runId === "string" ? currentSubmission.runId : "";
+      const latestRunId =
+        currentSnapshot && typeof currentSnapshot.latestRunId === "string" ? currentSnapshot.latestRunId : "";
+      const selectedRunId =
+        currentRuns && typeof currentRuns.selectedRunId === "string" ? currentRuns.selectedRunId : "";
+      if (submissionRunId || latestRunId || selectedRunId) {
+        return submissionRunId || latestRunId || selectedRunId;
+      }
+      return currentSubmission && currentSubmission.busy === true ? "pending" : "";
+    }
+
     function renderItem(item) {
       const collapsed = item.defaultCollapsed === true;
       const article = document.createElement(collapsed ? "details" : "article");
       article.className = "item " + item.kind + " " + item.tone;
+      if (collapsed) {
+        article.open = false;
+      }
 
       const meta = document.createElement("div");
       meta.className = "meta";
@@ -1762,10 +2363,6 @@ function renderChatViewHtml(
   </script>
 </body>
 </html>`;
-}
-
-function safeScriptJson(value: unknown): string {
-  return JSON.stringify(value).replaceAll("<", "\\u003c");
 }
 
 function nonceValue(): string {
@@ -1879,6 +2476,10 @@ function isConfigureDeepSeekApiKeyMessage(message: unknown): boolean {
 
 function isSelectDeepSeekModelMessage(message: unknown): boolean {
   return isRecord(message) && message["type"] === "selectDeepSeekModel";
+}
+
+function isShowRunsMessage(message: unknown): boolean {
+  return isRecord(message) && message["type"] === "showRuns";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

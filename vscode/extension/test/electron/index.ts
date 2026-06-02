@@ -101,6 +101,10 @@ async function exerciseChatSendTurnDiagnosticsAndApproval(): Promise<void> {
 
 async function exerciseChatCancel(): Promise<void> {
   await postChatMessage({
+    type: "showRuns",
+  });
+
+  await postChatMessage({
     type: "submitTurn",
     message: "integration cancel flow",
     mode: "edit",
