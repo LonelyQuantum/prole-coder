@@ -11,7 +11,7 @@ export type ChatTimelineKind =
   | "run"
   | "terminal"
   | "tool"
-  | "turn";
+  | "user";
 
 export type ChatTimelineTone = "danger" | "neutral" | "running" | "success" | "warning";
 
@@ -34,6 +34,8 @@ export interface ChatTimelineItem {
 export interface ChatTimelineSnapshot {
   readonly eventCount: number;
   readonly items: readonly ChatTimelineItem[];
+  readonly visibleItems?: readonly ChatTimelineItem[];
+  readonly workItems?: readonly ChatTimelineItem[];
   readonly latestRunId?: string;
   readonly latestStatus?: string;
 }
@@ -80,9 +82,13 @@ export class ChatEventTimeline {
   }
 
   snapshot(): ChatTimelineSnapshot {
+    const items = this.items.map((item) => ({ ...item }));
+    const presentation = presentTimelineItems(items);
     return {
       eventCount: this.eventCount,
-      items: this.items.map((item) => ({ ...item })),
+      items,
+      visibleItems: presentation.visibleItems,
+      workItems: presentation.workItems,
       ...(this.latestRunId === undefined ? {} : { latestRunId: this.latestRunId }),
       ...(this.latestStatus === undefined ? {} : { latestStatus: this.latestStatus }),
     };
@@ -159,7 +165,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         id: `assistant:${event.runId}:${event.turnId ?? "run"}:${event.seq}`,
         kind: "assistant",
         tone: "neutral",
-        title: "Assistant",
+        title: "DeepSeek",
         body: textField(payload, "text") ?? textField(payload, "delta") ?? compactJson(event.payload),
         detail: `seq ${event.seq}`,
       };
@@ -175,11 +181,10 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
     case "turn.started":
       return {
         ...base,
-        kind: "turn",
-        tone: "running",
-        title: "Turn started",
+        kind: "user",
+        tone: "neutral",
+        title: "You",
         body: textField(payload, "userTask") ?? textField(payload, "prompt") ?? compactJson(event.payload),
-        defaultCollapsed: true,
       };
     case "context.built":
       return {
@@ -320,6 +325,41 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         defaultCollapsed: true,
       };
   }
+}
+
+export function presentTimelineItems(items: readonly ChatTimelineItem[]): {
+  readonly visibleItems: readonly ChatTimelineItem[];
+  readonly workItems: readonly ChatTimelineItem[];
+} {
+  const hasAssistantMessage = items.some((item) => item.kind === "assistant");
+  const visibleItems: ChatTimelineItem[] = [];
+  const workItems: ChatTimelineItem[] = [];
+
+  for (const item of items) {
+    if (isWorkLogItem(item, hasAssistantMessage)) {
+      workItems.push(item);
+    } else {
+      visibleItems.push(item);
+    }
+  }
+
+  return { visibleItems, workItems };
+}
+
+export function isWorkLogItem(item: ChatTimelineItem, hasAssistantMessage = false): boolean {
+  if (item.kind === "user" || item.kind === "assistant") {
+    return false;
+  }
+
+  if (item.type === "run.failed" || item.type === "run.canceled") {
+    return false;
+  }
+
+  if (item.type === "run.completed" && !hasAssistantMessage) {
+    return false;
+  }
+
+  return true;
 }
 
 function assistantKey(event: AgentEventEnvelope): string {
