@@ -1,6 +1,6 @@
 # 详细任务索引
 
-状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-13 已完成；P5-14 已补充一批真实试用 UX 回归修复，但持续 UX 测试与体验改进占位仍未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
+状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-13 已完成；P5-14 拆分为子项管理，其中 P5-14a 到 P5-14c 已完成，P5-14d 起仍有 UX E2E 回归、大工具参数协议和真实试用 backlog 未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
 
 本文档是详细设计文档里的任务账本。README 保留高层开发计划；这里把各模块文档中出现的“已实现、尚未实现、后续增强、下一步”收敛为可勾选任务，避免后续工作只散落在说明文字里。
 
@@ -9,6 +9,8 @@
 - 新增任何预期实现项时，必须在本文件登记阶段和状态。
 - README 开发计划中的阶段条目标记完成前，应检查本文件中对应细任务是否已经完成。
 - 如果一个 README 条目完成了它蕴含的细任务，应同步把本文件对应行标记为 `[x]`，并在说明中写清验收方式。
+- README 开发计划只写阶段和任务摘要；实现细节、验收命令、审查来源、后续拆分统一写在本文件。
+- 复杂任务使用父项加子项编号维护，例如 `P5-14` 作为总项，`P5-14a` / `P5-14b` 记录可独立开发和验收的子任务；父项只有在所有子项完成后才能标记完成。
 - 详细模块文档仍保留设计说明；本文件只记录阶段、状态和追踪入口。
 
 ## 审计结论
@@ -109,7 +111,7 @@
 | [x] | P4-14：补齐 end-to-end 集成测试覆盖 | `README.md`、`docs/vscode-extension.md`、`docs/testing.md` | 已完成：`pnpm run vscode:test-electron` 在隔离 user-data/extensions profile 中启动 VS Code test host，并通过 `vscode/extension/test/fixtures/rpcFixtureServer.mjs` 本地 JSON-RPC fixture 覆盖 extension activation、Chat sendTurn、Problems diagnostic attachments、自动审批回传、Cancel、Run List / resume 和 Chat timeline/submission/context 状态；VSIX 安装后的 clean 环境基础交互继续按 `docs/release.md` 的可重复手动路径验收。 |
 ## Phase 5：VS Code Codex-like UX 与开发工作流
 
-状态：进行中。P5-1 到 P5-13 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收、Output Channel、API key/model 配置、错误恢复、只读 Git context、GitLens-like commit / PR 文案生成工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX，以及结构化 provider 配置错误码与恢复动作；P5-14 已补充 Sidebar 对话专属视图、内联审批/删除确认、默认只显示用户消息与 DeepSeek 回复的对话流、Work log 折叠展示和输入快捷键回归，但持续 UX 测试与体验改进占位仍未完成。G4 自动 commit / push / create PR 留作后续增强。
+状态：进行中。P5-1 到 P5-13 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收、Output Channel、API key/model 配置、错误恢复、只读 Git context、GitLens-like commit / PR 文案生成工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX，以及结构化 provider 配置错误码与恢复动作；P5-14 作为持续 UX 测试与体验改进总项，已拆分为 P5-14a 到 P5-14f。G4 自动 commit / push / create PR 留作后续增强。
 
 | 状态 | 任务 | 来源 | 说明 |
 | --- | --- | --- | --- |
@@ -126,7 +128,13 @@
 | [x] | P5-11：Phase 5 UX 工作流验收与文档收敛 | `README.md`、`docs/roadmap.md`、`docs/testing.md` | 已完成：补齐 P5-6 到 P5-10 的单元测试、extension-host 验收、VSIX smoke/alpha 验证和文档一致性检查；Git workflow agent 终态事件已补幂等保护，明确 G4 自动 commit / push / create PR 为后续增强，需要接入审批模型后再做。验收：`pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke`、`pnpm run vsix:alpha`、`git diff --check` 和敏感信息扫描。 |
 | [x] | P5-12：Sidebar 连续会话、Run 删除与折叠事件 UX | `README.md`、`docs/vscode-extension.md`、`docs/json-rpc-protocol.md`、`docs/testing.md` | 已完成：RPC/protocol 新增 `agent.deleteRun`；Run Log 支持删除 inactive run；`agent.sendTurn.runId` 可复用已有 run 并自动递增 `turn_N`，Sidebar Chat 在 resume 后继续同一会话发送多轮 turn；tool/provider/request 等过程事件默认折叠，assistant 文本和最终 `run.completed.summary` 保持可见；完整事件 payload 写入 `Output > ProleCoder` 便于 debug；Turn Loop 默认注入最终回复摘要契约。验收：新增 Rust/TS 单元测试覆盖 deleteRun、多 turn run log、折叠 timeline、typed RPC delete 和 runHistory delete message。 |
 | [x] | P5-13：结构化 provider 配置错误码与恢复动作 | `docs/json-rpc-protocol.md`、`docs/vscode-extension.md`、`docs/testing.md` | 已完成：DeepSeek 缺少 API key 的 RPC `E_PROVIDER_ERROR` 返回 `data.provider` / `data.configurationError` / `data.recoverableAction`；VS Code Sidebar 和原生 Chat Participant 依据结构化 recoverable action 展示/触发 API key 配置入口，不再依赖后端英文错误消息；Run failed payload 同样可携带恢复动作。验收：新增 protocol、providerConfigurationUx、Chat Participant 和 CLI 单元测试覆盖结构化错误数据。 |
-| [ ] | P5-14：持续 UX 测试与体验改进占位 | `docs/testing.md`、`docs/vscode-extension.md` | 未完成：保留 Phase 5 的持续验收入口，用于根据真实 VS Code 插件试用继续收集 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩等体验问题；已补齐：进入 run 后切换 Sidebar 对话专属视图并隐藏 Runs/Context 管理面板，approval 和 run delete 改为就地确认 UI，默认对话流只显示用户消息与 DeepSeek 回复，tool/provider/context/run completed 等过程事件收敛到默认折叠的 Work log，Work log 摘要只暴露当前工作状态，输入框 Enter 发送且 Shift+Enter 换行；已登记后续 E2E 增强项：覆盖 resume 后继续发送新 turn、事件渲染、webview 内联确认后的 run 删除与 Run List 刷新、内联审批卡片、输入快捷键和 Work log 折叠展示。只有这些手动/自动回归项稳定后，Phase 5 才能整体标记完成。 |
+| [ ] | P5-14：持续 UX 测试与体验改进总项 | `README.md`、`docs/vscode-extension.md`、`docs/testing.md` | 父项：用于承接真实 VS Code 插件试用后的体验修复、稳定性增强和回归验收。只有 P5-14a 到 P5-14f 全部完成后，P5-14 才能标记完成，Phase 5 才能整体标记完成。 |
+| [x] | P5-14a：Sidebar 对话专属视图与就地确认 | `docs/vscode-extension.md`、`docs/testing.md` | 已完成：进入 run 后切换 Sidebar 对话专属视图并隐藏 Runs/Context 管理面板；approval 和 run delete 改为 webview 就地确认 UI，避免系统 modal 打断对话流。验收：已补充相关 Sidebar 状态和消息处理测试。 |
+| [x] | P5-14b：默认对话流、Work log 折叠和输入快捷键 | `docs/vscode-extension.md`、`docs/testing.md` | 已完成：默认只显示用户消息与 DeepSeek 回复；tool/provider/context/run completed 等过程事件收敛到默认折叠的 Work log；Work log 摘要只暴露当前工作状态；输入框 Enter 发送且 Shift+Enter 换行。验收：已补充 timeline / chat input 回归测试。 |
+| [x] | P5-14c：malformed tool-call 本地诊断文件 | `docs/json-rpc-protocol.md`、`docs/run-log.md`、`docs/turn-loop.md` | 已完成：当 provider 返回的 tool-call `function.arguments` 无法解析为 JSON 时，Turn Loop 会在当前 run 的 `diagnostics/invalid-tool-arguments-<sanitizedToolCallId>-<hash>.json` 写入脱敏后的累计 arguments，并在 `run.failed.diagnosticFile` / Sidebar failure card 指向该文件。验收：`cargo test -p prole-coder-agent-core diagnostic`、`pnpm --filter prole-coder-vscode test`。 |
+| [ ] | P5-14d：Sidebar UX extension-host E2E 回归 | `docs/testing.md`、`docs/vscode-extension.md` | 未完成：用 extension-host 覆盖真实 webview 流程，包括 resume 后继续发送新 turn、默认事件渲染、webview 内联确认后的 run 删除与 Run List 刷新、内联审批卡片、输入快捷键和 Work log 折叠展示。完成后再更新 Phase 5 验收记录。 |
+| [ ] | P5-14e：大 patch / 大文件分块式工具参数协议 | `docs/tool-system.md`、`docs/turn-loop.md` | 未完成：为大 patch / 大文件写入设计 chunked tool payload 协议，允许 provider 分块流式输出到 run-scoped 临时文件，最后通过 commit/apply 调用统一进入 schema 校验、路径安全、审批和 hunk 边界；chunk 过程中不得边接收边执行写入。 |
+| [ ] | P5-14f：真实试用 UX backlog 收敛 | `docs/testing.md`、`docs/vscode-extension.md` | 未完成：继续根据真实 VS Code 插件试用收集 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩等体验问题，并把可执行项登记为 P5-14 子项或后续 Phase 任务。 |
 
 ## Phase 6：TUI 与生态扩展
 
