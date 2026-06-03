@@ -228,6 +228,20 @@ pub trait RunLogWriter {
         let _ = (relative_path, contents);
         Ok(None)
     }
+
+    fn read_payload_file(&mut self, relative_path: &Path) -> Result<Option<String>, RunLogError> {
+        let _ = relative_path;
+        Ok(None)
+    }
+
+    fn append_payload_chunk(
+        &mut self,
+        relative_path: &Path,
+        chunk: &str,
+    ) -> Result<Option<PathBuf>, RunLogError> {
+        let _ = (relative_path, chunk);
+        Ok(None)
+    }
 }
 
 /// `RunLog` is a single-writer append handle.
@@ -310,7 +324,27 @@ impl RunLog {
         relative_path: &Path,
         contents: &str,
     ) -> Result<PathBuf, RunLogError> {
-        write_run_diagnostic_file(&self.events_path, relative_path, contents)
+        write_run_text_file(&self.events_path, relative_path, contents, true)
+    }
+
+    pub fn write_run_payload_file(
+        &mut self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<PathBuf, RunLogError> {
+        write_run_text_file(&self.events_path, relative_path, contents, false)
+    }
+
+    pub fn append_run_payload_chunk(
+        &mut self,
+        relative_path: &Path,
+        chunk: &str,
+    ) -> Result<PathBuf, RunLogError> {
+        append_run_text_file(&self.events_path, relative_path, chunk)
+    }
+
+    pub fn read_run_payload_file(&self, relative_path: &Path) -> Result<String, RunLogError> {
+        read_run_text_file(&self.events_path, relative_path)
     }
 }
 
@@ -334,6 +368,19 @@ impl RunLogWriter for RunLog {
         contents: &str,
     ) -> Result<Option<PathBuf>, RunLogError> {
         self.write_run_diagnostic_file(relative_path, contents)
+            .map(Some)
+    }
+
+    fn read_payload_file(&mut self, relative_path: &Path) -> Result<Option<String>, RunLogError> {
+        self.read_run_payload_file(relative_path).map(Some)
+    }
+
+    fn append_payload_chunk(
+        &mut self,
+        relative_path: &Path,
+        chunk: &str,
+    ) -> Result<Option<PathBuf>, RunLogError> {
+        self.append_run_payload_chunk(relative_path, chunk)
             .map(Some)
     }
 }
@@ -394,6 +441,26 @@ impl SerializedRunLog {
             .write_run_diagnostic_file(relative_path, contents)
     }
 
+    pub fn write_run_payload_file(
+        &self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<PathBuf, RunLogError> {
+        self.lock()?.write_run_payload_file(relative_path, contents)
+    }
+
+    pub fn append_run_payload_chunk(
+        &self,
+        relative_path: &Path,
+        chunk: &str,
+    ) -> Result<PathBuf, RunLogError> {
+        self.lock()?.append_run_payload_chunk(relative_path, chunk)
+    }
+
+    pub fn read_run_payload_file(&self, relative_path: &Path) -> Result<String, RunLogError> {
+        self.lock()?.read_run_payload_file(relative_path)
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, RunLog>, RunLogError> {
         self.inner
             .lock()
@@ -423,6 +490,18 @@ impl RunLogWriter for SerializedRunLog {
         contents: &str,
     ) -> Result<Option<PathBuf>, RunLogError> {
         SerializedRunLog::write_run_diagnostic_file(self, relative_path, contents).map(Some)
+    }
+
+    fn read_payload_file(&mut self, relative_path: &Path) -> Result<Option<String>, RunLogError> {
+        SerializedRunLog::read_run_payload_file(self, relative_path).map(Some)
+    }
+
+    fn append_payload_chunk(
+        &mut self,
+        relative_path: &Path,
+        chunk: &str,
+    ) -> Result<Option<PathBuf>, RunLogError> {
+        SerializedRunLog::append_run_payload_chunk(self, relative_path, chunk).map(Some)
     }
 }
 
@@ -637,10 +716,11 @@ fn append_event(path: &Path, event: &RunLogEvent) -> Result<(), RunLogError> {
     Ok(())
 }
 
-fn write_run_diagnostic_file(
+fn write_run_text_file(
     events_path: &Path,
     relative_path: &Path,
     contents: &str,
+    append_newline: bool,
 ) -> Result<PathBuf, RunLogError> {
     let relative_path = normalize_workspace_relative_path(relative_path)?;
     let run_dir = events_path
@@ -669,10 +749,62 @@ fn write_run_diagnostic_file(
             path: path.clone(),
             source,
         })?;
-    file.write_all(b"\n").map_err(|source| RunLogError::Io {
+    if append_newline {
+        file.write_all(b"\n").map_err(|source| RunLogError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    }
+    file.flush().map_err(|source| RunLogError::Io {
         path: path.clone(),
         source,
     })?;
+    Ok(path)
+}
+
+fn read_run_text_file(events_path: &Path, relative_path: &Path) -> Result<String, RunLogError> {
+    let relative_path = normalize_workspace_relative_path(relative_path)?;
+    let run_dir = events_path
+        .parent()
+        .ok_or_else(|| RunLogError::InvalidStatePath {
+            path: events_path.to_path_buf(),
+        })?;
+    let path = run_dir.join(relative_path);
+    fs::read_to_string(&path).map_err(|source| RunLogError::Io { path, source })
+}
+
+fn append_run_text_file(
+    events_path: &Path,
+    relative_path: &Path,
+    chunk: &str,
+) -> Result<PathBuf, RunLogError> {
+    let relative_path = normalize_workspace_relative_path(relative_path)?;
+    let run_dir = events_path
+        .parent()
+        .ok_or_else(|| RunLogError::InvalidStatePath {
+            path: events_path.to_path_buf(),
+        })?;
+    let path = run_dir.join(relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| RunLogError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|source| RunLogError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    file.write_all(chunk.as_bytes())
+        .map_err(|source| RunLogError::Io {
+            path: path.clone(),
+            source,
+        })?;
     file.flush().map_err(|source| RunLogError::Io {
         path: path.clone(),
         source,
@@ -1192,6 +1324,41 @@ mod tests {
         );
         assert!(matches!(
             run.write_run_diagnostic_file(std::path::Path::new("../outside.txt"), "bad"),
+            Err(RunLogError::InvalidStatePath { .. })
+        ));
+
+        let payload_path = run
+            .write_run_payload_file(
+                std::path::Path::new("payloads/apply_patch/patch.diff"),
+                "diff",
+            )
+            .expect("payload file should be written");
+        assert_eq!(
+            fs::read_to_string(&payload_path).expect("payload file should be readable"),
+            "diff"
+        );
+        assert_eq!(
+            run.read_run_payload_file(std::path::Path::new("payloads/apply_patch/patch.diff"))
+                .expect("payload file should load"),
+            "diff"
+        );
+        run.append_run_payload_chunk(
+            std::path::Path::new("payloads/apply_patch/chunked.diff"),
+            "di",
+        )
+        .expect("first payload chunk should append");
+        run.append_run_payload_chunk(
+            std::path::Path::new("payloads/apply_patch/chunked.diff"),
+            "ff",
+        )
+        .expect("second payload chunk should append");
+        assert_eq!(
+            run.read_run_payload_file(std::path::Path::new("payloads/apply_patch/chunked.diff"))
+                .expect("chunked payload file should load"),
+            "diff"
+        );
+        assert!(matches!(
+            run.read_run_payload_file(std::path::Path::new("../outside.txt")),
             Err(RunLogError::InvalidStatePath { .. })
         ));
     }
