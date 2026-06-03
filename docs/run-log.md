@@ -20,6 +20,7 @@ Run Log 是 Agent Core 的本地审计记录。它记录一次 run 中发生的�
 <workspace>/.prole-coder/runs/<runId>/events.jsonl
 <workspace>/.prole-coder/runs/<runId>/summary.json
 <workspace>/.prole-coder/runs/<runId>/diagnostics/*.json
+<workspace>/.prole-coder/runs/<runId>/payloads/**
 ```
 
 `.prole-coder/` 已在 `.gitignore` 中排除，run log 不应进入 Git 仓库。
@@ -51,6 +52,8 @@ crates/agent-core/src/run_log.rs
 Run Log 本身负责 append/load 串行化，并允许 Turn Loop 在同一 run 目录下写入受控诊断文件。Phase 3 的 RPC live event queue 建在 `TurnEventSink` 之上：事件先成功追加到 Run Log，再投递给 request loop 的单 writer 输出为 `agent.event` notification。因此前端看到的 live notification 与后续 `agent.resume` 回放共享同一组 `seq` 和 payload。
 
 当 provider 返回的 tool-call `function.arguments` 无法解析为 JSON 时，Turn Loop 会在 `diagnostics/invalid-tool-arguments-<sanitizedToolCallId>-<hash>.json` 写入脱敏后的累计 arguments、JSON 解析错误和 run/turn/tool metadata；对应 `run.failed` payload 会带 `diagnosticFile` 路径，便于 VS Code Output 或 Sidebar failure card 直接定位。文件名中的短哈希来自原始 tool call id，用于避免 sanitize 或截断后的名称碰撞。诊断文件继续留在 `.prole-coder/`，不应上传或同步。
+
+大工具参数使用 `payloads/`：本地聚合器可以把 provider streaming chunk 追加到当前 run 的 payload 文件，最终 tool call 只通过 `payloadRef` 引用该文件。Run Log 只允许 workspace-relative run-scoped 路径，拒绝绝对路径和 `..`；payload 文件不会自动追加换行，避免改变 patch 内容。
 
 ## Summary Metadata
 
@@ -114,6 +117,7 @@ Run Log 本身负责 append/load 串行化，并允许 Turn Loop 在同一 run �
 - 读取时发现序列缺口会失败。
 - 写入前脱敏敏感字段和明显密钥片段。
 - malformed tool-call arguments 会写入 run-scoped 诊断文件，并在 `run.failed.diagnosticFile` 暴露本地路径。
+- run-scoped payload 文件支持 chunk append 和读取，用于 `apply_patch.payloadRef` 这类大参数引用；chunk 追加不触碰 workspace 文件。
 - 超长字符串和数组会被截断，并记录 `runLogTruncation` 元数据。
 - `SerializedRunLog` 多线程 clone 并发追加时，仍生成连续 `seq`，并可被重新打开为正确的下一条序号。
 - summary metadata 随事件追加更新，并可按最近更新时间列出。

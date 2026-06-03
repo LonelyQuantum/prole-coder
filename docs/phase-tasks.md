@@ -1,6 +1,6 @@
 # 详细任务索引
 
-状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-13 已完成；P5-14 拆分为子项管理，其中 P5-14a 到 P5-14c 已完成，P5-14d 起仍有 UX E2E 回归、大工具参数协议和真实试用 backlog 未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
+状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-13 已完成；P5-14 拆分为子项管理，其中 P5-14a 到 P5-14e 已完成，P5-14f 真实试用 UX backlog 仍未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
 
 本文档是详细设计文档里的任务账本。README 保留高层开发计划；这里把各模块文档中出现的“已实现、尚未实现、后续增强、下一步”收敛为可勾选任务，避免后续工作只散落在说明文字里。
 
@@ -132,8 +132,8 @@
 | [x] | P5-14a：Sidebar 对话专属视图与就地确认 | `docs/vscode-extension.md`、`docs/testing.md` | 已完成：进入 run 后切换 Sidebar 对话专属视图并隐藏 Runs/Context 管理面板；approval 和 run delete 改为 webview 就地确认 UI，避免系统 modal 打断对话流。验收：已补充相关 Sidebar 状态和消息处理测试。 |
 | [x] | P5-14b：默认对话流、Work log 折叠和输入快捷键 | `docs/vscode-extension.md`、`docs/testing.md` | 已完成：默认只显示用户消息与 DeepSeek 回复；tool/provider/context/run completed 等过程事件收敛到默认折叠的 Work log；Work log 摘要只暴露当前工作状态；输入框 Enter 发送且 Shift+Enter 换行。验收：已补充 timeline / chat input 回归测试。 |
 | [x] | P5-14c：malformed tool-call 本地诊断文件 | `docs/json-rpc-protocol.md`、`docs/run-log.md`、`docs/turn-loop.md` | 已完成：当 provider 返回的 tool-call `function.arguments` 无法解析为 JSON 时，Turn Loop 会在当前 run 的 `diagnostics/invalid-tool-arguments-<sanitizedToolCallId>-<hash>.json` 写入脱敏后的累计 arguments，并在 `run.failed.diagnosticFile` / Sidebar failure card 指向该文件。验收：`cargo test -p prole-coder-agent-core diagnostic`、`pnpm --filter prole-coder-vscode test`。 |
-| [ ] | P5-14d：Sidebar UX extension-host E2E 回归 | `docs/testing.md`、`docs/vscode-extension.md` | 未完成：用 extension-host 覆盖真实 webview 流程，包括 resume 后继续发送新 turn、默认事件渲染、webview 内联确认后的 run 删除与 Run List 刷新、内联审批卡片、输入快捷键和 Work log 折叠展示。完成后再更新 Phase 5 验收记录。 |
-| [ ] | P5-14e：大 patch / 大文件分块式工具参数协议 | `docs/tool-system.md`、`docs/turn-loop.md` | 未完成：为大 patch / 大文件写入设计 chunked tool payload 协议，允许 provider 分块流式输出到 run-scoped 临时文件，最后通过 commit/apply 调用统一进入 schema 校验、路径安全、审批和 hunk 边界；chunk 过程中不得边接收边执行写入。 |
+| [x] | P5-14d：Sidebar UX extension-host E2E 回归 | `docs/testing.md`、`docs/vscode-extension.md` | 已完成：extension-host 测试新增 test-mode webview probe，覆盖真实 webview 中 resume 后继续发送新 turn、默认事件渲染、webview 内联确认后的 run 删除与 Run List 刷新、Sidebar 内联审批卡片、对话专属视图、Work log 默认折叠展示和 Enter / Shift+Enter 输入行为。验收：`pnpm run vscode:test-electron`。 |
+| [x] | P5-14e：大 patch / 大文件分块式工具参数协议 | `docs/tool-system.md`、`docs/turn-loop.md`、`docs/run-log.md` | 已完成：Run Log 支持 run-scoped `payloads/` 文件写入、chunk append 和读取；`apply_patch` schema 新增 `payloadRef`，Turn Loop 可在 `tool.requested` 保留轻量 preview，并在执行前从当前 run 的 payload 文件 materialize `unifiedDiff`，校验 `sha256` / `sizeBytes` 后复用现有 schema、路径安全、审批和 hunk 边界。chunk 追加阶段不写 workspace。验收：`cargo test -p prole-coder-agent-core payload`、`cargo test -p prole-coder-agent-core apply_patch_schema_accepts_run_scoped_payload_refs`。 |
 | [ ] | P5-14f：真实试用 UX backlog 收敛 | `docs/testing.md`、`docs/vscode-extension.md` | 未完成：继续根据真实 VS Code 插件试用收集 Runs、Key/Model、审批、Chat、Output 日志和上下文压缩等体验问题，并把可执行项登记为 P5-14 子项或后续 Phase 任务。 |
 
 ## Phase 6：TUI 与生态扩展

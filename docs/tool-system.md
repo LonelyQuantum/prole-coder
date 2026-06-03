@@ -1,6 +1,6 @@
 # 工具系统
 
-状态：`0.1.0` 设计已确定，Phase 1 基础执行层、审批前 shell 动态风险升级、Phase 3 RPC/VS Code 审批接入、VS Code Native diff patch 预览、`apply_patch` hunk 级审批和命令子进程树清理已实现。
+状态：`0.1.0` 设计已确定，Phase 1 基础执行层、审批前 shell 动态风险升级、Phase 3 RPC/VS Code 审批接入、VS Code Native diff patch 预览、`apply_patch` hunk 级审批、run-scoped 大 payload 引用和命令子进程树清理已实现。
 
 工具系统通过显式 schema 和类型化结果向 Agent Core 暴露工作区操作。模型不得直接执行文件写入、shell 命令或网络访问；它只能请求工具，工具请求必须经过 schema 校验和审批策略。
 
@@ -170,7 +170,8 @@ pub struct ToolDefinition {
 
 参数：
 
-- `unifiedDiff`：统一 diff。
+- `unifiedDiff`：统一 diff。小 patch 可直接内联该字段。
+- `payloadRef`：可选 run-scoped 大 payload 引用；与 `unifiedDiff` 互斥。当前支持 `{ kind: "run_file", path, sha256?, sizeBytes? }`，`path` 必须位于当前 run 的 `payloads/` 目录下。
 - `expectedFiles`：预期修改文件列表。
 
 结果：
@@ -303,7 +304,7 @@ fixture 中的 `tools` 被当作无序集合校验；测试会按工具名规整
 - `workspace_manifest`：生成 workspace manifest v0，默认遵守 `.gitignore` 和 `.prole-coderignore`，硬排除 `.git/`、`.secrets/`、`.secret/`、`.agents/`、`.codex/` 和 `.prole-coder/`，并返回稳定排序条目、manifest hash、git 状态和截断原因。
 - `read_file`：只读取 workspace 内 UTF-8 文本文件，支持 1-based 行范围，并返回完整文件的 `sha256` 和 `sizeBytes`。
 - `search`：通过 `rg --json --fixed-strings` 搜索，默认排除 `.git/`、`.secrets/`、`.secret/`、`.env*`、`node_modules/` 和 `target/`。
-- `apply_patch`：应用受限 unified diff，要求 patch 实际文件集合与 `expectedFiles` 完全一致；执行时会先在内存中完成全部文件的 hunk 校验和 staging，再统一写盘，因此解析或 hunk mismatch 不会留下部分文件已修改的状态；成功后返回 reverse patch。Core 会从 unified diff 生成稳定 hunk id，RPC/VS Code 首版支持 selected hunk 审批；文件创建和删除如果只批准部分 hunk 会被拒绝，避免生成不可审计的半文件操作。
+- `apply_patch`：应用受限 unified diff，要求 patch 实际文件集合与 `expectedFiles` 完全一致；执行时会先在内存中完成全部文件的 hunk 校验和 staging，再统一写盘，因此解析或 hunk mismatch 不会留下部分文件已修改的状态；成功后返回 reverse patch。Core 会从 unified diff 生成稳定 hunk id，RPC/VS Code 首版支持 selected hunk 审批；文件创建和删除如果只批准部分 hunk 会被拒绝，避免生成不可审计的半文件操作。大 patch 可以先分块追加到当前 run 的 `payloads/` 文件，再通过 `payloadRef` 引用；Turn Loop 会校验 `sha256` / `sizeBytes`，然后 materialize 为 `unifiedDiff` 进入同一条 schema、路径安全、审批和 hunk 边界链路。
 - `shell`：在 workspace 内执行非交互式命令，支持超时，执行前进行命令风险分类，返回 exit code、stdout、stderr 和耗时。
 - `git_status`：读取 `git status --short --branch` 或普通 `git status`。
 - `git_diff`：读取 unstaged 或 staged diff，支持限定 workspace-relative 路径。
@@ -358,7 +359,7 @@ Schema 校验不能只作为 typed deserialization 失败后的补救，因为 R
 
 - 当前实现只支持受限 unified diff；后续需要支持更完整的 git patch 语法，包括 rename、copy、mode change 和更严格的 no-newline 语义。
 - 已增加 VS Code patch 预览和 `apply_patch` hunk 级审批；后续继续增强冲突诊断、失败时的精确 hunk mismatch 信息，以及 rename/copy/mode change 等更完整 patch 语法下的审批边界。
-- 为大 patch / 大文件写入设计分块式工具参数协议：provider 可以流式产生 chunk，本地写入 run-scoped 临时文件，最后通过 commit/apply 调用统一进入 schema 校验、路径安全、审批和 hunk 边界；不要在 chunk 过程中边接收边执行写入。
+- 已完成 `apply_patch.payloadRef` 第一版：provider 或本地聚合器可以把大 patch 分块追加到 run-scoped `payloads/` 文件，最终调用 `apply_patch` 时只传轻量引用；后续可继续扩展为显式 RPC chunk 方法、payload GC 和更完整的大文件写入协议。
 - 用修改前快照生成 reverse patch，并在 run log 中保存 patch id、审批 id 和可审计回滚信息。
 - 如果需要抵抗磁盘写入中途失败，应进一步引入临时文件、原子替换或备份恢复机制；当前 staging 主要保证解析和 hunk 校验失败不会产生半应用 patch。
 - 明确二进制文件和生成文件策略，避免文本 patch 意外改写不可审计内容。
