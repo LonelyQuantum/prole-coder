@@ -633,6 +633,8 @@ where
             })?;
         let arguments_preview = parse_tool_arguments_value(tool_call)?;
         validate_tool_call_arguments(definition, tool_call, &arguments_preview)?;
+        let executable_arguments =
+            executable_tool_arguments(definition, tool_call, &arguments_preview, run_log)?;
         let risk_assessment = tool_risk_assessment(definition, &arguments_preview);
 
         append_turn_event(
@@ -693,7 +695,7 @@ where
                 )
             }
             ToolName::ApplyPatch => {
-                let args: ApplyPatchArgs = parse_tool_arguments(tool_call, &arguments_preview)?;
+                let args: ApplyPatchArgs = parse_tool_arguments(tool_call, &executable_arguments)?;
                 let approval_hunks = patch_approval_hunks(&args.unified_diff)?;
                 let approval_scope = self.ensure_approval(
                     definition,
@@ -733,7 +735,7 @@ where
                 )
             }
             ToolName::Shell => {
-                let args: ShellArgs = parse_tool_arguments(tool_call, &arguments_preview)?;
+                let args: ShellArgs = parse_tool_arguments(tool_call, &executable_arguments)?;
                 self.ensure_approval(
                     definition,
                     &risk_assessment,
@@ -1644,6 +1646,12 @@ pub enum AgentTurnLoopError {
         name: String,
         source: ToolArgumentSchemaError,
     },
+    #[error("tool call `{tool_call_id}` for `{name}` has invalid payload reference: {detail}")]
+    InvalidToolPayloadReference {
+        tool_call_id: String,
+        name: String,
+        detail: String,
+    },
     #[error("tool result serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("too many attachments: got {count}, max {max_attachments}")]
@@ -1703,9 +1711,9 @@ impl AgentTurnLoopError {
             Self::Canceled { .. } => "E_RUN_CANCELED",
             Self::UnknownTool { .. } => "E_UNKNOWN_TOOL",
             Self::UnsupportedTool { .. } => "E_UNSUPPORTED_TOOL",
-            Self::InvalidToolArguments { .. } | Self::InvalidToolArgumentSchema { .. } => {
-                "E_INVALID_TOOL_ARGUMENTS"
-            }
+            Self::InvalidToolArguments { .. }
+            | Self::InvalidToolArgumentSchema { .. }
+            | Self::InvalidToolPayloadReference { .. } => "E_INVALID_TOOL_ARGUMENTS",
             Self::Serialization(_) => "E_SERIALIZATION",
             Self::TooManyAttachments { .. }
             | Self::DuplicateAttachment { .. }
@@ -1788,6 +1796,119 @@ fn validate_tool_call_arguments(
             source,
         }
     })
+}
+
+fn executable_tool_arguments(
+    definition: &ToolDefinition,
+    tool_call: &ChatToolCall,
+    arguments: &Value,
+    run_log: &mut (impl RunLogWriter + ?Sized),
+) -> Result<Value, AgentTurnLoopError> {
+    if definition.name != ToolName::ApplyPatch {
+        return Ok(arguments.clone());
+    }
+
+    apply_patch_arguments_for_execution(tool_call, arguments, run_log)
+}
+
+fn apply_patch_arguments_for_execution(
+    tool_call: &ChatToolCall,
+    arguments: &Value,
+    run_log: &mut (impl RunLogWriter + ?Sized),
+) -> Result<Value, AgentTurnLoopError> {
+    let object = arguments.as_object().ok_or_else(|| {
+        invalid_payload_ref(tool_call, "apply_patch arguments must be a JSON object")
+    })?;
+    let has_unified_diff = object.get("unifiedDiff").is_some();
+    let payload_ref = object.get("payloadRef");
+
+    match (has_unified_diff, payload_ref) {
+        (true, None) => Ok(arguments.clone()),
+        (false, Some(payload_ref)) => {
+            let unified_diff = read_run_payload_ref(tool_call, payload_ref, run_log)?;
+            let mut materialized = object.clone();
+            materialized.remove("payloadRef");
+            materialized.insert("unifiedDiff".to_owned(), Value::String(unified_diff));
+            Ok(Value::Object(materialized))
+        }
+        (true, Some(_)) => Err(invalid_payload_ref(
+            tool_call,
+            "apply_patch must provide either unifiedDiff or payloadRef, not both",
+        )),
+        (false, None) => Err(invalid_payload_ref(
+            tool_call,
+            "apply_patch must provide unifiedDiff or payloadRef",
+        )),
+    }
+}
+
+fn read_run_payload_ref(
+    tool_call: &ChatToolCall,
+    payload_ref: &Value,
+    run_log: &mut (impl RunLogWriter + ?Sized),
+) -> Result<String, AgentTurnLoopError> {
+    let object = payload_ref
+        .as_object()
+        .ok_or_else(|| invalid_payload_ref(tool_call, "payloadRef must be an object"))?;
+    let kind = object.get("kind").and_then(Value::as_str);
+    if kind != Some("run_file") {
+        return Err(invalid_payload_ref(
+            tool_call,
+            "payloadRef.kind must be `run_file`",
+        ));
+    }
+
+    let path = object
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_payload_ref(tool_call, "payloadRef.path must be a string"))?;
+    let slash_path = path.replace('\\', "/");
+    if !slash_path.starts_with("payloads/") {
+        return Err(invalid_payload_ref(
+            tool_call,
+            "payloadRef.path must be under payloads/",
+        ));
+    }
+
+    let contents = run_log
+        .read_payload_file(Path::new(path))
+        .map_err(|source| {
+            invalid_payload_ref(tool_call, format!("payloadRef.path is invalid: {source}"))
+        })?
+        .ok_or_else(|| {
+            invalid_payload_ref(
+                tool_call,
+                "active run log does not support payload references",
+            )
+        })?;
+    if let Some(expected_size) = object.get("sizeBytes").and_then(Value::as_u64) {
+        let actual_size = contents.len() as u64;
+        if actual_size != expected_size {
+            return Err(invalid_payload_ref(
+                tool_call,
+                format!("payloadRef.sizeBytes expected {expected_size}, got {actual_size}"),
+            ));
+        }
+    }
+    if let Some(expected_sha256) = object.get("sha256").and_then(Value::as_str) {
+        let actual_sha256 = crate::hashing::sha256_hex(contents.as_bytes());
+        if actual_sha256 != expected_sha256 {
+            return Err(invalid_payload_ref(
+                tool_call,
+                "payloadRef.sha256 does not match payload file",
+            ));
+        }
+    }
+
+    Ok(contents)
+}
+
+fn invalid_payload_ref(tool_call: &ChatToolCall, detail: impl Into<String>) -> AgentTurnLoopError {
+    AgentTurnLoopError::InvalidToolPayloadReference {
+        tool_call_id: tool_call.id.clone(),
+        name: tool_call.function.name.clone(),
+        detail: detail.into(),
+    }
 }
 
 fn parse_tool_arguments<T: DeserializeOwned>(
@@ -2283,7 +2404,11 @@ fn terminal_error_event(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, fs, path::PathBuf};
+    use std::{
+        collections::VecDeque,
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use futures_util::stream;
     use serde_json::json;
@@ -3031,6 +3156,138 @@ mod tests {
             .find(|event| event.event_type == "run.completed")
             .expect("run should complete");
         assert_eq!(completed.payload["changedFiles"], json!(["README.md"]));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_applies_patch_from_run_scoped_payload_ref() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "old\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_patch_payload_ref")
+            .expect("run should be created");
+        let patch = "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n";
+        let split_at = patch
+            .find("@@")
+            .expect("fixture patch should contain a hunk");
+        run.append_run_payload_chunk(
+            Path::new("payloads/apply_patch/patch.diff"),
+            &patch[..split_at],
+        )
+        .expect("first payload chunk should append");
+        run.append_run_payload_chunk(
+            Path::new("payloads/apply_patch/patch.diff"),
+            &patch[split_at..],
+        )
+        .expect("second payload chunk should append");
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should edit the README.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_1",
+                    "apply_patch",
+                    json!({
+                        "payloadRef": {
+                            "kind": "run_file",
+                            "path": "payloads/apply_patch/patch.diff",
+                            "sha256": crate::hashing::sha256_hex(patch.as_bytes()),
+                            "sizeBytes": patch.len(),
+                        },
+                        "expectedFiles": ["README.md"],
+                    })
+                    .to_string(),
+                )],
+            ),
+            TurnProviderResponse::final_text("Updated README."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
+                .expect("turn loop should initialize");
+
+        loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
+            .await
+            .expect("payload-referenced patch should complete");
+
+        assert_eq!(workspace.read("README.md"), "new\n");
+        let events = store
+            .load_run("run_turn_patch_payload_ref")
+            .expect("events should load");
+        let requested = events
+            .iter()
+            .find(|event| event.event_type == "tool.requested")
+            .expect("tool.requested should be recorded");
+        assert!(
+            requested.payload["argumentsPreview"]
+                .get("unifiedDiff")
+                .is_none()
+        );
+        assert_eq!(
+            requested.payload["argumentsPreview"]["payloadRef"]["path"],
+            "payloads/apply_patch/patch.diff"
+        );
+        let approval = events
+            .iter()
+            .find(|event| event.event_type == "tool.approvalRequired")
+            .expect("approval should be required");
+        assert_eq!(approval.payload["hunks"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_rejects_patch_payload_ref_hash_mismatch() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "old\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_patch_payload_ref_hash_mismatch")
+            .expect("run should be created");
+        let patch = "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n";
+        run.write_run_payload_file(Path::new("payloads/apply_patch/patch.diff"), patch)
+            .expect("payload file should be written");
+        let provider = ScriptedProvider::new(vec![TurnProviderResponse::tool_calls(
+            None,
+            Some("I should edit the README.".to_owned()),
+            vec![ChatToolCall::function(
+                "call_1",
+                "apply_patch",
+                json!({
+                    "payloadRef": {
+                        "kind": "run_file",
+                        "path": "payloads/apply_patch/patch.diff",
+                        "sha256": "0".repeat(64),
+                        "sizeBytes": patch.len(),
+                    },
+                    "expectedFiles": ["README.md"],
+                })
+                .to_string(),
+            )],
+        )]);
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
+                .expect("turn loop should initialize");
+
+        let error = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
+            .await
+            .expect_err("hash mismatch should fail before tool execution");
+
+        assert!(matches!(
+            error,
+            AgentTurnLoopError::InvalidToolPayloadReference { .. }
+        ));
+        assert_eq!(workspace.read("README.md"), "old\n");
+        let events = store
+            .load_run("run_turn_patch_payload_ref_hash_mismatch")
+            .expect("events should load");
+        assert!(events.iter().any(|event| {
+            event.event_type == "run.failed" && event.payload["code"] == "E_INVALID_TOOL_ARGUMENTS"
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.requested")
+        );
     }
 
     #[tokio::test]

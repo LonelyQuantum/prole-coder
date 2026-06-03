@@ -172,9 +172,20 @@ const SEARCH_ARGUMENT_SCHEMA: &str = r#"{
 const APPLY_PATCH_ARGUMENT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
-  "required": ["unifiedDiff", "expectedFiles"],
+  "required": ["expectedFiles"],
   "properties": {
     "unifiedDiff": { "type": "string", "minLength": 1 },
+    "payloadRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["run_file"] },
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "minLength": 64 },
+        "sizeBytes": { "type": "integer", "minimum": 0 }
+      }
+    },
     "expectedFiles": {
       "type": "array",
       "minItems": 1,
@@ -667,6 +678,26 @@ mod tests {
 
         assert_eq!(error.path(), "$.expectedFiles");
         assert!(error.detail().contains("expected array"));
+    }
+
+    #[test]
+    fn apply_patch_schema_accepts_run_scoped_payload_refs() {
+        let apply_patch = find_builtin_tool(ToolName::ApplyPatch.as_str())
+            .expect("apply_patch tool must be registered");
+
+        validate_tool_arguments(
+            apply_patch,
+            &json!({
+                "payloadRef": {
+                    "kind": "run_file",
+                    "path": "payloads/apply_patch/patch.diff",
+                    "sha256": "0".repeat(64),
+                    "sizeBytes": 1024,
+                },
+                "expectedFiles": ["README.md"],
+            }),
+        )
+        .expect("payloadRef apply_patch arguments should pass schema validation");
     }
 
     #[test]
