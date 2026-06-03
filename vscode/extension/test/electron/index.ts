@@ -6,6 +6,7 @@ import * as vscode from "vscode";
 const extensionId = "prole-coder.prole-coder-vscode";
 const TEST_CHAT_MESSAGE_COMMAND = "prole-coder.test.chatMessage";
 const TEST_CHAT_STATE_COMMAND = "prole-coder.test.chatState";
+const TEST_CHAT_PROBE_COMMAND = "prole-coder.test.chatProbe";
 const CONTRIBUTED_COMMANDS = [
   "prole-coder.openChat",
   "prole-coder.openSettings",
@@ -36,11 +37,13 @@ export async function run(): Promise<void> {
   }
   assert.equal(commands.includes(TEST_CHAT_MESSAGE_COMMAND), true);
   assert.equal(commands.includes(TEST_CHAT_STATE_COMMAND), true);
+  assert.equal(commands.includes(TEST_CHAT_PROBE_COMMAND), true);
   await vscode.commands.executeCommand("prole-coder.openChat");
 
   await exerciseChatSendTurnDiagnosticsAndApproval();
   await exerciseChatCancel();
   await exerciseRunListAndResume();
+  await exerciseChatKeyboardSubmit();
 }
 
 async function exerciseChatSendTurnDiagnosticsAndApproval(): Promise<void> {
@@ -64,17 +67,45 @@ async function exerciseChatSendTurnDiagnosticsAndApproval(): Promise<void> {
       mode: "edit",
     });
 
-    const state = await waitFor("completed approval-backed chat turn", async () => {
+    const approvalReady = await waitFor("inline approval card in chat webview", async () => {
       const current = await chatState();
-      return current.submission.status === "completed" &&
+      return current.approval?.approvalId === "approval-run-approval-1-turn-1" &&
         current.submission.runId === "run-approval-1"
         ? current
         : undefined;
     });
+    assert.equal(approvalReady.context.status, "ready");
+    assert.equal(approvalReady.timeline.latestRunId, "run-approval-1");
+    assert.ok(approvalReady.timeline.items.some((item) => item.type === "tool.approvalRequired"));
+
+    const approvalProbe = await chatProbeSnapshot();
+    assert.equal(approvalProbe.conversationActive, true);
+    assert.equal(approvalProbe.runsHidden, true);
+    assert.equal(approvalProbe.contextHidden, true);
+    assert.equal(approvalProbe.approvalVisible, true);
+    assert.equal(approvalProbe.workLogVisible, true);
+    assert.equal(approvalProbe.workLogOpen, false);
+    assert.ok(approvalProbe.visibleItemTitles.includes("You"));
+    assert.ok(!approvalProbe.visibleItemTitles.includes("Approval required: shell"));
+
+    await chatProbe({ type: "click", selector: ".approval-action.approve" });
+
+    const state = await waitFor("completed approval-backed chat turn", async () => {
+      const current = await chatState();
+      return current.submission.status === "completed" &&
+        current.submission.runId === "run-approval-1" &&
+        current.timeline.items.some((item) => item.type === "tool.approvalResolved")
+        ? current
+        : undefined;
+    });
     assert.equal(state.context.status, "ready");
-    assert.equal(state.timeline.latestRunId, "run-approval-1");
-    assert.ok(state.timeline.items.some((item) => item.type === "tool.approvalRequired"));
     assert.ok(state.timeline.items.some((item) => item.type === "tool.approvalResolved"));
+    const completedProbe = await chatProbeSnapshot();
+    assert.equal(completedProbe.approvalVisible, false);
+    assert.equal(completedProbe.workLogVisible, true);
+    assert.equal(completedProbe.workLogOpen, false);
+    assert.ok(completedProbe.visibleItemTitles.includes("You"));
+    assert.ok(completedProbe.visibleItemTitles.includes("DeepSeek"));
 
     const sendTurn = await waitFor("logged sendTurn with diagnostics", async () =>
       logEntry((entry) => entry.method === "agent.sendTurn" && entry.params?.message === "integration approval flow"),
@@ -91,7 +122,7 @@ async function exerciseChatSendTurnDiagnosticsAndApproval(): Promise<void> {
     );
 
     const approve = await waitFor("logged approval response", async () =>
-      logEntry((entry) => entry.method === "agent.approve" && entry.params?.approvalId === "approval-approval-1"),
+      logEntry((entry) => entry.method === "agent.approve" && entry.params?.approvalId === "approval-run-approval-1-turn-1"),
     );
     assert.equal(approve.params?.persist, "never");
   } finally {
@@ -172,6 +203,125 @@ async function exerciseRunListAndResume(): Promise<void> {
   await waitFor("logged resume request", async () =>
     logEntry((entry) => entry.method === "agent.resume" && entry.params?.runId === "run-history-1"),
   );
+
+  await postChatMessage({
+    type: "submitTurn",
+    message: "integration resume follow up",
+    mode: "edit",
+  });
+
+  await waitFor("inline approval for resumed run follow-up", async () => {
+    const current = await chatState();
+    return current.approval?.approvalId === "approval-run-history-1-turn-3" ? current : undefined;
+  });
+  await chatProbe({ type: "click", selector: ".approval-action.approve" });
+
+  const continued = await waitFor("completed resumed run follow-up turn", async () => {
+    const current = await chatState();
+    return current.submission.status === "completed" &&
+      current.submission.runId === "run-history-1" &&
+      current.timeline.items.some((item) => item.turnId === "turn-3" && item.type === "run.completed")
+      ? current
+      : undefined;
+  });
+  assert.equal(continued.runs.selectedRunId, "run-history-1");
+
+  const resumedSendTurn = await waitFor("logged resumed sendTurn with runId", async () =>
+    logEntry(
+      (entry) =>
+        entry.method === "agent.sendTurn" &&
+        entry.params?.message === "integration resume follow up" &&
+        entry.params?.runId === "run-history-1",
+    ),
+  );
+  assert.equal(resumedSendTurn.params?.mode, "edit");
+
+  await chatProbe({ type: "click", selector: "#show-runs" });
+  const runsProbe = await waitFor("runs visible after conversation back", async () => {
+    const snapshot = await chatProbeSnapshot();
+    return snapshot.conversationActive === false && snapshot.runIds.includes("run-history-1")
+      ? snapshot
+      : undefined;
+  });
+  assert.equal(runsProbe.runsHidden, false);
+
+  await chatProbe({ type: "click", selector: '.run-entry-row[data-run-id="run-history-1"] .run-delete' });
+  const deleteProbe = await chatProbeSnapshot();
+  assert.equal(deleteProbe.runDeleteConfirmVisible, true);
+
+  await chatProbe({ type: "click", selector: '.run-entry-row[data-run-id="run-history-1"] .confirm-delete' });
+
+  const deleted = await waitFor("run deleted through inline webview confirmation", async () => {
+    const current = await chatState();
+    return current.runs.status === "ready" && current.runs.runs.every((run) => run.runId !== "run-history-1")
+      ? current
+      : undefined;
+  });
+  assert.equal(deleted.runs.selectedRunId, undefined);
+
+  await waitFor("logged delete run request", async () =>
+    logEntry((entry) => entry.method === "agent.deleteRun" && entry.params?.runId === "run-history-1"),
+  );
+}
+
+async function exerciseChatKeyboardSubmit(): Promise<void> {
+  await postChatMessage({
+    type: "showRuns",
+  });
+  await chatProbe({ type: "setPrompt", value: "keyboard integration turn" });
+
+  const shifted = await chatProbe({ type: "keydown", key: "Enter", shiftKey: true });
+  assert.equal(shifted.defaultPrevented, false);
+
+  const submitted = await chatProbe({ type: "keydown", key: "Enter" });
+  assert.equal(submitted.defaultPrevented, true);
+
+  const sentTurn = await waitFor("logged keyboard sendTurn", async () =>
+    logEntry((entry) => entry.method === "agent.sendTurn" && entry.params?.message === "keyboard integration turn"),
+  );
+  assert.equal(sentTurn.params?.message, "keyboard integration turn");
+  const turnStarted = await waitFor("logged keyboard turn start", async () =>
+    logEntry(
+      (entry) =>
+        entry.kind === "event" &&
+        entry.event?.type === "turn.started" &&
+        entry.event.payload?.userTask === "keyboard integration turn",
+    ),
+  );
+  const sentRunId = turnStarted.event?.runId;
+  const sentTurnId = turnStarted.event?.turnId;
+  assert.ok(typeof sentRunId === "string");
+  assert.ok(typeof sentTurnId === "string");
+  const approvalRequired = await waitFor("logged keyboard approval request", async () =>
+    logEntry(
+      (entry) =>
+        entry.kind === "event" &&
+        entry.event?.type === "tool.approvalRequired" &&
+        entry.event.runId === sentRunId &&
+        entry.event.turnId === sentTurnId &&
+        typeof entry.event.payload?.approvalId === "string",
+    ),
+  );
+  const expectedApprovalId = approvalRequired.event?.payload?.approvalId;
+  assert.ok(typeof expectedApprovalId === "string");
+
+  await waitFor("keyboard-submitted turn waiting for approval", async () => {
+    const current = await chatState();
+    return current.approval?.approvalId === expectedApprovalId ? current : undefined;
+  });
+  await chatProbe({ type: "click", selector: ".approval-action.approve" });
+
+  await waitFor("keyboard-submitted turn completed", async () => {
+    const current = await chatState();
+    return current.submission.status === "completed" &&
+      current.timeline.items.some((item) => item.type === "run.completed")
+      ? current
+      : undefined;
+  });
+
+  await waitFor("logged keyboard turn approval", async () =>
+    logEntry((entry) => entry.method === "agent.approve" && entry.params?.approvalId === expectedApprovalId),
+  );
 }
 
 async function postChatMessage(message: unknown): Promise<void> {
@@ -180,6 +330,15 @@ async function postChatMessage(message: unknown): Promise<void> {
 
 async function chatState(): Promise<ChatState> {
   return await vscode.commands.executeCommand<ChatState>(TEST_CHAT_STATE_COMMAND);
+}
+
+async function chatProbe(action: Record<string, unknown>): Promise<WebviewProbeSnapshotResult> {
+  return await vscode.commands.executeCommand<WebviewProbeSnapshotResult>(TEST_CHAT_PROBE_COMMAND, action);
+}
+
+async function chatProbeSnapshot(): Promise<WebviewProbeSnapshot> {
+  const result = await chatProbe({ type: "snapshot" });
+  return result.snapshot;
 }
 
 async function waitFor<T>(
@@ -266,6 +425,7 @@ interface ChatState {
     readonly latestRunId?: string;
     readonly items: ReadonlyArray<{
       readonly type: string;
+      readonly turnId?: string;
     }>;
   };
   readonly submission: {
@@ -283,9 +443,13 @@ interface ChatState {
   readonly context: {
     readonly status: string;
   };
+  readonly approval?: {
+    readonly approvalId: string;
+  };
 }
 
 interface RpcFixtureLogEntry {
+  readonly kind?: string;
   readonly method?: string;
   readonly params?: {
     readonly message?: string;
@@ -296,4 +460,41 @@ interface RpcFixtureLogEntry {
     readonly reason?: string;
     readonly attachments?: ReadonlyArray<Record<string, unknown>>;
   };
+  readonly event?: {
+    readonly type?: string;
+    readonly runId?: string;
+    readonly turnId?: string;
+    readonly payload?: {
+      readonly approvalId?: string;
+      readonly userTask?: string;
+    };
+  };
+}
+
+interface WebviewProbeSnapshotResult {
+  readonly clicked?: boolean;
+  readonly defaultPrevented?: boolean;
+  readonly value?: string;
+  readonly snapshot: WebviewProbeSnapshot;
+}
+
+interface WebviewProbeSnapshot {
+  readonly conversationActive: boolean;
+  readonly statusHidden: boolean;
+  readonly runsHidden: boolean;
+  readonly contextHidden: boolean;
+  readonly approvalVisible: boolean;
+  readonly approvalTitle: string;
+  readonly approvalActionLabels: readonly string[];
+  readonly runDeleteConfirmVisible: boolean;
+  readonly runIds: readonly string[];
+  readonly visibleItemTitles: readonly string[];
+  readonly visibleItemTypes: readonly string[];
+  readonly workLogVisible: boolean;
+  readonly workLogOpen: boolean;
+  readonly workLogTitle: string;
+  readonly workLogTypes: readonly string[];
+  readonly promptValue: string;
+  readonly sendDisabled: boolean;
+  readonly cancelDisabled: boolean;
 }

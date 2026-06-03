@@ -135,8 +135,8 @@ function handleSendTurn(request) {
       return;
     }
 
-    const approvalId = "approval-approval-1";
-    const toolCallId = "tool-approval-1";
+    const approvalId = `approval-${encodeIdSegment(runId)}-${encodeIdSegment(turnId)}`;
+    const toolCallId = `tool-${encodeIdSegment(runId)}-${encodeIdSegment(turnId)}`;
     pendingApprovals.set(approvalId, { runId, turnId, toolCallId });
     emitEvent(runId, turnId, "tool.approvalRequired", {
       approvalId,
@@ -414,4 +414,8 @@ function log(entry) {
 
 function record(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+
+function encodeIdSegment(value) {
+  return encodeURIComponent(String(value));
 }
