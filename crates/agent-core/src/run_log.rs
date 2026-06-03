@@ -792,7 +792,6 @@ fn append_run_text_file(
         })?;
     }
     let mut file = OpenOptions::new()
-        .write(true)
         .create(true)
         .append(true)
         .open(&path)
