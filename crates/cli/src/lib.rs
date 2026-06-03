@@ -845,7 +845,8 @@ fn turn_loop_error_json_rpc_code(error: &AgentTurnLoopError) -> i64 {
         | AgentTurnLoopError::UnsupportedTool { .. }
         | AgentTurnLoopError::Serialization(_) => RPC_TOOL_EXECUTION_FAILED,
         AgentTurnLoopError::InvalidToolArguments { .. }
-        | AgentTurnLoopError::InvalidToolArgumentSchema { .. } => RPC_INVALID_TOOL_ARGUMENTS,
+        | AgentTurnLoopError::InvalidToolArgumentSchema { .. }
+        | AgentTurnLoopError::InvalidToolPayloadReference { .. } => RPC_INVALID_TOOL_ARGUMENTS,
         AgentTurnLoopError::Canceled { .. }
         | AgentTurnLoopError::ApprovalCanceled { .. }
         | AgentTurnLoopError::ApprovalExpired { .. } => RPC_RUN_CANCELED,
@@ -1569,11 +1570,11 @@ mod tests {
         },
         run_log::{REDACTED_VALUE, RunLogStore},
         test_helpers::TestWorkspace,
-        turn_loop::TurnProviderEvent,
+        turn_loop::{AgentTurnLoopError, TurnProviderEvent},
     };
     use prole_coder_agent_rpc::{
-        FimPreviewParams, PROTOCOL_VERSION, RPC_APPROVAL_DENIED, RPC_PROVIDER_ERROR,
-        RPC_TOOL_EXECUTION_FAILED, RpcTurnProviderFactory,
+        FimPreviewParams, PROTOCOL_VERSION, RPC_APPROVAL_DENIED, RPC_INVALID_TOOL_ARGUMENTS,
+        RPC_PROVIDER_ERROR, RPC_TOOL_EXECUTION_FAILED, RpcTurnProviderFactory,
     };
     use serde_json::{Value, json};
     use std::{
@@ -1586,7 +1587,7 @@ mod tests {
     use super::{
         CliCommand, CliRpcProviderFactory, FixtureKind, ProviderKind, RunCommand, ThinkingKind,
         deepseek_chat_stream_to_turn_provider_stream, deepseek_configuration_rpc_error, run_cli,
-        run_cli_with_input,
+        run_cli_with_input, turn_loop_error_json_rpc_code,
     };
 
     #[test]
@@ -2107,6 +2108,20 @@ mod tests {
         assert_eq!(data["configurationError"], "missingApiKey");
         assert_eq!(data["recoverableAction"]["kind"], "configureDeepSeekApiKey");
         assert_eq!(data["recoverableAction"]["label"], "Configure API Key");
+    }
+
+    #[test]
+    fn invalid_tool_payload_ref_maps_to_invalid_tool_arguments_rpc_code() {
+        let error = AgentTurnLoopError::InvalidToolPayloadReference {
+            tool_call_id: "call_1".to_owned(),
+            name: "apply_patch".to_owned(),
+            detail: "payloadRef.sha256 does not match payload file".to_owned(),
+        };
+
+        assert_eq!(
+            turn_loop_error_json_rpc_code(&error),
+            RPC_INVALID_TOOL_ARGUMENTS
+        );
     }
 
     type InteractiveCliRpc = (
