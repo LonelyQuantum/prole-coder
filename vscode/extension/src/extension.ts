@@ -225,6 +225,9 @@ function registerTestCommands(context: vscode.ExtensionContext, chatView: ProleC
       chatView.testHandleWebviewMessage(message),
     ),
     vscode.commands.registerCommand("prole-coder.test.chatState", () => chatView.testState()),
+    vscode.commands.registerCommand("prole-coder.test.chatProbe", (action: unknown) =>
+      chatView.testProbeWebview(action),
+    ),
   );
 }
 

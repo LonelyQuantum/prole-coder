@@ -113,7 +113,22 @@ type ExtensionToWebviewMessage =
   | SubmissionWebviewMessage
   | RunsWebviewMessage
   | ContextWebviewMessage
-  | ApprovalWebviewMessage;
+  | ApprovalWebviewMessage
+  | TestProbeWebviewMessage;
+
+interface TestProbeWebviewMessage {
+  readonly type: "testProbe";
+  readonly id: string;
+  readonly action: unknown;
+}
+
+interface TestProbeResultWebviewMessage {
+  readonly type: "testProbeResult";
+  readonly id: string;
+  readonly ok: boolean;
+  readonly result?: unknown;
+  readonly error?: string;
+}
 
 type ChatSubmissionStatus = "idle" | "sending" | "running" | "completed" | "failed" | "canceled";
 type TerminalSubmissionStatus = Extract<ChatSubmissionStatus, "completed" | "failed" | "canceled">;
@@ -154,6 +169,12 @@ interface PendingApprovalState {
   resolve(decision: ApprovalPromptDecision): void;
 }
 
+interface PendingTestProbe {
+  readonly timeout: ReturnType<typeof setTimeout>;
+  resolve(result: unknown): void;
+  reject(error: Error): void;
+}
+
 export class ProleChatViewProvider implements vscode.WebviewViewProvider, DisposableLike {
   private readonly timeline = new ChatEventTimeline();
   private readonly terminalRuns = new Map<string, TerminalRunState>();
@@ -163,6 +184,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   private contextViz: ContextVizSnapshot = emptyContextViz();
   private activeConversationRunId: string | undefined;
   private pendingApproval: PendingApprovalState | undefined;
+  private readonly pendingTestProbes = new Map<string, PendingTestProbe>();
   private rpcSubscription: DisposableLike | undefined;
   private viewMessageSubscription: DisposableLike | undefined;
   private view: vscode.WebviewView | undefined;
@@ -242,12 +264,39 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     };
   }
 
+  async testProbeWebview(action: unknown): Promise<unknown> {
+    if (this.view === undefined) {
+      throw new Error("chat webview is not available");
+    }
+
+    const id = randomUUID();
+    const message: TestProbeWebviewMessage = {
+      type: "testProbe",
+      id,
+      action,
+    };
+
+    return await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingTestProbes.delete(id);
+        reject(new Error(`timed out waiting for chat webview test probe ${id}`));
+      }, 2000);
+      this.pendingTestProbes.set(id, { timeout, resolve, reject });
+      void this.view?.webview.postMessage(message).then((delivered) => {
+        if (!delivered) {
+          this.rejectTestProbe(id, new Error("chat webview did not accept the test probe message"));
+        }
+      });
+    });
+  }
+
   isIdle(): boolean {
     return !this.submission.busy;
   }
 
   dispose(): void {
     this.rejectPendingApproval("approval view disposed");
+    this.rejectPendingTestProbes("chat view disposed");
     this.rpcSubscription?.dispose();
     this.viewMessageSubscription?.dispose();
     this.rpcSubscription = undefined;
@@ -268,6 +317,12 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   }
 
   private async handleWebviewMessage(message: unknown): Promise<void> {
+    const testProbeResult = testProbeResultFromMessage(message);
+    if (testProbeResult !== undefined) {
+      this.resolveTestProbe(testProbeResult);
+      return;
+    }
+
     if (isRefreshRunsMessage(message)) {
       await this.refreshRuns();
       return;
@@ -685,6 +740,40 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       approvalId: pending.request.approvalId,
       reason,
     });
+  }
+
+  private resolveTestProbe(message: TestProbeResultWebviewMessage): void {
+    const pending = this.pendingTestProbes.get(message.id);
+    if (pending === undefined) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingTestProbes.delete(message.id);
+    if (message.ok) {
+      pending.resolve(message.result);
+    } else {
+      pending.reject(new Error(message.error ?? "chat webview test probe failed"));
+    }
+  }
+
+  private rejectTestProbe(id: string, error: Error): void {
+    const pending = this.pendingTestProbes.get(id);
+    if (pending === undefined) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingTestProbes.delete(id);
+    pending.reject(error);
+  }
+
+  private rejectPendingTestProbes(reason: string): void {
+    for (const [id, pending] of this.pendingTestProbes) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error(reason));
+      this.pendingTestProbes.delete(id);
+    }
   }
 
   private redact(message: string): string {
@@ -1616,6 +1705,7 @@ function renderChatViewHtml(
     const initialApproval = ${initialApproval};
     const runModes = ${safeScriptJson(CHAT_RUN_MODES)};
     const defaultMode = ${safeScriptJson(DEFAULT_CHAT_MODE)};
+    const testProbeEnabled = ${safeScriptJson(process.env["PROLE_CODER_VSCODE_TEST"] === "1")};
     const WORK_LOG_RENDER_LIMIT = 80;
     const WORK_LOG_STATUS_IGNORED_TYPES = new Set(["run.completed"]);
     const vscodeApi = acquireVsCodeApi();
@@ -1658,6 +1748,10 @@ function renderChatViewHtml(
 
     window.addEventListener("message", (event) => {
       const message = event.data;
+      if (message && message.type === "testProbe") {
+        handleTestProbe(message);
+        return;
+      }
       if (message && message.type === "snapshot") {
         render(message.snapshot);
       }
@@ -1809,6 +1903,7 @@ function renderChatViewHtml(
       button.className = "run-entry " + status + (run.runId === selectedRunId ? " selected" : "");
       button.disabled = disabled || confirmingDelete;
       button.title = runId;
+      row.dataset.runId = runId;
       button.addEventListener("click", () => {
         if (runId.length > 0) {
           vscodeApi.postMessage({ type: "resumeRun", runId });
@@ -1833,6 +1928,7 @@ function renderChatViewHtml(
       deleteButton.disabled = disabled;
       deleteButton.title = "Delete run";
       deleteButton.setAttribute("aria-label", "Delete run");
+      deleteButton.dataset.runId = runId;
       deleteButton.textContent = confirmingDelete ? "-" : "x";
       deleteButton.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -2586,6 +2682,112 @@ function renderChatViewHtml(
 
       return article;
     }
+
+    function handleTestProbe(message) {
+      if (testProbeEnabled !== true) {
+        return;
+      }
+
+      const id = typeof message.id === "string" ? message.id : "";
+      if (!id) {
+        return;
+      }
+
+      try {
+        vscodeApi.postMessage({
+          type: "testProbeResult",
+          id,
+          ok: true,
+          result: runTestProbe(message.action),
+        });
+      } catch (error) {
+        vscodeApi.postMessage({
+          type: "testProbeResult",
+          id,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    function runTestProbe(action) {
+      const type = action && typeof action === "object" && typeof action.type === "string" ? action.type : "snapshot";
+      if (type === "click") {
+        const selector = typeof action.selector === "string" ? action.selector : "";
+        const element = selector ? document.querySelector(selector) : undefined;
+        if (element && typeof element.click === "function") {
+          element.click();
+          return { clicked: true, snapshot: collectTestSnapshot() };
+        }
+        return { clicked: false, snapshot: collectTestSnapshot() };
+      }
+
+      if (type === "setPrompt") {
+        promptInput.value = typeof action.value === "string" ? action.value : "";
+        promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+        return { value: promptInput.value, snapshot: collectTestSnapshot() };
+      }
+
+      if (type === "keydown") {
+        const event = new KeyboardEvent("keydown", {
+          key: typeof action.key === "string" ? action.key : "Enter",
+          shiftKey: action.shiftKey === true,
+          bubbles: true,
+          cancelable: true,
+        });
+        promptInput.dispatchEvent(event);
+        return {
+          defaultPrevented: event.defaultPrevented,
+          snapshot: collectTestSnapshot(),
+        };
+      }
+
+      return { snapshot: collectTestSnapshot() };
+    }
+
+    function collectTestSnapshot() {
+      const workLog = document.querySelector(".item.work-log");
+      const workLogSummary = workLog ? workLog.querySelector("summary .title") : undefined;
+      return {
+        conversationActive: shellRoot.classList.contains("conversation-active"),
+        statusHidden: isDisplayNone(document.querySelector(".status")),
+        runsHidden: isDisplayNone(document.getElementById("runs-section")),
+        contextHidden: isDisplayNone(document.querySelector(".context-viz")),
+        approvalVisible: approvalRoot.classList.contains("active"),
+        approvalTitle: textContent(".approval-title"),
+        approvalActionLabels: textContents(".approval-action"),
+        runDeleteConfirmVisible: document.querySelector(".run-delete-confirm") !== null,
+        runIds: textAttributes(".run-entry-row", "data-run-id"),
+        visibleItemTitles: textContents("#events > .item:not(.work-log) .title"),
+        visibleItemTypes: textContents("#events > .item:not(.work-log) .type"),
+        workLogVisible: workLog !== null,
+        workLogOpen: workLog && "open" in workLog ? workLog.open === true : false,
+        workLogTitle: workLogSummary ? workLogSummary.textContent || "" : "",
+        workLogTypes: textContents(".work-log-row-meta span:last-child"),
+        promptValue: promptInput.value,
+        sendDisabled: sendButton.disabled,
+        cancelDisabled: cancelButton.disabled,
+      };
+    }
+
+    function isDisplayNone(element) {
+      return !element || getComputedStyle(element).display === "none";
+    }
+
+    function textContent(selector) {
+      const element = document.querySelector(selector);
+      return element ? element.textContent || "" : "";
+    }
+
+    function textContents(selector) {
+      return Array.from(document.querySelectorAll(selector)).map((element) => element.textContent || "");
+    }
+
+    function textAttributes(selector, attribute) {
+      return Array.from(document.querySelectorAll(selector))
+        .map((element) => element.getAttribute(attribute) || "")
+        .filter((value) => value.length > 0);
+    }
   </script>
 </body>
 </html>`;
@@ -2706,6 +2908,26 @@ function isSelectDeepSeekModelMessage(message: unknown): boolean {
 
 function isShowRunsMessage(message: unknown): boolean {
   return isRecord(message) && message["type"] === "showRuns";
+}
+
+function testProbeResultFromMessage(message: unknown): TestProbeResultWebviewMessage | undefined {
+  if (!isRecord(message) || message["type"] !== "testProbeResult") {
+    return undefined;
+  }
+
+  const id = message["id"];
+  const ok = message["ok"];
+  if (typeof id !== "string" || typeof ok !== "boolean") {
+    return undefined;
+  }
+
+  return {
+    type: "testProbeResult",
+    id,
+    ok,
+    ...(message["result"] === undefined ? {} : { result: message["result"] }),
+    ...(typeof message["error"] === "string" ? { error: message["error"] } : {}),
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

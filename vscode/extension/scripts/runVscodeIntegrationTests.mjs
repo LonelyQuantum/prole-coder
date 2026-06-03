@@ -18,7 +18,7 @@ const extensionsPath = resolve(repoRoot, "target", `vscode-test-extensions-${pro
 
 delete process.env.ELECTRON_RUN_AS_NODE;
 process.env.PROLE_CODER_VSCODE_TEST = "1";
-process.env.PROLE_CODER_VSCODE_TEST_AUTO_APPROVE = "1";
+process.env.PROLE_CODER_VSCODE_TEST_AUTO_APPROVE = "0";
 process.env.PROLE_CODER_VSCODE_TEST_RPC_LOG = rpcFixtureLogPath;
 
 mkdirSync(dirname(settingsPath), { recursive: true });
