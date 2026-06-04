@@ -121,7 +121,7 @@ Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 
 - 配置界面依赖 Provider capability model；provider、model、预算、审批策略和 RPC 命令配置都不得保存 API Key。
 - P5-12 已完成：Sidebar Chat 复用 `agent.sendTurn.runId` 继续同一 run 多轮对话，支持 `agent.deleteRun` 删除 inactive run；tool/provider/request 等过程事件默认折叠，完整 payload 写入 `Output > ProleCoder`。
 - P5-13 已完成：provider 配置失败从前端字符串匹配升级为 RPC 结构化错误数据，缺少 DeepSeek API key 时返回 `E_PROVIDER_ERROR` 和 `data.recoverableAction`，供 VS Code/TUI 统一展示配置动作。
-- P5-14：持续 UX 测试与体验改进总项，用于真实插件试用后的 Runs、Key/Model、审批、Chat、Output 日志、上下文压缩和大 patch / 大文件工具参数问题回归；具体 P5-14a 到 P5-14f 子项见 `docs/phase-tasks.md`。
+- P5-14：持续 UX 测试与体验改进总项，用于真实插件试用后的 Runs、Key/Model/Settings、审批、Chat、Output 日志、上下文压缩和大 patch / 大文件工具参数问题回归；具体 P5-14a 到 P5-14f 子项见 `docs/phase-tasks.md`。
 - 真实 hunk 级 patch 审批首版限定 `apply_patch`，再扩展 Core/RPC 审批决策和 Run Log 记录。
 - FIM completion preview 依赖 Provider capability model，优先评估 VS Code 原生 inline completion 接入。
 - VSIX alpha / pre-release 交付已完成，`pnpm run vsix:alpha` 会生成可安装 pre-release VSIX 和 SHA-256 校验和；end-to-end 集成测试已通过本地 JSON-RPC fixture server 覆盖 Chat sendTurn、Cancel、Problems diagnostics、自动审批、Run List / resume。

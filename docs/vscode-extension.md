@@ -70,7 +70,7 @@ VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server
 {
   "prole-coder.rpc.autoStart": true,
   "prole-coder.rpc.command": "prole",
-  "prole-coder.rpc.args": ["rpc"],
+  "prole-coder.rpc.args": ["rpc", "--max-output-tokens", "65536"],
   "prole-coder.provider.model": "deepseek-v4-pro"
 }
 ```
@@ -80,9 +80,11 @@ VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server
 ```json
 {
   "prole-coder.rpc.command": "cargo",
-  "prole-coder.rpc.args": ["run", "-p", "prole-coder-cli", "--", "rpc"]
+  "prole-coder.rpc.args": ["run", "-p", "prole-coder-cli", "--", "rpc", "--max-output-tokens", "65536"]
 }
 ```
+
+这些设置可通过 Sidebar composer 的 Settings 按钮或命令面板 `ProleCoder: Open Settings` 打开；需要手动编辑 JSON 时使用 VS Code `Preferences: Open User Settings (JSON)`，也可以在测试 workspace 的 `.vscode/settings.json` 中写入 workspace 级配置。`prole-coder.rpc.args` 改动后需要重启 RPC server 或 reload Extension Development Host，已启动的子进程不会自动继承新参数。
 
 配置不保存 API Key。DeepSeek API Key 由插件命令写入 VS Code SecretStorage 的多 key 管理器，或由 CLI/RPC server 继续按既有规则从环境变量读取；Key 管理器展示 alias 与 masked key，支持添加 key+alias、选择 active key、改 alias 和删除指定 key。DeepSeek model ID 是非敏感配置，可通过 `prole-coder.provider.model` 或 Sidebar 的 Model 按钮选择。
 
@@ -116,7 +118,7 @@ Phase 3 P0 验收标准：
 - `tool.approvalRequired` 触发 Sidebar 内联审批卡片，approve/reject 能回传到 `agent.approve` / `agent.reject`。已完成真实 RPC pending queue 接入；`apply_patch` 支持 selected hunk 并通过 `agent.approve.hunks` 回传。
 - Sidebar Chat 能通过 `agent.listRuns` 展示最近 run，并用 `agent.resume` 回放历史事件。已完成首版 Run List / resume 接入。
 - Sidebar Chat 能把 `context.built` 渲染为 Context Capsule 面板，展示 token 分段、来源和 manifest/cache/estimator metadata。已完成首版 Context Capsule 可视化。
-- `ProleCoder: Open Settings` 能打开 VS Code 设置，并显示 server capability、模型预算、审批策略、RPC command/state；扩展配置不保存 API Key，DeepSeek model ID 作为非敏感配置保存。
+- `ProleCoder: Open Settings` 和 Sidebar Settings 按钮能打开 VS Code 设置，并显示 server capability、模型预算、审批策略、RPC command/state；扩展配置不保存 API Key，DeepSeek model ID 作为非敏感配置保存。
 - Inline completion 首版通过 `agent.previewFim` 请求 RPC server 的 FIM preview，只有 server capability 明确标记 `supportsFim` 的模型会被使用。
 
 Phase 4 深度集成清单与 `docs/phase-tasks.md` 对齐；实现细节和验收命令以任务索引为准：

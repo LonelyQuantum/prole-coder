@@ -294,7 +294,7 @@ pub const BUILTIN_TOOLS: &[ToolDefinition] = &[
     ),
     ToolDefinition::new(
         ToolName::Shell,
-        "Execute a non-interactive shell command.",
+        "Execute a non-interactive shell command from the selected workspace-relative cwd; use cwd instead of embedding cd into command.",
         RiskLevel::Exec,
         ApprovalRequirement::Required,
         ToolImplementationStatus::ExecutorImplemented,

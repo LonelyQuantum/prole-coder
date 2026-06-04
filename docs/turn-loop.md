@@ -48,6 +48,7 @@ AgentTurnInput
 ```
 
 工具结果写入 run log 或进入下一轮 prompt 前会通过 `redacted_tool_result_value` 转成已脱敏 JSON。原始工具结果仍由工具执行层返回，便于即时诊断和后续 UI 展示，但 Turn Loop 的持久化与模型回传路径使用脱敏结果。
+Turn Loop 默认会向 provider 注入工具使用契约，要求所有工具路径保持 workspace-relative，并要求 `shell` 使用 `cwd` 参数切换工作目录，避免模型生成猜测的绝对路径或当前平台不支持的 shell 语法。Windows 构建中该契约会明确 shell 运行在 Windows PowerShell 5.1 下，不应使用 POSIX-only 路径或 PowerShell 7-only 的 `&&` / `||`。
 
 ## Run Log 事件
 
@@ -71,6 +72,8 @@ AgentTurnInput
 provider stream 中的 content delta 会立即写入 `assistant.delta`，payload 包含 `stream: true`。如果 provider 没有发送 content delta，Turn Loop 会在收到 `Completed` 后把完整 final content 作为一次 `assistant.delta` 写入。Provider-private `reasoning_content` delta 不写入 `assistant.delta`，只由 provider 聚合后放入 `Completed.reasoning_content`，供 `ReasoningContentStateMachine` 校验和下一轮 replay。
 
 `Completed.content` 是最终 assistant 消息文本的权威来源，用于 `run.completed.summary` 或 assistant tool-call replay。`assistant.delta` 是展示和 run log 增量事件，不反向推断最终文本；当 provider 已经发送过可见 content delta 时，Turn Loop 不会在 `Completed` 时重复写一份完整 `assistant.delta`。因此 reasoning delta 不进入用户可见 summary，tool call 前的可见文本如果存在，应由 provider 同时保留在最终 `Completed.content` 中。
+
+如果 `provider.completed.finishReason` 为 `length` 且没有 tool calls，Turn Loop 不会把空文本或截断文本当作 `run.completed.summary`；它会把截断 assistant 回合保留在内部消息历史中，并追加一次只要求最终工作总结的用户追问。只有后续 provider 以 `stop` 返回无工具调用的 final content 时才写入 `run.completed`。其他非 `stop` 的无工具最终响应会按 provider error 失败，避免 UI 展示“完成但没有总结”的假终态。
 
 DeepSeek streaming tool call delta 在 CLI provider wrapper 内通过 `ChatToolCallAccumulator` 拼装为完整 `ChatToolCall` 后才进入 `Completed.tool_calls`。Turn Loop 不直接处理 provider 私有 delta 形态，只要求 provider 在 `Completed` 中提供完整、可校验、可执行的工具调用列表。如果累计后的 `function.arguments` 不是合法 JSON，Turn Loop 会以 `E_INVALID_TOOL_ARGUMENTS` 失败，并把脱敏后的累计 arguments 写入当前 run 的 `diagnostics/invalid-tool-arguments-<sanitizedToolCallId>-<hash>.json`，同时在 `run.failed.diagnosticFile` 暴露该本地路径。
 
@@ -103,6 +106,7 @@ RPC active run 的 Run Log 使用 `SerializedRunLog`：后台 Turn Loop worker �
 - provider 请求 `apply_patch`，测试审批策略批准后修改文件、记录 `changedFiles`，并完成 run。
 - thinking disabled 配置下，provider 返回无 `reasoning_content` 的工具调用时，Turn Loop 会按非 reasoning replay 路径继续执行工具并完成 run。
 - provider 发送多个 streaming content delta，Turn Loop 写入多条 `assistant.delta`，并避免在 `Completed` 时重复写入完整文本。
+- provider 最终响应以 `finishReason=length` 且没有工具调用结束时，Turn Loop 会自动追问一次最终工作总结，并且只有后续 `stop` 响应才写入 `run.completed.summary`。
 - provider stream 或 shell 工具收到 `CancellationToken` 后，Turn Loop 写入 `run.canceled`，并返回 `E_RUN_CANCELED`。
 - Turn Loop 每次成功追加 Run Log 事件后，会把同一条事件交给 `TurnEventSink`，sink 看到的事件序列与本地 `events.jsonl` 一致。
 - `SerializedRunLog` 并发 append 测试验证多个 clone 同时写同一 run 时仍生成连续 `seq`。

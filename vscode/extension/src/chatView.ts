@@ -27,7 +27,7 @@ import {
 } from "./chatApprovals";
 import { CHAT_RUN_MODES, DEFAULT_CHAT_MODE, parseChatTurnSubmission, sendTurnParams } from "./chatInput";
 import { ChatEventTimeline, type ChatTimelineSnapshot } from "./chatEvents";
-import type { ApprovalPromptDecision, ApprovalPromptRequest } from "./commands";
+import { OPEN_SETTINGS_COMMAND, type ApprovalPromptDecision, type ApprovalPromptRequest } from "./commands";
 import {
   contextVizFromEvent,
   emptyContextViz,
@@ -367,6 +367,11 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
 
     if (isSelectDeepSeekModelMessage(message)) {
       await this.selectDeepSeekModel();
+      return;
+    }
+
+    if (isOpenSettingsMessage(message)) {
+      await this.openSettings();
       return;
     }
 
@@ -786,6 +791,10 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
 
   private async selectDeepSeekModel(): Promise<void> {
     await vscode.commands.executeCommand(SELECT_DEEPSEEK_MODEL_COMMAND);
+  }
+
+  private async openSettings(): Promise<void> {
+    await vscode.commands.executeCommand(OPEN_SETTINGS_COMMAND);
   }
 }
 
@@ -1691,6 +1700,7 @@ function renderChatViewHtml(
         <select id="mode" class="mode" aria-label="Run mode"></select>
         <button id="api-key" class="provider-action" type="button" title="Configure DeepSeek API key">API Key</button>
         <button id="model" class="provider-action" type="button" title="Select DeepSeek model">Model</button>
+        <button id="settings" class="provider-action" type="button" title="Open ProleCoder settings">Settings</button>
         <button id="send" class="send" type="submit">Send</button>
         <button id="cancel" class="cancel" type="button">Cancel</button>
         <div id="submission" class="submission" aria-live="polite"></div>
@@ -1725,6 +1735,7 @@ function renderChatViewHtml(
     const modeInput = document.getElementById("mode");
     const apiKeyButton = document.getElementById("api-key");
     const modelButton = document.getElementById("model");
+    const settingsButton = document.getElementById("settings");
     const sendButton = document.getElementById("send");
     const cancelButton = document.getElementById("cancel");
     const submissionRoot = document.getElementById("submission");
@@ -1783,6 +1794,10 @@ function renderChatViewHtml(
 
     modelButton.addEventListener("click", () => {
       vscodeApi.postMessage({ type: "selectDeepSeekModel" });
+    });
+
+    settingsButton.addEventListener("click", () => {
+      vscodeApi.postMessage({ type: "openSettings" });
     });
 
     cancelButton.addEventListener("click", () => {
@@ -2767,6 +2782,7 @@ function renderChatViewHtml(
         promptValue: promptInput.value,
         sendDisabled: sendButton.disabled,
         cancelDisabled: cancelButton.disabled,
+        providerActions: textContents(".provider-action"),
       };
     }
 
@@ -2904,6 +2920,10 @@ function isConfigureDeepSeekApiKeyMessage(message: unknown): boolean {
 
 function isSelectDeepSeekModelMessage(message: unknown): boolean {
   return isRecord(message) && message["type"] === "selectDeepSeekModel";
+}
+
+function isOpenSettingsMessage(message: unknown): boolean {
+  return isRecord(message) && message["type"] === "openSettings";
 }
 
 function isShowRunsMessage(message: unknown): boolean {

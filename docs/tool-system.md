@@ -193,6 +193,8 @@ pub struct ToolDefinition {
 - `cwd`：workspace-relative 工作目录，省略时使用 workspace root。
 - `timeoutMs`：超时时间。
 
+模型不应在 `command` 中 `cd` 到猜测的绝对路径；需要切换目录时使用 `cwd`，且 `cwd` 必须是 workspace-relative。Windows 上执行器使用 Windows PowerShell 5.1，并在启动脚本中把 PowerShell 层 stdout/stderr 设置为 UTF-8；模型不应使用 POSIX-only 路径或 PowerShell 7-only 的 `&&` / `||` 操作符。
+
 结果：
 
 - `exitCode`
@@ -305,7 +307,7 @@ fixture 中的 `tools` 被当作无序集合校验；测试会按工具名规整
 - `read_file`：只读取 workspace 内 UTF-8 文本文件，支持 1-based 行范围，并返回完整文件的 `sha256` 和 `sizeBytes`。
 - `search`：通过 `rg --json --fixed-strings` 搜索，默认排除 `.git/`、`.secrets/`、`.secret/`、`.env*`、`node_modules/` 和 `target/`。
 - `apply_patch`：应用受限 unified diff，要求 patch 实际文件集合与 `expectedFiles` 完全一致；执行时会先在内存中完成全部文件的 hunk 校验和 staging，再统一写盘，因此解析或 hunk mismatch 不会留下部分文件已修改的状态；成功后返回 reverse patch。Core 会从 unified diff 生成稳定 hunk id，RPC/VS Code 首版支持 selected hunk 审批；文件创建和删除如果只批准部分 hunk 会被拒绝，避免生成不可审计的半文件操作。大 patch 可以先分块追加到当前 run 的 `payloads/` 文件，再通过 `payloadRef` 引用；Turn Loop 会校验 `sha256` / `sizeBytes`，然后 materialize 为 `unifiedDiff` 进入同一条 schema、路径安全、审批和 hunk 边界链路。
-- `shell`：在 workspace 内执行非交互式命令，支持超时，执行前进行命令风险分类，返回 exit code、stdout、stderr 和耗时。
+- `shell`：在 workspace 内执行非交互式命令，支持 workspace-relative `cwd`、超时和命令风险分类，返回 exit code、stdout、stderr 和耗时；Windows PowerShell wrapper 会先设置 UTF-8 输出，避免 PowerShell 本地化错误信息在 run log / Output Channel 中乱码。
 - `git_status`：读取 `git status --short --branch` 或普通 `git status`。
 - `git_diff`：读取 unstaged 或 staged diff，支持限定 workspace-relative 路径。
 

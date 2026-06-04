@@ -644,6 +644,7 @@ name = "prole-coder-agent-core"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "base64",
  "futures-util",
  "ignore",
  "reqwest",

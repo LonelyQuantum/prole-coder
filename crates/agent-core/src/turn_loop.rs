@@ -46,6 +46,24 @@ const FINAL_RESPONSE_SUMMARY_INSTRUCTION: &str = concat!(
     "Mention what changed, important files, verification or tests, and any blockers. ",
     "Do not dump raw tool logs, JSON-RPC events, or intermediate provider/tool chatter; those details are recorded in ProleCoder Output."
 );
+const FINAL_RESPONSE_LENGTH_RETRY_INSTRUCTION: &str = concat!(
+    "Your previous response ended because the model reached its output length limit before a complete final user-facing summary. ",
+    "Do not call tools unless absolutely necessary. Return only a concise final work summary now, covering changes, important files, verification or tests, and blockers."
+);
+#[cfg(windows)]
+const TOOL_USAGE_INSTRUCTION: &str = concat!(
+    "Tool usage rules: all workspace paths must be workspace-relative unless a tool explicitly says otherwise. ",
+    "Do not invent absolute paths such as /home/user/project, and do not use cd to move into guessed directories. ",
+    "For the shell tool, put the target directory in the cwd argument, usually \".\" or a workspace-relative subdirectory, and keep command to the command itself. ",
+    "Shell commands run under Windows PowerShell 5.1, so do not use POSIX-only paths or PowerShell 7-only operators such as && and ||. Use separate tool calls or Windows PowerShell-compatible syntax."
+);
+#[cfg(not(windows))]
+const TOOL_USAGE_INSTRUCTION: &str = concat!(
+    "Tool usage rules: all workspace paths must be workspace-relative unless a tool explicitly says otherwise. ",
+    "Do not invent absolute paths such as /home/user/project, and do not use cd to move into guessed directories. ",
+    "For the shell tool, put the target directory in the cwd argument, usually \".\" or a workspace-relative subdirectory, and keep command to the command itself. ",
+    "Shell commands run under POSIX sh from the selected cwd."
+);
 
 #[derive(Debug)]
 pub struct AgentTurnLoop<P, A> {
@@ -236,6 +254,17 @@ where
                 return Err(AgentTurnLoopError::MissingAssistantReasoningContent);
             }
 
+            if response.completion.finish_reason == TurnProviderFinishReason::Length {
+                if response.tool_calls.is_empty() {
+                    push_final_response_retry_messages(&mut messages, &response);
+                    continue;
+                }
+
+                return Err(AgentTurnLoopError::Provider(TurnProviderError::new(
+                    "provider response reached the output length limit before tool calls completed",
+                )));
+            }
+
             if let Some(content) = response
                 .content
                 .as_deref()
@@ -255,6 +284,14 @@ where
             }
 
             if response.tool_calls.is_empty() {
+                if response.completion.finish_reason != TurnProviderFinishReason::Stop {
+                    return Err(AgentTurnLoopError::Provider(TurnProviderError::new(
+                        format!(
+                            "provider finished with `{}` before a final assistant summary",
+                            turn_provider_finish_reason_label(response.completion.finish_reason)
+                        ),
+                    )));
+                }
                 let final_message = response.content.unwrap_or_default();
                 append_turn_event(
                     run_log,
@@ -430,6 +467,10 @@ where
                 "stable workspace manifest summary",
             ));
         }
+        builder.add_item(ContextItem::project_rules(
+            TOOL_USAGE_INSTRUCTION,
+            "default tool usage contract",
+        ));
         builder.add_item(ContextItem::project_rules(
             FINAL_RESPONSE_SUMMARY_INSTRUCTION,
             "default final response summary contract",
@@ -1040,6 +1081,30 @@ where
         Some(turn_id.to_owned()),
         payload,
     )
+}
+
+fn push_final_response_retry_messages(
+    messages: &mut Vec<ChatMessage>,
+    response: &TurnProviderResponse,
+) {
+    if let Some(content) = response
+        .content
+        .as_deref()
+        .filter(|content| !content.trim().is_empty())
+    {
+        messages.push(ChatMessage::assistant(content.to_owned()));
+    }
+    messages.push(ChatMessage::user(FINAL_RESPONSE_LENGTH_RETRY_INSTRUCTION));
+}
+
+fn turn_provider_finish_reason_label(reason: TurnProviderFinishReason) -> &'static str {
+    match reason {
+        TurnProviderFinishReason::Stop => "stop",
+        TurnProviderFinishReason::Length => "length",
+        TurnProviderFinishReason::ToolCalls => "tool_calls",
+        TurnProviderFinishReason::ContentFilter => "content_filter",
+        TurnProviderFinishReason::Error => "error",
+    }
 }
 
 fn attachment_path(
@@ -2653,6 +2718,67 @@ mod tests {
             .expect("provider prompt should include context");
         assert!(prompt.contains("final assistant message"));
         assert!(prompt.contains("Do not dump raw tool logs"));
+        assert!(prompt.contains("Tool usage rules"));
+        assert!(prompt.contains("cwd argument"));
+        assert!(prompt.contains("do not use cd"));
+        #[cfg(windows)]
+        assert!(prompt.contains("Windows PowerShell 5.1"));
+        #[cfg(not(windows))]
+        assert!(prompt.contains("POSIX sh"));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_retries_length_finished_final_response_until_summary() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_length_final_retry")
+            .expect("run should be created");
+        let length_response = TurnProviderResponse {
+            content: None,
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            completion: TurnProviderCompletion::fixture(TurnProviderFinishReason::Length),
+        };
+        let provider = ScriptedProvider::new(vec![
+            length_response,
+            TurnProviderResponse::final_text("Final work summary."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Finish the task"), &mut run)
+            .await
+            .expect("length-truncated final response should be retried");
+
+        assert_eq!(outcome.final_message, "Final work summary.");
+        assert_eq!(outcome.iterations, 2);
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+        assert_eq!(loop_runner.provider.requests[1].messages.len(), 2);
+        let retry_prompt = loop_runner.provider.requests[1]
+            .messages
+            .last()
+            .and_then(|message| message.content.as_deref())
+            .expect("retry request should include a user instruction");
+        assert!(retry_prompt.contains("output length limit"));
+        assert!(retry_prompt.contains("Return only a concise final work summary"));
+
+        let events = store
+            .load_run("run_turn_length_final_retry")
+            .expect("events should load");
+        let finish_reasons = events
+            .iter()
+            .filter(|event| event.event_type == "provider.completed")
+            .map(|event| event.payload["finishReason"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(finish_reasons, vec![json!("length"), json!("stop")]);
+        let completed = events
+            .iter()
+            .filter(|event| event.event_type == "run.completed")
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].payload["summary"], "Final work summary.");
     }
 
     #[tokio::test]

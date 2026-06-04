@@ -714,7 +714,7 @@ extension.ts
 - `ProleCoder: Open Chat` 优先打开 VS Code 原生 Chat 并填入 `@prole`，用户无需手动拖动 Activity Bar view 到右侧。
 - 原生 Chat 和 Sidebar Chat 都通过真实 `agent.sendTurn` 驱动回合，并继续复用 Problems diagnostics、审批回传、Cancel、Run Log 和 Context Capsule。
 - 连续对话会自动生成可审计、受限长度的上下文压缩 attachment；不会在 UI 文案里要求用户手动重开对话来延续上下文。
-- 主审批保持简单并默认在 Sidebar 内联卡片中完成；Sidebar composer 提供 Key/Model 直接入口，过程事件默认折叠，完整事件和错误诊断可在 `Output > ProleCoder` 查看。
+- 主审批保持简单并默认在 Sidebar 内联卡片中完成；Sidebar composer 提供 Key/Model/Settings 直接入口，过程事件默认折叠，完整事件和错误诊断可在 `Output > ProleCoder` 查看。
 - `docs/phase-tasks.md` 的 Phase 5 仍有 P5-14 子项未完成，README 不能把 Phase 5 表述为整阶段完成；G4 自动 commit / push / create PR 仍是后续增强。
 
 ### Phase 6：TUI 与生态扩展

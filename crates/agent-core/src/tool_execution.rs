@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    ffi::OsStr,
     fs, io,
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -843,9 +844,32 @@ fn run_shell_command(
 ) -> Result<CommandOutput, ToolExecutionError> {
     #[cfg(windows)]
     {
+        let user_command = powershell_single_quoted_literal(command);
+        let script = format!(
+            concat!(
+                "$utf8 = New-Object System.Text.UTF8Encoding $false; ",
+                "[Console]::InputEncoding = $utf8; ",
+                "[Console]::OutputEncoding = $utf8; ",
+                "$OutputEncoding = $utf8; ",
+                "$ErrorActionPreference = 'Stop'; ",
+                "$ProgressPreference = 'SilentlyContinue'; ",
+                "try {{ Invoke-Expression -Command {user_command}; $proleSuccess = $? }} ",
+                "catch {{ [Console]::Error.WriteLine($_.ToString()); exit 1 }}; ",
+                "$proleSuccess = $?; ",
+                "if ($global:LASTEXITCODE -ne $null) {{ exit $global:LASTEXITCODE }}; ",
+                "if (-not $proleSuccess) {{ exit 1 }}"
+            ),
+            user_command = user_command
+        );
+        let encoded_script = encode_powershell_command(&script);
         run_command(
             "powershell",
-            ["-NoProfile", "-NonInteractive", "-Command", command],
+            vec![
+                "-NoProfile".to_owned(),
+                "-NonInteractive".to_owned(),
+                "-EncodedCommand".to_owned(),
+                encoded_script,
+            ],
             cwd,
             timeout,
             cancellation_token,
@@ -858,13 +882,43 @@ fn run_shell_command(
     }
 }
 
-fn run_command<'a>(
+#[cfg(windows)]
+fn powershell_single_quoted_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('\'');
+    for character in value.chars() {
+        if character == '\'' {
+            escaped.push_str("''");
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped.push('\'');
+    escaped
+}
+
+#[cfg(windows)]
+fn encode_powershell_command(script: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let mut bytes = Vec::with_capacity(script.len() * 2);
+    for code_unit in script.encode_utf16() {
+        bytes.extend_from_slice(&code_unit.to_le_bytes());
+    }
+    STANDARD.encode(bytes)
+}
+
+fn run_command<I, S>(
     program: &str,
-    args: impl IntoIterator<Item = &'a str>,
+    args: I,
     cwd: &Path,
     timeout: Duration,
     cancellation_token: &CancellationToken,
-) -> Result<CommandOutput, ToolExecutionError> {
+) -> Result<CommandOutput, ToolExecutionError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     check_canceled(cancellation_token, program)?;
     let start = Instant::now();
     let mut command = Command::new(program);
@@ -1988,6 +2042,52 @@ mod tests {
 
         assert_eq!(result.status, ToolStatus::Ok);
         assert!(result.stdout.contains("hello"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_decodes_windows_powershell_stderr_as_utf8() {
+        let workspace = TestWorkspace::new("tool-execution");
+        let tools = WorkspaceToolExecutor::new(workspace.path()).expect("workspace should open");
+
+        let result = tools
+            .shell(ShellArgs {
+                command: "[Console]::Error.WriteLine('错误信息'); exit 1".to_owned(),
+                cwd: None,
+                timeout_ms: Some(10_000),
+            })
+            .expect("shell should return failed command output");
+
+        assert_eq!(result.status, ToolStatus::Failed);
+        assert!(
+            result.stderr.contains("错误信息"),
+            "stderr was {:?}",
+            result.stderr
+        );
+        assert!(!result.stderr.contains('\u{fffd}'));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_decodes_windows_powershell_parser_errors_as_utf8() {
+        let workspace = TestWorkspace::new("tool-execution");
+        let tools = WorkspaceToolExecutor::new(workspace.path()).expect("workspace should open");
+
+        let result = tools
+            .shell(ShellArgs {
+                command: "cd /home/user/ledger && npm test".to_owned(),
+                cwd: Some(".".to_owned()),
+                timeout_ms: Some(10_000),
+            })
+            .expect("shell should return parser error output");
+
+        assert_eq!(result.status, ToolStatus::Failed);
+        assert!(
+            result.stderr.contains("&&"),
+            "stderr was {:?}",
+            result.stderr
+        );
+        assert!(!result.stderr.contains('\u{fffd}'));
     }
 
     #[test]

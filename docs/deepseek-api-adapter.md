@@ -90,7 +90,7 @@ crates/agent-core/src/provider/deepseek_api.rs
 
 核心类型：
 
-- `DeepSeekApiConfig`：base URL、模型、超时和 API Key。
+- `DeepSeekApiConfig`：base URL、模型、超时、HTTP send retry 次数和 API Key。
 - `DeepSeekApiAdapter`：持有 `reqwest::Client`，负责发送 HTTP 请求。
 - `ChatCompletionRequest`：DeepSeek chat completion 请求体。
 - `ChatCompletionResponse`：非流式响应。
@@ -153,7 +153,9 @@ adapter 使用显式错误枚举：
 - DeepSeek 返回非 2xx 状态。
 - JSON 响应或 SSE data 解析失败。
 
-HTTP client 启用 reqwest `system-proxy`，让 CLI、RPC server 和 VS Code 插件启动的子进程都尽量复用系统代理配置。发送失败时错误消息会保留 timeout/connect/request/body/decode 等分类和底层 source chain；如果 source 中包含带用户名密码的 URL，会先脱敏。非 2xx 响应保留 HTTP status 和响应 body，便于上层生成用户可读错误。API Key 不进入错误消息。
+HTTP client 默认启用 reqwest `system-proxy`，让 CLI、RPC server 和 VS Code 插件启动的子进程都尽量复用系统代理配置。发送失败时错误消息会保留 timeout/connect/request/body/decode 等分类和底层 source chain；如果 source 中包含带用户名密码的 URL，会先脱敏。非 2xx 响应保留 HTTP status 和响应 body，便于上层生成用户可读错误。API Key 不进入错误消息。
+
+DeepSeek adapter 会对 `send().await` 阶段的 transient timeout/connect/request 错误做最多 3 次发送尝试，用于缓解 Windows 本机软件或代理偶发中止已建立连接时的 `os error 10053`。重试只发生在还没有拿到 HTTP response 的发送阶段；HTTP 非 2xx、JSON 解析错误、SSE 已建立后的中途断流不会自动重试，避免重复消费已开始的模型响应或掩盖真实 API 错误。测试 fixture 可通过 `DeepSeekApiConfig::without_system_proxy()` 禁用系统代理，真实 CLI/RPC 默认仍使用 system-proxy。
 
 ## reasoning_content 规则
 

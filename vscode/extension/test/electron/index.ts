@@ -85,6 +85,7 @@ async function exerciseChatSendTurnDiagnosticsAndApproval(): Promise<void> {
     assert.equal(approvalProbe.approvalVisible, true);
     assert.equal(approvalProbe.workLogVisible, true);
     assert.equal(approvalProbe.workLogOpen, false);
+    assert.deepEqual(approvalProbe.providerActions, ["API Key", "Model", "Settings"]);
     assert.ok(approvalProbe.visibleItemTitles.includes("You"));
     assert.ok(!approvalProbe.visibleItemTitles.includes("Approval required: shell"));
 
@@ -497,4 +498,5 @@ interface WebviewProbeSnapshot {
   readonly promptValue: string;
   readonly sendDisabled: boolean;
   readonly cancelDisabled: boolean;
+  readonly providerActions: readonly string[];
 }
