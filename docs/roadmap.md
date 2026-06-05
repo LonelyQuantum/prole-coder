@@ -1,6 +1,6 @@
 # 路线图
 
-状态：草案，Phase 1 Agent Core MVP、合并主线前离线最终验收、Phase 2 的 1M Context Capsule 核心收敛、Phase 2e 展示型 demo 扩展、Phase 3 VS Code 插件核心与共享 RPC 事件队列和 Phase 4 VS Code 深度集成已完成；Phase 5 VS Code Codex-like UX 与开发工作流进行中。
+状态：草案，Phase 1 Agent Core MVP、合并主线前离线最终验收、Phase 2 的 1M Context Capsule 核心收敛、P2-5 展示型 demo 扩展、Phase 3 VS Code 插件核心与共享 RPC 事件队列和 Phase 4 VS Code 深度集成已完成；Phase 5 VS Code Codex-like UX 与开发工作流进行中。
 
 本文档把 README 中的大阶段拆成更可执行的优先级。README 保留项目入口和高层计划；这里记录跨模块的落地顺序、取舍和验收重点。具体任务的阶段、状态和来源统一登记在 `docs/phase-tasks.md`，阶段条目标记完成前应同步检查并更新该索引。
 
@@ -105,12 +105,12 @@ P0 不追求：
 
 目标：让 VS Code 插件成为 Agent Core 的薄前端，而不是第二套 Agent。
 
-Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 深度集成任务；Phase 5 仍在进行中。P5-1 到 P5-13 已完成原生 Chat 入口、简化审批、自动上下文压缩、UX 验收、Output Channel 错误诊断、插件内多 API key/model 配置、统一 redaction/错误恢复、只读 Git context、commit message 写入 SCM inputBox、PR markdown 生成、Sidebar 连续会话、Run 删除和折叠事件 UX、结构化 provider 配置错误码与恢复动作；P5-14 作为持续 UX 测试与体验改进总项，子项状态以 `docs/phase-tasks.md` 为准。Phase 5 全部完成后再进入 Phase 6，与生态扩展一起推进。Marketplace 发布不阻塞 Phase 4/5，当前已具备可安装 VSIX alpha / pre-release 产物和安装说明。Phase 2e 展示型 demo 已经给 VS Code Context Viz / Approval / Run Log UI 提供可观察样本。
+Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 深度集成任务；Phase 5 仍在进行中。P5-1 到 P5-14 已完成原生 Chat 入口、简化审批、自动上下文压缩、UX 验收、Output Channel 错误诊断、插件内多 API key/model 配置、统一 redaction/错误恢复、只读 Git context、commit message 写入 SCM inputBox、PR markdown 生成、Sidebar 连续会话、Run 删除和折叠事件 UX、结构化 provider 配置错误码与恢复动作，以及真实试用回归修复包；P5-15 作为持续 UX backlog，子项状态以 `docs/phase-tasks.md` 为准。Phase 5 全部完成后再进入 Phase 6，与生态扩展一起推进。Marketplace 发布不阻塞 Phase 4/5，当前已具备可安装 VSIX alpha / pre-release 产物和安装说明。P2-5 展示型 demo 已经给 VS Code Context Viz / Approval / Run Log UI 提供可观察样本。
 
 优先事项：
 
 - VSIX dry-run packaging smoke 和 `@vscode/test-electron` 最小 harness 已完成，已提前验证打包、activation、trusted workspace 和 Chat view 基础加载。
-- Phase 5 的 P5-1 到 P5-13 Codex-like UX 与开发工作流已完成；P5-14 持续 UX 测试与体验改进已拆分为 P5-14a 等子项，仍有未完成项。
+- Phase 5 的 P5-1 到 P5-14 Codex-like UX 与开发工作流已完成；P5-15 真实试用 UX backlog 持续收敛仍有未完成项。
 - G4 自动 commit / push / create PR 暂不纳入 Phase 5 完成口径，后续需要接入审批模型后再做。
 - Provider capability model data contract 已完成，首版通过 `agent.initialize` 暴露给前端，不引入 heavy trait。
 - 事件 payload schema、协议 fixture 与 RPC 高频事件批量发送已完成，batch 不改变 Run Log `seq` 和 replay 语义。
@@ -121,7 +121,8 @@ Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 
 - 配置界面依赖 Provider capability model；provider、model、预算、审批策略和 RPC 命令配置都不得保存 API Key。
 - P5-12 已完成：Sidebar Chat 复用 `agent.sendTurn.runId` 继续同一 run 多轮对话，支持 `agent.deleteRun` 删除 inactive run；tool/provider/request 等过程事件默认折叠，完整 payload 写入 `Output > ProleCoder`。
 - P5-13 已完成：provider 配置失败从前端字符串匹配升级为 RPC 结构化错误数据，缺少 DeepSeek API key 时返回 `E_PROVIDER_ERROR` 和 `data.recoverableAction`，供 VS Code/TUI 统一展示配置动作。
-- P5-14：持续 UX 测试与体验改进总项，用于真实插件试用后的 Runs、Key/Model/Settings、审批、Chat、Output 日志、上下文压缩和大 patch / 大文件工具参数问题回归；具体 P5-14a 到 P5-14f 子项见 `docs/phase-tasks.md`。
+- P5-14：真实试用回归修复包已完成，用于收敛 Sidebar 对话视图、内联确认、Work log 折叠、Markdown 渲染、webview 渲染诊断、provider/shell 稳定性和 composer / Settings 入口回归；具体 P5-14a 到 P5-14h 子项见 `docs/phase-tasks.md`。
+- P5-15：真实试用 UX backlog 持续收敛仍未完成，用于登记新的 Runs、Key/Model/Settings、审批、Chat、Output 日志、上下文压缩和大工具参数稳定性问题。
 - 真实 hunk 级 patch 审批首版限定 `apply_patch`，再扩展 Core/RPC 审批决策和 Run Log 记录。
 - FIM completion preview 依赖 Provider capability model，优先评估 VS Code 原生 inline completion 接入。
 - VSIX alpha / pre-release 交付已完成，`pnpm run vsix:alpha` 会生成可安装 pre-release VSIX 和 SHA-256 校验和；end-to-end 集成测试已通过本地 JSON-RPC fixture server 覆盖 Chat sendTurn、Cancel、Problems diagnostics、自动审批、Run List / resume。
@@ -135,7 +136,7 @@ Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 
 
 当前验收重点：
 
-- Phase 4 的 14 个条目已全部在 `docs/phase-tasks.md` 标记 `[x]`；Phase 5 仍有 P5-14 子项未完成，README 不能把 Phase 5 写成整阶段完成。
+- Phase 4 的 14 个条目已全部在 `docs/phase-tasks.md` 标记 `[x]`；Phase 5 仍有 P5-15 子项未完成，README 不能把 Phase 5 写成整阶段完成。
 - VS Code 插件可通过 VSIX 安装到 clean 环境。
 - fixture provider 下 Chat sendTurn、Cancel、Problems diagnostics、审批和 Run List / resume 至少有一条 extension-host 或可重复手动验收路径。
 - CLI 与 VS Code 对同一 fixture task 的关键 Run Log event type 顺序一致。
@@ -150,30 +151,30 @@ Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 
 
 目标：把 DeepSeek V4 的长上下文和思考模式变成可见、可审计的工作流。
 
-Phase 2 的 1M Context Capsule 按 4 个增量轮次推进：
+Phase 2 的 1M Context Capsule 按 5 个 README 大项推进：
 
-1. **Phase 2a：Context Capsule 数据模型与 Manifest v0**
+1. **P2-1：Context Capsule 数据模型与 Workspace Manifest**
    - [x] `read_file` 增加 `sha256` / `sizeBytes`。
    - [x] 定义 `ContextCapsule`、`ContextSection`、`CachePlacement` 和稳定 renderer。
    - [x] 实现 workspace manifest v0：结构化 JSON、canonical `manifestHash`、默认 `maxEntries=500`、硬安全排除、默认工程排除、`.gitignore` + `.prole-coderignore`。
    - [x] Context Builder 接入 manifest summary，并扩展 `context.built` payload。
 
-2. **Phase 2b：TokenEstimator 与稳定前缀**
+2. **P2-2：TokenEstimator 与稳定前缀**
    - [x] 建立 `TokenEstimator` trait，保留 `utf8_bytes` 默认估算器。
    - [x] 增加基于 provider usage 样本的 `CalibratedEstimator`，但仍标注 `exact=false`，且不保存 prompt 原文。
    - [x] 按 `CachePlacement::{StablePrefix, DynamicPrelude, TurnSuffix}` 构建缓存友好 prompt，并输出 `stablePrefixHash` 与稳定前缀预算。
 
-3. **Phase 2c：Attachments、provider summary 与 cache 实验**
+3. **P2-3：Attachments、provider summary 与 cache 实验**
    - [x] 接入 `agent.sendTurn.attachments` 的 file、selection/explicit_content、diagnostic。
    - [x] 新增 `provider.completed` 事件，记录模型、duration、usage、cache hit/miss 和 stream 摘要。
-   - [x] 建立 DeepSeek cache hit/miss ignored live experiment 的基础解析路径；更大重复前缀样本归入 Phase 2d 前增强。
+   - [x] 建立 DeepSeek cache hit/miss ignored live experiment 的基础解析路径；更大重复前缀样本归入 P2-4 前增强。
 
-4. **Phase 2d：大仓库验收与体积控制**
+4. **P2-4：大仓库验收与体积控制**
    - [x] 200K、500K、900K 样例仓库 token 预算和 Context Capsule ignored/manual 验收。
    - [x] 超预算解释、Run Log 输出截断和脱敏包边界。
    - [x] tool call JSON Schema 通用校验层，且在 typed deserialization 前执行。
 
-5. **Phase 2e：合并主线前展示型 demo 扩展**
+5. **P2-5：合并主线前展示型 demo 扩展**
    - [x] `demo-context`：展示 manifest summary、Context Capsule sections、included/omitted sources 和 `context.built` payload。
    - [x] `demo-truncation`：展示 Run Log 脱敏、截断、`runLogTruncation`，并区分截断、空输出和缺失字段。
    - [x] `demo-schema`：展示 tool call arguments 在 typed deserialization 前被 JSON Schema 拒绝。

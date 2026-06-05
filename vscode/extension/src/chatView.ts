@@ -62,6 +62,7 @@ import {
 import { safeScriptJson } from "./webviewSerialization";
 
 export const CHAT_VIEW_ID = "prole-coder.chat";
+const WEBVIEW_EVENT_POST_DEBOUNCE_MS = 16;
 
 export interface ChatRpcEventSource {
   onEvent(handler: (event: AgentEventEnvelope) => void): DisposableLike;
@@ -130,6 +131,16 @@ interface TestProbeResultWebviewMessage {
   readonly error?: string;
 }
 
+interface WebviewErrorMessage {
+  readonly type: "webviewError";
+  readonly message: string;
+  readonly stack?: string;
+}
+
+interface WebviewReadyMessage {
+  readonly type: "webviewReady";
+}
+
 type ChatSubmissionStatus = "idle" | "sending" | "running" | "completed" | "failed" | "canceled";
 type TerminalSubmissionStatus = Extract<ChatSubmissionStatus, "completed" | "failed" | "canceled">;
 
@@ -175,6 +186,12 @@ interface PendingTestProbe {
   reject(error: Error): void;
 }
 
+interface PendingWebviewReady {
+  readonly timeout: ReturnType<typeof setTimeout>;
+  resolve(): void;
+  reject(error: Error): void;
+}
+
 export class ProleChatViewProvider implements vscode.WebviewViewProvider, DisposableLike {
   private readonly timeline = new ChatEventTimeline();
   private readonly terminalRuns = new Map<string, TerminalRunState>();
@@ -185,9 +202,16 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   private activeConversationRunId: string | undefined;
   private pendingApproval: PendingApprovalState | undefined;
   private readonly pendingTestProbes = new Map<string, PendingTestProbe>();
+  private readonly webviewReadyWaiters = new Set<PendingWebviewReady>();
   private rpcSubscription: DisposableLike | undefined;
   private viewMessageSubscription: DisposableLike | undefined;
   private view: vscode.WebviewView | undefined;
+  private webviewReady = false;
+  private webviewGeneration = 0;
+  private webviewPostFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  private snapshotPostQueued = false;
+  private submissionPostQueued = false;
+  private contextPostQueued = false;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -208,11 +232,11 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       if (terminal) {
         this.rejectPendingApproval("run ended before approval was resolved");
       }
-      this.postSnapshot();
+      this.queueSnapshotPost();
       if (contextViz !== undefined) {
-        this.postContext();
+        this.queueContextPost();
       }
-      this.postSubmission();
+      this.queueSubmissionPost();
       if (terminal && this.view !== undefined) {
         void this.refreshRuns("Refreshing runs...");
       }
@@ -221,6 +245,8 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
+    this.webviewReady = false;
+    const webviewGeneration = (this.webviewGeneration += 1);
     webviewView.webview.options = {
       enableScripts: true,
       localResourceRoots: [this.extensionUri],
@@ -243,6 +269,17 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     this.postContext();
     this.postApproval();
     void this.refreshRuns();
+    setTimeout(() => {
+      if (
+        this.view === webviewView &&
+        this.webviewGeneration === webviewGeneration &&
+        this.webviewReady !== true
+      ) {
+        this.logger?.error(
+          "Sidebar webview did not report ready within 3000ms; scripts may be blocked or the webview may need reload.",
+        );
+      }
+    }, 3000);
   }
 
   openChatView(): Thenable<unknown> {
@@ -268,6 +305,9 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     if (this.view === undefined) {
       throw new Error("chat webview is not available");
     }
+
+    await this.waitForWebviewReady();
+    this.flushQueuedWebviewPosts();
 
     const id = randomUUID();
     const message: TestProbeWebviewMessage = {
@@ -297,6 +337,8 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   dispose(): void {
     this.rejectPendingApproval("approval view disposed");
     this.rejectPendingTestProbes("chat view disposed");
+    this.rejectPendingWebviewReady("chat view disposed");
+    this.clearQueuedWebviewPosts();
     this.rpcSubscription?.dispose();
     this.viewMessageSubscription?.dispose();
     this.rpcSubscription = undefined;
@@ -320,6 +362,19 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     const testProbeResult = testProbeResultFromMessage(message);
     if (testProbeResult !== undefined) {
       this.resolveTestProbe(testProbeResult);
+      return;
+    }
+
+    const webviewError = webviewErrorFromMessage(message);
+    if (webviewError !== undefined) {
+      const stack = webviewError.stack === undefined ? "" : `\n${webviewError.stack}`;
+      this.logger?.error(this.redact(`Sidebar webview error: ${webviewError.message}${stack}`));
+      return;
+    }
+
+    if (isWebviewReadyMessage(message)) {
+      this.logger?.info("Sidebar webview ready.");
+      this.markWebviewReady();
       return;
     }
 
@@ -468,7 +523,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       type: "snapshot",
       snapshot: this.timeline.snapshot(),
     };
-    void this.view?.webview.postMessage(message);
+    this.postToWebview(message);
   }
 
   private postSubmission(): void {
@@ -476,7 +531,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       type: "submission",
       submission: this.submission,
     };
-    void this.view?.webview.postMessage(message);
+    this.postToWebview(message);
   }
 
   private postRuns(): void {
@@ -484,7 +539,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       type: "runs",
       runs: this.runList,
     };
-    void this.view?.webview.postMessage(message);
+    this.postToWebview(message);
   }
 
   private postContext(): void {
@@ -492,7 +547,66 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       type: "context",
       context: this.contextViz,
     };
-    void this.view?.webview.postMessage(message);
+    this.postToWebview(message);
+  }
+
+  private queueSnapshotPost(): void {
+    this.snapshotPostQueued = true;
+    this.scheduleWebviewPostFlush();
+  }
+
+  private queueSubmissionPost(): void {
+    this.submissionPostQueued = true;
+    this.scheduleWebviewPostFlush();
+  }
+
+  private queueContextPost(): void {
+    this.contextPostQueued = true;
+    this.scheduleWebviewPostFlush();
+  }
+
+  private scheduleWebviewPostFlush(): void {
+    if (this.webviewPostFlushTimer !== undefined) {
+      return;
+    }
+
+    this.webviewPostFlushTimer = setTimeout(() => {
+      this.flushQueuedWebviewPosts();
+    }, WEBVIEW_EVENT_POST_DEBOUNCE_MS);
+  }
+
+  private flushQueuedWebviewPosts(): void {
+    if (this.webviewPostFlushTimer !== undefined) {
+      clearTimeout(this.webviewPostFlushTimer);
+      this.webviewPostFlushTimer = undefined;
+    }
+
+    const postSnapshot = this.snapshotPostQueued;
+    const postSubmission = this.submissionPostQueued;
+    const postContext = this.contextPostQueued;
+    this.snapshotPostQueued = false;
+    this.submissionPostQueued = false;
+    this.contextPostQueued = false;
+
+    if (postSnapshot) {
+      this.postSnapshot();
+    }
+    if (postSubmission) {
+      this.postSubmission();
+    }
+    if (postContext) {
+      this.postContext();
+    }
+  }
+
+  private clearQueuedWebviewPosts(): void {
+    if (this.webviewPostFlushTimer !== undefined) {
+      clearTimeout(this.webviewPostFlushTimer);
+      this.webviewPostFlushTimer = undefined;
+    }
+    this.snapshotPostQueued = false;
+    this.submissionPostQueued = false;
+    this.contextPostQueued = false;
   }
 
   private postApproval(): void {
@@ -501,7 +615,33 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       type: "approval",
       ...(approval === undefined ? {} : { approval }),
     };
-    void this.view?.webview.postMessage(message);
+    this.postToWebview(message);
+  }
+
+  private postToWebview(message: ExtensionToWebviewMessage): void {
+    if (this.view === undefined || !this.webviewReady) {
+      return;
+    }
+    void this.view.webview.postMessage(message);
+  }
+
+  private markWebviewReady(): void {
+    if (this.webviewReady) {
+      return;
+    }
+
+    this.webviewReady = true;
+    for (const pending of this.webviewReadyWaiters) {
+      clearTimeout(pending.timeout);
+      pending.resolve();
+    }
+    this.webviewReadyWaiters.clear();
+
+    this.postSnapshot();
+    this.postSubmission();
+    this.postRuns();
+    this.postContext();
+    this.postApproval();
   }
 
   private setSubmission(submission: ChatSubmissionSnapshot): void {
@@ -781,6 +921,33 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     }
   }
 
+  private waitForWebviewReady(): Promise<void> {
+    if (this.webviewReady) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.webviewReadyWaiters.delete(pending);
+        reject(new Error("timed out waiting for chat webview ready"));
+      }, 5000);
+      const pending: PendingWebviewReady = {
+        timeout,
+        resolve,
+        reject,
+      };
+      this.webviewReadyWaiters.add(pending);
+    });
+  }
+
+  private rejectPendingWebviewReady(reason: string): void {
+    for (const pending of this.webviewReadyWaiters) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error(reason));
+      this.webviewReadyWaiters.delete(pending);
+    }
+  }
+
   private redact(message: string): string {
     return this.redactor?.redact(message) ?? message;
   }
@@ -816,7 +983,7 @@ function renderChatViewHtml(
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'nonce-${nonce}'; script-src ${webview.cspSource} 'nonce-${nonce}';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style nonce="${nonce}">
     :root {
@@ -832,6 +999,7 @@ function renderChatViewHtml(
     }
 
     .shell {
+      position: relative;
       display: flex;
       min-height: 100vh;
       flex-direction: column;
@@ -847,7 +1015,7 @@ function renderChatViewHtml(
       display: none;
       align-items: center;
       gap: 8px;
-      padding: 8px 10px;
+      padding: 8px 44px 8px 10px;
       border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
       background: var(--vscode-sideBarSectionHeader-background);
     }
@@ -887,9 +1055,38 @@ function renderChatViewHtml(
     .status {
       display: grid;
       gap: 2px;
-      padding: 10px 12px;
+      padding: 10px 44px 10px 12px;
       border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
       background: var(--vscode-sideBarSectionHeader-background);
+    }
+
+    .settings-action {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      z-index: 2;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      color: var(--vscode-icon-foreground);
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+
+    .settings-action:hover:enabled {
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryHoverBackground);
+    }
+
+    .settings-action svg {
+      width: 16px;
+      height: 16px;
+      pointer-events: none;
     }
 
     .status-title {
@@ -1363,6 +1560,89 @@ function renderChatViewHtml(
       overflow-wrap: anywhere;
     }
 
+    .body.markdown {
+      display: grid;
+      gap: 8px;
+      white-space: normal;
+    }
+
+    .body.markdown > * {
+      margin: 0;
+      min-width: 0;
+    }
+
+    .body.markdown h3,
+    .body.markdown h4,
+    .body.markdown h5,
+    .body.markdown h6 {
+      font-size: 13px;
+      line-height: 1.35;
+      margin-top: 2px;
+    }
+
+    .body.markdown ul,
+    .body.markdown ol {
+      padding-left: 18px;
+    }
+
+    .body.markdown li + li {
+      margin-top: 3px;
+    }
+
+    .body.markdown blockquote {
+      border-left: 2px solid var(--vscode-textBlockQuote-border);
+      color: var(--vscode-textBlockQuote-foreground);
+      padding-left: 10px;
+    }
+
+    .body.markdown hr {
+      border: 0;
+      border-top: 1px solid var(--vscode-editorWidget-border);
+      margin: 2px 0;
+    }
+
+    .body.markdown pre {
+      background: var(--vscode-textCodeBlock-background);
+      border-radius: 6px;
+      overflow-x: auto;
+      padding: 8px;
+      white-space: pre;
+    }
+
+    .body.markdown code {
+      background: var(--vscode-textCodeBlock-background);
+      border-radius: 4px;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 12px;
+      padding: 1px 4px;
+    }
+
+    .body.markdown pre code {
+      background: transparent;
+      border-radius: 0;
+      display: block;
+      padding: 0;
+    }
+
+    .body.markdown table {
+      border-collapse: collapse;
+      display: block;
+      overflow-x: auto;
+    }
+
+    .body.markdown th,
+    .body.markdown td {
+      border: 1px solid var(--vscode-editorWidget-border);
+      padding: 4px 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .body.markdown th {
+      background: var(--vscode-editorWidget-background);
+      font-weight: 600;
+    }
+
     details.item:not([open]) > .body {
       display: none;
     }
@@ -1539,6 +1819,7 @@ function renderChatViewHtml(
     .mode:focus,
     .send:focus,
     .cancel:focus,
+    .settings-action:focus,
     .provider-action:focus,
     .conversation-back:focus,
     .refresh-runs:focus,
@@ -1669,6 +1950,12 @@ function renderChatViewHtml(
 </head>
 <body>
   <main class="shell">
+    <button id="settings" class="settings-action" type="button" title="Open ProleCoder settings" aria-label="Open ProleCoder settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" fill="none" stroke="currentColor" stroke-width="1.8"/>
+        <path d="M19.4 13.5a7.8 7.8 0 0 0 0-3l2-1.5-2-3.5-2.4 1a8 8 0 0 0-2.6-1.5L14 2.5h-4l-.4 2.5A8 8 0 0 0 7 6.5l-2.4-1-2 3.5 2 1.5a7.8 7.8 0 0 0 0 3l-2 1.5 2 3.5 2.4-1a8 8 0 0 0 2.6 1.5l.4 2.5h4l.4-2.5a8 8 0 0 0 2.6-1.5l2.4 1 2-3.5-2-1.5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+      </svg>
+    </button>
     <section id="conversation-bar" class="conversation-bar" aria-label="Conversation">
       <button id="show-runs" class="conversation-back" type="button" title="Back to runs" tabindex="-1">&lt;</button>
       <div id="conversation-title" class="conversation-title">Conversation</div>
@@ -1700,8 +1987,7 @@ function renderChatViewHtml(
         <select id="mode" class="mode" aria-label="Run mode"></select>
         <button id="api-key" class="provider-action" type="button" title="Configure DeepSeek API key">API Key</button>
         <button id="model" class="provider-action" type="button" title="Select DeepSeek model">Model</button>
-        <button id="settings" class="provider-action" type="button" title="Open ProleCoder settings">Settings</button>
-        <button id="send" class="send" type="submit">Send</button>
+        <button id="send" class="send" type="button">Send</button>
         <button id="cancel" class="cancel" type="button">Cancel</button>
         <div id="submission" class="submission" aria-live="polite"></div>
       </div>
@@ -1719,6 +2005,15 @@ function renderChatViewHtml(
     const WORK_LOG_RENDER_LIMIT = 80;
     const WORK_LOG_STATUS_IGNORED_TYPES = new Set(["run.completed"]);
     const vscodeApi = acquireVsCodeApi();
+    window.addEventListener("error", (event) => {
+      postWebviewError(event.message, event.error && event.error.stack);
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event.reason;
+      const message = reason && typeof reason.message === "string" ? reason.message : String(reason);
+      const stack = reason && typeof reason.stack === "string" ? reason.stack : undefined;
+      postWebviewError(message, stack);
+    });
     const shellRoot = document.querySelector(".shell");
     const showRunsButton = document.getElementById("show-runs");
     const conversationTitleRoot = document.getElementById("conversation-title");
@@ -1757,7 +2052,7 @@ function renderChatViewHtml(
     }
     modeInput.value = defaultMode;
 
-    window.addEventListener("message", (event) => {
+    window.addEventListener("message", safeWebviewEventHandler("message", (event) => {
       const message = event.data;
       if (message && message.type === "testProbe") {
         handleTestProbe(message);
@@ -1778,37 +2073,70 @@ function renderChatViewHtml(
       if (message && message.type === "approval") {
         renderApproval(message.approval);
       }
-    });
+    }));
 
-    showRunsButton.addEventListener("click", () => {
+    showRunsButton.addEventListener("click", safeWebviewEventHandler("show runs click", () => {
       vscodeApi.postMessage({ type: "showRuns" });
-    });
+    }));
 
-    refreshRunsButton.addEventListener("click", () => {
+    refreshRunsButton.addEventListener("click", safeWebviewEventHandler("refresh runs click", () => {
       vscodeApi.postMessage({ type: "refreshRuns" });
-    });
+    }));
 
-    apiKeyButton.addEventListener("click", () => {
+    apiKeyButton.addEventListener("click", safeWebviewEventHandler("api key click", () => {
       vscodeApi.postMessage({ type: "configureDeepSeekApiKey" });
-    });
+    }));
 
-    modelButton.addEventListener("click", () => {
+    modelButton.addEventListener("click", safeWebviewEventHandler("model click", () => {
       vscodeApi.postMessage({ type: "selectDeepSeekModel" });
-    });
+    }));
 
-    settingsButton.addEventListener("click", () => {
+    settingsButton.addEventListener("click", safeWebviewEventHandler("settings click", () => {
       vscodeApi.postMessage({ type: "openSettings" });
-    });
+    }));
 
-    cancelButton.addEventListener("click", () => {
+    cancelButton.addEventListener("click", safeWebviewEventHandler("cancel click", () => {
       const runId = cancelButton.dataset.runId;
       if (typeof runId === "string" && runId.length > 0) {
         vscodeApi.postMessage({ type: "cancelTurn", runId });
       }
-    });
+    }));
 
-    composer.addEventListener("submit", (event) => {
+    composer.addEventListener("submit", safeWebviewEventHandler("composer submit", (event) => {
       event.preventDefault();
+      submitComposerMessage();
+    }));
+
+    sendButton.addEventListener("click", safeWebviewEventHandler("send click", () => {
+      submitComposerMessage();
+    }));
+
+    promptInput.addEventListener("keydown", safeWebviewEventHandler("prompt keydown", (event) => {
+      if (event.key === "Enter" && event.shiftKey !== true) {
+        event.preventDefault();
+        if (event.isComposing === true) {
+          return;
+        }
+        submitComposerMessage();
+      }
+    }));
+
+    try {
+      render(initialSnapshot);
+      renderSubmission(initialSubmission);
+      renderRuns(initialRuns);
+      renderContext(initialContext);
+      renderApproval(initialApproval);
+    } catch (error) {
+      reportWebviewException("initial render", error);
+    }
+    vscodeApi.postMessage({ type: "webviewReady" });
+
+    function submitComposerMessage() {
+      if (sendButton.disabled) {
+        return;
+      }
+
       const message = promptInput.value.trim();
       if (!message) {
         renderSubmission({
@@ -1820,34 +2148,70 @@ function renderChatViewHtml(
         return;
       }
 
-      setComposerBusy(true, false);
-      submissionRoot.className = "submission sending";
-      submissionRoot.textContent = "Sending turn...";
       currentSubmission = {
         busy: true,
         status: "sending",
         message: "Sending turn...",
       };
-      syncConversationChrome();
+      renderPendingUserMessage(message);
+      renderSubmission(currentSubmission);
       vscodeApi.postMessage({
         type: "submitTurn",
         message,
         mode: modeInput.value,
       });
-    });
+    }
 
-    promptInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && event.shiftKey !== true && event.isComposing !== true) {
-        event.preventDefault();
-        composer.requestSubmit();
-      }
-    });
+    function postWebviewError(message, stack) {
+      vscodeApi.postMessage({
+        type: "webviewError",
+        message: typeof message === "string" && message.length > 0 ? message : "unknown webview error",
+        ...(typeof stack === "string" && stack.length > 0 ? { stack } : {}),
+      });
+    }
 
-    render(initialSnapshot);
-    renderSubmission(initialSubmission);
-    renderRuns(initialRuns);
-    renderContext(initialContext);
-    renderApproval(initialApproval);
+    function safeWebviewEventHandler(label, handler) {
+      return (event) => {
+        try {
+          handler(event);
+        } catch (error) {
+          reportWebviewException(label, error);
+        }
+      };
+    }
+
+    function reportWebviewException(label, error) {
+      const message = error && typeof error.message === "string" ? error.message : String(error);
+      const stack = error && typeof error.stack === "string" ? error.stack : undefined;
+      postWebviewError(label + ": " + message, stack);
+    }
+
+    function renderPendingUserMessage(message) {
+      const snapshot = currentSnapshot && typeof currentSnapshot === "object" ? currentSnapshot : initialSnapshot;
+      const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+      const visibleItems = Array.from(timelineVisibleItems(snapshot, items));
+      const workItems = Array.from(timelineWorkItems(snapshot, items));
+      const pendingRunId = activeConversationRunId() || "pending";
+      visibleItems.push({
+        id: "pending-user-message",
+        seq: 0,
+        lastSeq: 0,
+        time: new Date().toISOString(),
+        type: "turn.pending",
+        runId: pendingRunId,
+        kind: "user",
+        tone: "neutral",
+        title: "You",
+        body: message,
+      });
+      render({
+        ...snapshot,
+        latestRunId: typeof snapshot.latestRunId === "string" ? snapshot.latestRunId : pendingRunId,
+        latestStatus: "Sending turn",
+        visibleItems,
+        workItems,
+      });
+    }
 
     function render(snapshot) {
       currentSnapshot = snapshot && typeof snapshot === "object" ? snapshot : initialSnapshot;
@@ -1870,7 +2234,7 @@ function renderChatViewHtml(
       }
 
       for (const item of visibleItems) {
-        eventsRoot.append(renderItem(item));
+        eventsRoot.append(renderItemSafely(item));
       }
       if (workItems.length > 0) {
         eventsRoot.append(renderWorkLog(workItems));
@@ -2659,6 +3023,50 @@ function renderChatViewHtml(
       title.textContent = workLogTitle(timelineWorkItems(snapshot, items));
     }
 
+    function renderItemSafely(item) {
+      try {
+        return renderItem(item);
+      } catch (error) {
+        const message = error && typeof error.message === "string" ? error.message : String(error);
+        const stack = error && typeof error.stack === "string" ? error.stack : undefined;
+        postWebviewError("Failed to render chat item: " + message, stack);
+        return renderPlainItem(item);
+      }
+    }
+
+    function renderPlainItem(item) {
+      const article = document.createElement("article");
+      const kind = item && typeof item.kind === "string" ? item.kind : "raw";
+      const tone = item && typeof item.tone === "string" ? item.tone : "neutral";
+      article.className = "item " + kind + " " + tone;
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const seq = document.createElement("span");
+      seq.className = "seq";
+      const seqValue = item && typeof item.seq === "number" ? item.seq : 0;
+      const lastSeqValue = item && typeof item.lastSeq === "number" ? item.lastSeq : seqValue;
+      seq.textContent = seqValue === lastSeqValue ? "#" + seqValue : "#" + seqValue + "-" + lastSeqValue;
+      const type = document.createElement("span");
+      type.className = "type";
+      type.textContent = item && typeof item.type === "string" ? item.type : "event";
+      meta.append(seq, type);
+
+      const title = document.createElement("div");
+      title.className = "title";
+      title.textContent = item && typeof item.title === "string" ? item.title : "Message";
+      article.append(meta, title);
+
+      const bodyText = itemBodyText(item);
+      if (bodyText.length > 0) {
+        const body = document.createElement("div");
+        body.className = "body";
+        body.textContent = bodyText;
+        article.append(body);
+      }
+      return article;
+    }
+
     function renderItem(item) {
       const collapsed = item.defaultCollapsed === true;
       const article = document.createElement(collapsed ? "details" : "article");
@@ -2688,14 +3096,447 @@ function renderChatViewHtml(
       } else {
         article.append(meta, title);
       }
-      if (item.body) {
+      const bodyText = itemBodyText(item);
+      if (bodyText.length > 0) {
         const body = document.createElement("div");
-        body.className = "body";
-        body.textContent = item.body;
+        if (shouldRenderMarkdown(item)) {
+          body.className = "body markdown";
+          appendMarkdownBlocks(body, bodyText);
+        } else {
+          body.className = "body";
+          body.textContent = bodyText;
+        }
         article.append(body);
       }
 
       return article;
+    }
+
+    function itemBodyText(item) {
+      if (!item || typeof item !== "object" || item.body === undefined || item.body === null) {
+        return "";
+      }
+      return typeof item.body === "string" ? item.body : String(item.body);
+    }
+
+    function shouldRenderMarkdown(item) {
+      if (!item || typeof item !== "object") {
+        return false;
+      }
+      if (item.kind === "assistant" || item.kind === "user") {
+        return true;
+      }
+      return item.kind === "terminal" && item.type === "run.completed";
+    }
+
+    function appendMarkdownBlocks(parent, markdown) {
+      for (const block of renderMarkdownBlocks(markdown)) {
+        parent.append(block);
+      }
+    }
+
+    function renderMarkdownBlocks(markdown) {
+      const lines = markdown.replace(/\\r\\n?/g, "\\n").split("\\n");
+      const blocks = [];
+      let index = 0;
+
+      while (index < lines.length) {
+        const line = lines[index];
+        if (line.trim().length === 0) {
+          index += 1;
+          continue;
+        }
+
+        if (isFenceStart(line)) {
+          const rendered = renderMarkdownCodeFence(lines, index);
+          blocks.push(rendered.element);
+          index = rendered.nextIndex;
+          continue;
+        }
+
+        if (isMarkdownTableAt(lines, index)) {
+          const rendered = renderMarkdownTable(lines, index);
+          blocks.push(rendered.element);
+          index = rendered.nextIndex;
+          continue;
+        }
+
+        if (isMarkdownHorizontalRule(line)) {
+          blocks.push(document.createElement("hr"));
+          index += 1;
+          continue;
+        }
+
+        const heading = line.match(/^(#{1,6})\\s+(.+)$/);
+        if (heading) {
+          const level = Math.min(6, Math.max(3, heading[1].length + 2));
+          const element = document.createElement("h" + String(level));
+          appendInlineMarkdown(element, heading[2].trim());
+          blocks.push(element);
+          index += 1;
+          continue;
+        }
+
+        const listKind = markdownListKind(line);
+        if (listKind) {
+          const rendered = renderMarkdownList(lines, index, listKind);
+          blocks.push(rendered.element);
+          index = rendered.nextIndex;
+          continue;
+        }
+
+        if (/^\\s*>\\s?/.test(line)) {
+          const rendered = renderMarkdownBlockquote(lines, index);
+          blocks.push(rendered.element);
+          index = rendered.nextIndex;
+          continue;
+        }
+
+        const rendered = renderMarkdownParagraph(lines, index);
+        blocks.push(rendered.element);
+        index = rendered.nextIndex;
+      }
+
+      if (blocks.length === 0) {
+        const paragraph = document.createElement("p");
+        paragraph.textContent = "";
+        return [paragraph];
+      }
+      return blocks;
+    }
+
+    function renderMarkdownCodeFence(lines, startIndex) {
+      const fence = markdownFence();
+      const firstLine = lines[startIndex].trim();
+      const language = firstLine.slice(fence.length).trim();
+      const codeLines = [];
+      let index = startIndex + 1;
+      while (index < lines.length && !isFenceStart(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      if (language.length > 0) {
+        code.setAttribute("data-language", language.slice(0, 32));
+      }
+      code.textContent = codeLines.join("\\n");
+      pre.append(code);
+      return { element: pre, nextIndex: index };
+    }
+
+    function renderMarkdownList(lines, startIndex, kind) {
+      const list = document.createElement(kind);
+      let index = startIndex;
+      while (index < lines.length && markdownListKind(lines[index]) === kind) {
+        const item = document.createElement("li");
+        appendInlineMarkdown(item, markdownListText(lines[index]));
+        list.append(item);
+        index += 1;
+      }
+      return { element: list, nextIndex: index };
+    }
+
+    function renderMarkdownBlockquote(lines, startIndex) {
+      const quoteLines = [];
+      let index = startIndex;
+      while (index < lines.length && /^\\s*>\\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^\\s*>\\s?/, ""));
+        index += 1;
+      }
+
+      const blockquote = document.createElement("blockquote");
+      const paragraph = document.createElement("p");
+      appendInlineMarkdown(paragraph, quoteLines.join(" ").trim());
+      blockquote.append(paragraph);
+      return { element: blockquote, nextIndex: index };
+    }
+
+    function renderMarkdownParagraph(lines, startIndex) {
+      const paragraphLines = [];
+      let index = startIndex;
+      while (index < lines.length) {
+        const line = lines[index];
+        if (
+          line.trim().length === 0 ||
+          isFenceStart(line) ||
+          isMarkdownTableAt(lines, index) ||
+          isMarkdownHorizontalRule(line) ||
+          /^(#{1,6})\\s+/.test(line) ||
+          markdownListKind(line) ||
+          /^\\s*>\\s?/.test(line)
+        ) {
+          break;
+        }
+        paragraphLines.push(line.trim());
+        index += 1;
+      }
+
+      const paragraph = document.createElement("p");
+      appendInlineMarkdown(paragraph, paragraphLines.join(" "));
+      return { element: paragraph, nextIndex: index };
+    }
+
+    function renderMarkdownTable(lines, startIndex) {
+      const table = document.createElement("table");
+      const thead = document.createElement("thead");
+      const tbody = document.createElement("tbody");
+      const header = document.createElement("tr");
+      for (const cellText of splitMarkdownTableRow(lines[startIndex])) {
+        const cell = document.createElement("th");
+        appendInlineMarkdown(cell, cellText);
+        header.append(cell);
+      }
+      thead.append(header);
+
+      let index = startIndex + 2;
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim().length > 0) {
+        const row = document.createElement("tr");
+        for (const cellText of splitMarkdownTableRow(lines[index])) {
+          const cell = document.createElement("td");
+          appendInlineMarkdown(cell, cellText);
+          row.append(cell);
+        }
+        tbody.append(row);
+        index += 1;
+      }
+
+      table.append(thead, tbody);
+      return { element: table, nextIndex: index };
+    }
+
+    function appendInlineMarkdown(parent, text) {
+      const marker = markdownBacktick();
+      let index = 0;
+      while (index < text.length) {
+        const codeStart = text.indexOf(marker, index);
+        if (codeStart < 0) {
+          appendInlineText(parent, text.slice(index));
+          return;
+        }
+        if (codeStart > index) {
+          appendInlineText(parent, text.slice(index, codeStart));
+        }
+        const codeEnd = text.indexOf(marker, codeStart + 1);
+        if (codeEnd < 0) {
+          appendInlineText(parent, text.slice(codeStart));
+          return;
+        }
+        const code = document.createElement("code");
+        code.textContent = text.slice(codeStart + 1, codeEnd);
+        parent.append(code);
+        index = codeEnd + 1;
+      }
+    }
+
+    function appendInlineText(parent, text) {
+      let index = 0;
+      while (index < text.length) {
+        const token = findNextInlineToken(text, index);
+        if (!token) {
+          parent.append(document.createTextNode(text.slice(index)));
+          return;
+        }
+        if (token.start > index) {
+          parent.append(document.createTextNode(text.slice(index, token.start)));
+        }
+        if (token.type === "link") {
+          const link = document.createElement("a");
+          link.href = token.href;
+          link.target = "_blank";
+          link.rel = "noreferrer noopener";
+          appendInlineText(link, token.label);
+          parent.append(link);
+        } else if (token.type === "strong") {
+          const strong = document.createElement("strong");
+          appendInlineText(strong, token.text);
+          parent.append(strong);
+        } else if (token.type === "em") {
+          const emphasis = document.createElement("em");
+          appendInlineText(emphasis, token.text);
+          parent.append(emphasis);
+        }
+        index = token.end;
+      }
+    }
+
+    function findNextInlineToken(text, startIndex) {
+      const candidates = [];
+      const link = findNextMarkdownLink(text, startIndex);
+      if (link) {
+        candidates.push(link);
+      }
+      const strong = findNextDelimitedInline(text, startIndex, "**", "strong");
+      if (strong) {
+        candidates.push(strong);
+      }
+      const emphasis = findNextEmphasis(text, startIndex);
+      if (emphasis) {
+        candidates.push(emphasis);
+      }
+      candidates.sort((left, right) => left.start - right.start);
+      return candidates[0];
+    }
+
+    function findNextMarkdownLink(text, startIndex) {
+      let searchIndex = startIndex;
+      while (searchIndex < text.length) {
+        const labelStart = text.indexOf("[", searchIndex);
+        if (labelStart < 0) {
+          return undefined;
+        }
+        const labelEnd = text.indexOf("]", labelStart + 1);
+        if (labelEnd < 0) {
+          return undefined;
+        }
+        if (text.charAt(labelEnd + 1) !== "(") {
+          searchIndex = labelEnd + 1;
+          continue;
+        }
+        const hrefEnd = text.indexOf(")", labelEnd + 2);
+        if (hrefEnd < 0) {
+          return undefined;
+        }
+        const href = safeMarkdownHref(text.slice(labelEnd + 2, hrefEnd).trim());
+        if (href) {
+          return {
+            type: "link",
+            start: labelStart,
+            end: hrefEnd + 1,
+            label: text.slice(labelStart + 1, labelEnd),
+            href,
+          };
+        }
+        searchIndex = hrefEnd + 1;
+      }
+      return undefined;
+    }
+
+    function findNextDelimitedInline(text, startIndex, delimiter, type) {
+      const start = text.indexOf(delimiter, startIndex);
+      if (start < 0) {
+        return undefined;
+      }
+      const end = text.indexOf(delimiter, start + delimiter.length);
+      if (end < 0) {
+        return undefined;
+      }
+      return {
+        type,
+        start,
+        end: end + delimiter.length,
+        text: text.slice(start + delimiter.length, end),
+      };
+    }
+
+    function findNextEmphasis(text, startIndex) {
+      let start = findSingleAsterisk(text, startIndex);
+      while (start >= 0) {
+        const end = findSingleAsterisk(text, start + 1);
+        if (end >= 0) {
+          return { type: "em", start, end: end + 1, text: text.slice(start + 1, end) };
+        }
+        start = findSingleAsterisk(text, start + 1);
+      }
+      return undefined;
+    }
+
+    function findSingleAsterisk(text, startIndex) {
+      let index = text.indexOf("*", startIndex);
+      while (index >= 0) {
+        if (text.charAt(index - 1) !== "*" && text.charAt(index + 1) !== "*") {
+          return index;
+        }
+        index = text.indexOf("*", index + 1);
+      }
+      return -1;
+    }
+
+    function safeMarkdownHref(rawHref) {
+      try {
+        const parsed = new URL(rawHref);
+        if (parsed.protocol === "http:" || parsed.protocol === "https:" || parsed.protocol === "mailto:") {
+          return parsed.toString();
+        }
+      } catch {
+        return undefined;
+      }
+      return undefined;
+    }
+
+    function isFenceStart(line) {
+      return line.trim().startsWith(markdownFence());
+    }
+
+    function markdownFence() {
+      return markdownBacktick() + markdownBacktick() + markdownBacktick();
+    }
+
+    function markdownBacktick() {
+      return String.fromCharCode(96);
+    }
+
+    function markdownBackslash() {
+      return String.fromCharCode(92);
+    }
+
+    function isMarkdownHorizontalRule(line) {
+      return /^\\s*(?:-{3,}|\\*{3,}|_{3,})\\s*$/.test(line);
+    }
+
+    function markdownListKind(line) {
+      if (/^\\s*[-*+]\\s+/.test(line)) {
+        return "ul";
+      }
+      if (/^\\s*\\d+[.)]\\s+/.test(line)) {
+        return "ol";
+      }
+      return undefined;
+    }
+
+    function markdownListText(line) {
+      return line.replace(/^\\s*(?:[-*+]|\\d+[.)])\\s+/, "").trim();
+    }
+
+    function isMarkdownTableAt(lines, index) {
+      if (index + 1 >= lines.length || !lines[index].includes("|")) {
+        return false;
+      }
+      const separatorCells = splitMarkdownTableRow(lines[index + 1]);
+      return separatorCells.length > 0 && separatorCells.every((cell) => /^:?-{3,}:?$/.test(cell));
+    }
+
+    function splitMarkdownTableRow(line) {
+      let trimmed = line.trim();
+      if (trimmed.startsWith("|")) {
+        trimmed = trimmed.slice(1);
+      }
+      if (trimmed.endsWith("|")) {
+        trimmed = trimmed.slice(0, -1);
+      }
+
+      const cells = [];
+      let current = "";
+      let escaped = false;
+      for (const char of trimmed) {
+        if (escaped) {
+          current += char;
+          escaped = false;
+        } else if (char === markdownBackslash()) {
+          escaped = true;
+        } else if (char === "|") {
+          cells.push(current.trim());
+          current = "";
+        } else {
+          current += char;
+        }
+      }
+      cells.push(current.trim());
+      return cells;
     }
 
     function handleTestProbe(message) {
@@ -2747,6 +3588,7 @@ function renderChatViewHtml(
         const event = new KeyboardEvent("keydown", {
           key: typeof action.key === "string" ? action.key : "Enter",
           shiftKey: action.shiftKey === true,
+          isComposing: action.isComposing === true,
           bubbles: true,
           cancelable: true,
         });
@@ -2775,6 +3617,13 @@ function renderChatViewHtml(
         runIds: textAttributes(".run-entry-row", "data-run-id"),
         visibleItemTitles: textContents("#events > .item:not(.work-log) .title"),
         visibleItemTypes: textContents("#events > .item:not(.work-log) .type"),
+        markdownBlockCount: document.querySelectorAll("#events > .item:not(.work-log) .body.markdown").length,
+        markdownCodeBlocks: textContents("#events > .item:not(.work-log) .body.markdown pre code"),
+        markdownInlineCodes: textContents("#events > .item:not(.work-log) .body.markdown code:not(pre code)"),
+        markdownLinks: textAttributes("#events > .item:not(.work-log) .body.markdown a", "href"),
+        markdownTables: document.querySelectorAll("#events > .item:not(.work-log) .body.markdown table").length,
+        markdownHorizontalRules: document.querySelectorAll("#events > .item:not(.work-log) .body.markdown hr").length,
+        markdownText: textContents("#events > .item:not(.work-log) .body.markdown").join("\\n"),
         workLogVisible: workLog !== null,
         workLogOpen: workLog && "open" in workLog ? workLog.open === true : false,
         workLogTitle: workLogSummary ? workLogSummary.textContent || "" : "",
@@ -2783,6 +3632,7 @@ function renderChatViewHtml(
         sendDisabled: sendButton.disabled,
         cancelDisabled: cancelButton.disabled,
         providerActions: textContents(".provider-action"),
+        settingsActionVisible: document.querySelector(".settings-action") !== null,
       };
     }
 
@@ -2948,6 +3798,27 @@ function testProbeResultFromMessage(message: unknown): TestProbeResultWebviewMes
     ...(message["result"] === undefined ? {} : { result: message["result"] }),
     ...(typeof message["error"] === "string" ? { error: message["error"] } : {}),
   };
+}
+
+function webviewErrorFromMessage(message: unknown): WebviewErrorMessage | undefined {
+  if (!isRecord(message) || message["type"] !== "webviewError") {
+    return undefined;
+  }
+
+  const errorMessage = message["message"];
+  if (typeof errorMessage !== "string" || errorMessage.length === 0) {
+    return undefined;
+  }
+
+  return {
+    type: "webviewError",
+    message: errorMessage,
+    ...(typeof message["stack"] === "string" ? { stack: message["stack"] } : {}),
+  };
+}
+
+function isWebviewReadyMessage(message: unknown): message is WebviewReadyMessage {
+  return isRecord(message) && message["type"] === "webviewReady";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

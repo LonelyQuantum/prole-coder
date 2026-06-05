@@ -568,45 +568,27 @@ extension.ts
 
 ## 开发计划
 
-当前进度：Phase 1 到 Phase 4 已完成；Phase 5：VS Code Codex-like UX 与开发工作流仍在进行中。Phase 5 已完成原生 Chat、简化审批、自动上下文压缩、Output Channel、API key/model 配置、Git 工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX 和结构化 provider 配置错误恢复；P5-14 作为持续 UX 测试与体验改进总项，详细子项和完成口径见 `docs/phase-tasks.md`。完成 P5-14 全部子项后再进入 Phase 6：TUI 与生态扩展。
+当前进度：Phase 1 到 Phase 4 已完成；Phase 5：VS Code Codex-like UX 与开发工作流仍在进行中。Phase 5 已完成原生 Chat、简化审批、自动上下文压缩、Output Channel、API key/model 配置、Git 工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误恢复和真实试用回归修复；P5-15 真实试用 UX backlog 持续收敛仍未完成。完成 P5-15 后再进入 Phase 6：TUI 与生态扩展。
 
 阶段完成口径：README 中某个 Phase 只有在 `docs/phase-tasks.md` 对应 Phase 下的所有任务都标记为 `[x]` 后，才能在高层开发计划中表述为“全部完成”。如果某阶段核心功能已完成但仍有 P1/P2 增强或发布/文档验收项未完成，README 必须继续把该阶段表述为进行中，并列出剩余任务。
 
 ### Phase 0：项目章程
 
-- [x] 确定 `ProleCoder` 名称和 AGPL-3.0-or-later 许可证。
-- [x] 编写 README 技术方案、架构、开发计划和注意事项。
-- [x] 建立 Rust workspace：`agent-core`、`agent-rpc`、`cli`、`tui`。
-- [x] 建立 TypeScript/pnpm workspace：`packages/protocol` 和 `vscode/extension`。
-- [x] 建立基础环境配置：`rust-toolchain.toml`、`rustfmt.toml`、`tsconfig.base.json`、`.editorconfig`、`.gitattributes`、`.env.example`。
-- [x] 更新 `.gitignore`，排除本地状态、依赖目录、构建产物和密钥文件。
-- [x] 生成并保留 `Cargo.lock` 与 `pnpm-lock.yaml`。
-- [x] 在 Windows 本机跑通 `pnpm run check`。
-- [x] 建立 CI 骨架。
-- [x] 建立 `CONTRIBUTING.md`、`CODE_OF_CONDUCT.md`、`SECURITY.md`。
-- [x] 建立 `docs/` 设计文档目录和 `docs/adr/` 架构决策记录。
-- [x] 设计正式 JSON-RPC 事件协议。
-- [x] 定义工具 schema、风险等级和审批模型。
+- [x] P0-1：项目身份、许可证与治理。
+- [x] P0-2：Rust / TypeScript workspace 与基础工程配置。
+- [x] P0-3：基础协议、工具 schema、风险等级与审批模型设计。
 
 ### Phase 1：Agent Core MVP
 
-- [x] DeepSeek provider 与 streaming 基础。
-- [x] Reasoning 与 Context Builder。
-- [x] Workspace 工具执行层。
-- [x] Run Log 与 summary。
-- [x] Agent Turn Loop。
-- [x] CLI `run` / `rpc` 最小闭环。
-- [x] Agent RPC Server。
-- [x] 审批前端基础。
-- [x] Phase 1 合并前第一轮测试增强。
-- [x] 合并前测试基础设施收敛。
-- [x] 合并前 live 测试配置收敛。
-- [x] 合并前 RPC/CLI/protocol 验收补齐。
-- [x] 合并前最终验收。
+- [x] P1-1：DeepSeek provider、streaming 与 reasoning 基础。
+- [x] P1-2：基础 Context Builder 与 workspace 工具执行层。
+- [x] P1-3：Run Log、Agent Turn Loop 与 CLI/RPC 最小闭环。
+- [x] P1-4：Agent RPC Server 与审批前端基础。
+- [x] P1-5：合并主线前测试、live 配置、RPC/CLI/protocol 和最终验收收敛。
 
 说明：VS Code RPC server 启动监管与 JSON-RPC request client 已提前完成，归入 Phase 3 前置项；Agent Core MVP 验收不依赖完整 VS Code UI。
 
-细任务维护规则：README 开发计划只保留阶段级和任务名级摘要；每个任务的实现细节、验收命令、审查来源和子任务拆分统一维护在 `docs/phase-tasks.md`。高层阶段条目标记完成前，必须确认该阶段在 `docs/phase-tasks.md` 的所有父项和子项都已完成。
+细任务维护规则：README 开发计划只保留阶段级和大任务摘要，使用 `P阶段-数字` 编号；每个任务的实现细节、验收命令、审查来源和 `P阶段-数字字母` 子任务拆分统一维护在 `docs/phase-tasks.md`。高层阶段条目标记完成前，必须确认该阶段在 `docs/phase-tasks.md` 的所有子项都已完成。
 
 验收标准：
 
@@ -617,14 +599,11 @@ extension.ts
 
 ### Phase 2：1M Context Capsule
 
-- [x] Phase 2a-1：`read_file` 文件摘要元数据。
-- [x] Phase 2a-2：Context Capsule 数据模型与稳定 renderer。
-- [x] Phase 2a-3：Workspace Manifest v0。
-- [x] Phase 2a-4：Context Builder manifest 接入。
-- [x] Phase 2b：TokenEstimator 与稳定前缀。
-- [x] Phase 2c：Attachments、provider summary 和 cache 实验。
-- [x] Phase 2d：大仓库验收、超预算解释、Run Log 体积控制和 JSON Schema 校验层。
-- [x] Phase 2e：合并主线前展示型 demo 扩展。
+- [x] P2-1：Context Capsule 数据模型与 Workspace Manifest。
+- [x] P2-2：TokenEstimator 与稳定前缀。
+- [x] P2-3：Attachments、provider summary 和 cache 实验。
+- [x] P2-4：大仓库验收、超预算解释、Run Log 体积控制和 JSON Schema 校验层。
+- [x] P2-5：合并主线前展示型 demo 扩展。
 
 验收标准：
 
@@ -638,21 +617,11 @@ extension.ts
 
 ### Phase 3：VS Code 插件核心与共享 RPC 交互管线
 
-- [x] RPC 全双工 reader/writer 与事件发送队列。
-- [x] 长 provider request 期间的 client 断连取消。
-- [x] TypeScript extension scaffold。
-- [x] RPC server 管理。
-- [x] JSON-RPC request client。
-- [x] VS Code/protocol TypeScript 类型共享收敛。
-- [x] VS Code RPC/commands 边界测试补齐。
-- [x] Sidebar Chat 与 `agent.event` 渲染。
-- [x] 文本输入发送 turn，并通过 `agent.sendTurn` 驱动真实 Agent 回合。
-- [x] VS Code 审批 UI 接入真实 RPC pending queue。
-- [x] 命令风险分类器和动态风险升级。
-- [x] 更强进程树清理策略。
-- [x] Native diff editor 展示 patch，并为 hunk 级审批预留交互边界。
-- [x] Run List / resume。
-- [x] Context Capsule 可视化。
+- [x] P3-1：RPC 全双工事件管线与断连取消。
+- [x] P3-2：VS Code extension scaffold、RPC server 管理和 JSON-RPC request client。
+- [x] P3-3：VS Code/protocol 类型共享与 RPC/commands 边界测试。
+- [x] P3-4：Sidebar Chat、真实 sendTurn 和 RPC pending queue 审批。
+- [x] P3-5：命令风险、进程树清理、Native diff、Run List/resume 和 Context Capsule 可视化。
 
 验收标准：
 
@@ -707,33 +676,31 @@ extension.ts
 - [x] P5-11：Phase 5 UX 工作流验收与文档收敛。
 - [x] P5-12：Sidebar 连续会话、Run 删除与折叠事件 UX。
 - [x] P5-13：结构化 provider 配置错误码与恢复动作。
-- [ ] P5-14：持续 UX 测试与体验改进：持续收敛真实 VS Code 插件试用中的对话、审批、Runs、Key/Model、Output 日志、上下文压缩和大工具参数稳定性问题；具体子项与完成口径见 `docs/phase-tasks.md`。
+- [x] P5-14：真实试用回归修复包：收敛 Sidebar 对话视图、内联确认、Work log 折叠、Markdown 渲染、webview 渲染诊断、provider/shell 稳定性和 composer / Settings 入口回归；具体子项与完成口径见 `docs/phase-tasks.md`。
+- [ ] P5-15：真实试用 UX backlog 持续收敛：继续收集并拆分真实 VS Code 插件试用中的对话、审批、Runs、Key/Model、Output 日志、上下文压缩、Markdown 兼容性和大工具参数稳定性问题。
 
 验收标准：
 
 - `ProleCoder: Open Chat` 优先打开 VS Code 原生 Chat 并填入 `@prole`，用户无需手动拖动 Activity Bar view 到右侧。
 - 原生 Chat 和 Sidebar Chat 都通过真实 `agent.sendTurn` 驱动回合，并继续复用 Problems diagnostics、审批回传、Cancel、Run Log 和 Context Capsule。
 - 连续对话会自动生成可审计、受限长度的上下文压缩 attachment；不会在 UI 文案里要求用户手动重开对话来延续上下文。
-- 主审批保持简单并默认在 Sidebar 内联卡片中完成；Sidebar composer 提供 Key/Model/Settings 直接入口，过程事件默认折叠，完整事件和错误诊断可在 `Output > ProleCoder` 查看。
-- `docs/phase-tasks.md` 的 Phase 5 仍有 P5-14 子项未完成，README 不能把 Phase 5 表述为整阶段完成；G4 自动 commit / push / create PR 仍是后续增强。
+- 主审批保持简单并默认在 Sidebar 内联卡片中完成；Sidebar 提供右上角 Settings 齿轮以及 Key/Model 直接入口，过程事件默认折叠，完整事件和错误诊断可在 `Output > ProleCoder` 查看。
+- `docs/phase-tasks.md` 的 Phase 5 仍有 P5-15 未完成，README 不能把 Phase 5 表述为整阶段完成；G4 自动 commit / push / create PR 仍是后续增强。
 
 ### Phase 6：TUI 与生态扩展
 
-- [ ] TUI RPC 入口和事件流消费。
-- [ ] Chat/Plan/Diff/Tools/Context/Settings 页面。
-- [ ] TUI hunk 级审批、run resume 和配置文件。
-- [ ] TUI release binary。
-- [ ] 多 active run 与事件订阅模型。
-- [ ] 更细的 replay 语义。
-- [ ] MCP client、本地模型/私有推理服务 adapter、包管理器工具、issue/PR 工具和审计包导出。
+- [ ] P6-1：TUI RPC 入口、事件流消费和核心页面。
+- [ ] P6-2：TUI hunk 级审批、run resume、配置文件和 release binary。
+- [ ] P6-3：多 active run、replay 语义和事件订阅模型。
+- [ ] P6-4：生态扩展：MCP client、本地模型/私有推理服务 adapter、包管理器工具、issue/PR 工具和审计包导出。
 
 ### Phase 7：自由软件发布
 
-- [x] 确定许可证：AGPL-3.0-or-later 已作为项目许可证策略写入 README，后续发布阶段补齐正式 `LICENSE` 文件和源码提供说明。
-- [ ] 发布 `LICENSE`、源码获取说明和网络服务源码提供说明。
-- [ ] 发布源码包、Cargo crate、npm wrapper、VSIX、GitHub Release 校验和。
-- [ ] 建立公开 roadmap 和 issue 模板。
-- [ ] 增加 reproducible build 说明。
+- [x] P7-1：许可证策略确定。
+- [ ] P7-2：发布法律/源码提供文件。
+- [ ] P7-3：发布产物、校验和与源码包。
+- [ ] P7-4：公开 roadmap、issue 模板和贡献流程增强。
+- [ ] P7-5：reproducible build 说明。
 
 ## 安全与注意事项
 

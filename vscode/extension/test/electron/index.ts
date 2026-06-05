@@ -85,7 +85,8 @@ async function exerciseChatSendTurnDiagnosticsAndApproval(): Promise<void> {
     assert.equal(approvalProbe.approvalVisible, true);
     assert.equal(approvalProbe.workLogVisible, true);
     assert.equal(approvalProbe.workLogOpen, false);
-    assert.deepEqual(approvalProbe.providerActions, ["API Key", "Model", "Settings"]);
+    assert.deepEqual(approvalProbe.providerActions, ["API Key", "Model"]);
+    assert.equal(approvalProbe.settingsActionVisible, true);
     assert.ok(approvalProbe.visibleItemTitles.includes("You"));
     assert.ok(!approvalProbe.visibleItemTitles.includes("Approval required: shell"));
 
@@ -107,6 +108,10 @@ async function exerciseChatSendTurnDiagnosticsAndApproval(): Promise<void> {
     assert.equal(completedProbe.workLogOpen, false);
     assert.ok(completedProbe.visibleItemTitles.includes("You"));
     assert.ok(completedProbe.visibleItemTitles.includes("DeepSeek"));
+    assert.ok(completedProbe.markdownBlockCount >= 2);
+    assert.ok(completedProbe.markdownCodeBlocks.includes("ok"));
+    assert.ok(completedProbe.markdownLinks.includes("https://example.com/docs"));
+    assert.ok(completedProbe.markdownTables >= 1);
 
     const sendTurn = await waitFor("logged sendTurn with diagnostics", async () =>
       logEntry((entry) => entry.method === "agent.sendTurn" && entry.params?.message === "integration approval flow"),
@@ -200,6 +205,14 @@ async function exerciseRunListAndResume(): Promise<void> {
       : undefined;
   });
   assert.equal(resumed.submission.status, "idle");
+  const resumedProbe = await chatProbeSnapshot();
+  assert.equal(resumedProbe.conversationActive, true);
+  assert.ok(resumedProbe.visibleItemTitles.includes("DeepSeek"));
+  assert.ok(resumedProbe.markdownTables >= 1);
+  assert.ok(resumedProbe.markdownHorizontalRules >= 1);
+  assert.ok(resumedProbe.markdownInlineCodes.includes("parseAmount"));
+  assert.ok(resumedProbe.markdownInlineCodes.includes("src/ledger.js"));
+  assert.ok(resumedProbe.markdownText.includes("代码库检查总结"));
 
   await waitFor("logged resume request", async () =>
     logEntry((entry) => entry.method === "agent.resume" && entry.params?.runId === "run-history-1"),
@@ -273,6 +286,10 @@ async function exerciseChatKeyboardSubmit(): Promise<void> {
 
   const shifted = await chatProbe({ type: "keydown", key: "Enter", shiftKey: true });
   assert.equal(shifted.defaultPrevented, false);
+
+  const composing = await chatProbe({ type: "keydown", key: "Enter", isComposing: true });
+  assert.equal(composing.defaultPrevented, true);
+  assert.equal(composing.snapshot.promptValue, "keyboard integration turn");
 
   const submitted = await chatProbe({ type: "keydown", key: "Enter" });
   assert.equal(submitted.defaultPrevented, true);
@@ -491,6 +508,13 @@ interface WebviewProbeSnapshot {
   readonly runIds: readonly string[];
   readonly visibleItemTitles: readonly string[];
   readonly visibleItemTypes: readonly string[];
+  readonly markdownBlockCount: number;
+  readonly markdownCodeBlocks: readonly string[];
+  readonly markdownInlineCodes: readonly string[];
+  readonly markdownLinks: readonly string[];
+  readonly markdownTables: number;
+  readonly markdownHorizontalRules: number;
+  readonly markdownText: string;
   readonly workLogVisible: boolean;
   readonly workLogOpen: boolean;
   readonly workLogTitle: string;
@@ -499,4 +523,5 @@ interface WebviewProbeSnapshot {
   readonly sendDisabled: boolean;
   readonly cancelDisabled: boolean;
   readonly providerActions: readonly string[];
+  readonly settingsActionVisible: boolean;
 }

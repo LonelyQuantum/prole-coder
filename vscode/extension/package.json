@@ -13,17 +13,7 @@
   },
   "categories": ["Other"],
   "activationEvents": [
-    "onStartupFinished",
-    "onCommand:prole-coder.openChat",
-    "onCommand:prole-coder.openSettings",
-    "onCommand:prole-coder.configureDeepSeekApiKey",
-    "onCommand:prole-coder.clearDeepSeekApiKey",
-    "onCommand:prole-coder.showProviderStatus",
-    "onCommand:prole-coder.selectDeepSeekModel",
-    "onCommand:prole-coder.generateCommitMessage",
-    "onCommand:prole-coder.generatePrDescription",
-    "onView:prole-coder.chat",
-    "onChatParticipant:prole-coder.chatParticipant"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {

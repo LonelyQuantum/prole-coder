@@ -87,10 +87,12 @@ Phase 5 P5-6 到 P5-13 的 API key/model、Git 工作流、Sidebar 连续会话�
 - `providerSecretCommands.test.ts` 覆盖 Key 管理器的 `+ Add` 添加 key+alias、选择已有 active key、行内 edit 按钮修改 alias、trash 按钮删除非 active key、Clear API key、Select DeepSeek Model、含 model 的 provider status、idle 状态 RPC restart、active run 场景提示稍后生效。
 - `gitWorkflow.test.ts` 覆盖 staged diff、unstaged fallback、upstream/main base 选择、Generate Commit Message 写入 `repository.inputBox.value` 且不自动 commit、agent 重复 terminal event 只采纳首个终态、Generate PR Description 输出 markdown 且不自动创建 PR。
 - `rpcServer.test.ts` 覆盖 RPC child env 注入、key 轮换后重启使用新 env，以及 typed `agent.deleteRun` request；`providerSecretCommands.test.ts` 覆盖 model 切换后的 env 更新与 idle restart；`test/electron/index.ts` 覆盖新增命令在 VS Code test host 中注册。
-- `chatEvents.test.ts` 覆盖 tool/raw 过程事件默认折叠、用户消息/DeepSeek 回复默认可见、过程事件收敛到 Work log，以及无 assistant 时 `run.completed` 摘要仍可见；`runHistory.test.ts` 覆盖 `deleteRun` webview message 解析；`chatApprovals.test.ts` 覆盖内联审批消息解析；`webviewSerialization.test.ts` 覆盖 webview 初始 JSON 的 `undefined` 与 `<` 转义；Rust `agent-rpc`/`run_log` 测试覆盖同一 run 多 turn 续号和 inactive run 删除；`prole-coder-cli` 测试覆盖 DeepSeek missing API key RPC structured data。
+- `chatEvents.test.ts` 覆盖 tool/raw 过程事件默认折叠、用户消息/DeepSeek 回复默认可见、过程事件收敛到 Work log，以及无 assistant 时 `run.completed` 摘要仍可见；`runHistory.test.ts` 覆盖 `deleteRun` webview message 解析；`chatApprovals.test.ts` 覆盖内联审批消息解析；`webviewSerialization.test.ts` 覆盖 webview 初始 JSON 的 `undefined` 与 `<` 转义；`webviewHtml.test.ts` 覆盖生成后的 Sidebar HTML 内联脚本可被 JavaScript parser 解析，防止 template literal 反斜杠转义回归导致 webview ready 静默超时；extension-host webview probe 覆盖可见对话 Markdown 的代码块、表格、链接、inline code、horizontal rule 和中文表格 summary，并通过分块 replay 历史 `assistant.delta` 覆盖 Sidebar 高频事件合并刷新；Rust `agent-rpc`/`run_log` 测试覆盖同一 run 多 turn 续号和 inactive run 删除；`prole-coder-cli` 测试覆盖 DeepSeek missing API key RPC structured data。
 - 文档/打包验收已运行 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke`、`pnpm run vsix:alpha`、`git diff --check` 和敏感信息扫描。
 
-P5-14 作为持续 UX 测试与体验改进占位，保留真实插件试用后的回归入口；新增 Runs、Key/Model、审批、Chat、Output 日志或上下文压缩体验问题时，应先补可重复测试或手动验收说明，再在 `docs/phase-tasks.md` 中更新完成口径。P5-14d 已在 extension-host 中通过 test-mode webview probe 覆盖 resume 后继续发送新 turn、事件渲染、webview 内联确认完成 run 删除及 Run List 刷新、Sidebar 内联审批卡片、对话专属视图、Work log 折叠展示和 Enter / Shift+Enter 输入行为。
+P5-14 作为真实试用回归修复包，已把已发现的 Sidebar 对话、Work log、Markdown、provider/shell 稳定性和 composer / Settings 入口问题拆成 `docs/phase-tasks.md` 中的 P5-14a 到 P5-14h 子任务。新增 Runs、Key/Model、审批、Chat、Output 日志或上下文压缩体验问题时，应先补可重复测试或手动验收说明，再登记到 P5-15 或后续 Phase 任务；P5-15 保留真实试用后的持续 backlog，不得在完成前标记 Phase 5 完成。
+
+P5-15 已开始登记真实 VS Code 试用回归。Sidebar webview bootstrap、历史加载、Send 按钮、Enter/Shift+Enter、composition 状态输入行为、Markdown horizontal rule / 表格转义兼容性和历史 replay 高频事件应优先通过 extension-host webview probe 覆盖；涉及 HTML template literal 内联脚本的改动还应通过 `webviewHtml.test.ts` 的 parse smoke 覆盖。Markdown renderer 抽取成独立模块和更细边界测试已登记为 P5-15c。若本机 VS Code mutex 阻塞 `pnpm run vscode:test-electron`，必须至少运行 extension 单元测试并记录需要关闭测试实例后重跑 E2E。
 
 ## 新增测试的协作要求
 
@@ -171,7 +173,7 @@ Phase 2 的默认 CI 应优先覆盖离线、确定性测试：
 - 200K、500K、900K 样例仓库 Context Capsule 生成和 token 预算报告。
 - 真实多文件任务展示 manifest、选中文件/诊断、token 预算、provider usage/cache 和最终验证结果。
 
-Phase 2d 的大上下文手动入口：
+P2-4 的大上下文手动入口：
 
 ```powershell
 cargo test -p prole-coder-agent-core --test context_capsule_benchmark context_capsule_large_repository_budget_benchmark -- --ignored --exact --nocapture
@@ -179,7 +181,7 @@ cargo test -p prole-coder-agent-core --test context_capsule_benchmark context_ca
 
 该测试生成 200K、500K、900K 三档确定性样例 Context Capsule，输出 `inputTokens`、section tokens 和 omitted source 数量；默认 CI 只编译 ignored test，不自动执行。
 
-Phase 2c/2d 的 cache usage 手动入口：
+P2-3/P2-4 的 cache usage 手动入口：
 
 ```powershell
 cargo test -p prole-coder-agent-core --test deepseek_api_live live_cache_usage_summary_smoke_test -- --ignored --exact --nocapture
@@ -215,4 +217,4 @@ rg -n "sk-[A-Za-z0-9_-]+|C:\\User[s]\\|/Users/[^/]+/|/home/[^/]+/|DEEPSEEK_(CODE
 
 展示型 demo 的完整清单、运行命令和预期输出见 `demos.md`。`cargo demo`、`cargo demo-live`、`cargo demo-context`、`cargo demo-context-visual`、`cargo demo-truncation`、`cargo demo-schema` 和 `cargo demo-attachment` 均来自 `.cargo/config.toml`；新增或调整展示命令时，应先更新 `demos.md`，并且只在 demo 已实现、可运行后再加入 Cargo alias。
 
-Phase 2e 已补齐 context、truncation、schema、context-visual、attachment，并增强 `demo-live` 的 provider summary 展示。它们仍应默认 ignored，不进入普通 CI 自动执行，作为人工观察和阶段合并前验收入口。
+P2-5 已补齐 context、truncation、schema、context-visual、attachment，并增强 `demo-live` 的 provider summary 展示。它们仍应默认 ignored，不进入普通 CI 自动执行，作为人工观察和阶段合并前验收入口。
