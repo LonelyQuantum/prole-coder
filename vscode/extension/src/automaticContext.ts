@@ -85,7 +85,12 @@ export function automaticContextAttachmentFromTimeline(
   snapshot: ChatTimelineSnapshot,
   options: AutomaticContextOptions = {},
 ): TurnAttachment | undefined {
-  return automaticContextAttachmentFromMessages(messagesFromTimeline(snapshot.items), options);
+  const supersededItemIds = new Set(snapshot.supersededItemIds ?? []);
+  const items =
+    supersededItemIds.size === 0
+      ? snapshot.items
+      : snapshot.items.filter((item) => supersededItemIds.has(item.id) !== true);
+  return automaticContextAttachmentFromMessages(messagesFromTimeline(items), options);
 }
 
 export function mergeTurnAttachments(

@@ -57,6 +57,55 @@ test("chat timeline presents user and DeepSeek messages while folding work event
   assert.equal(snapshot.items.find((item) => item.type === "turn.started")?.kind, "user");
 });
 
+test("chat timeline hides superseded user messages while retaining audit items", () => {
+  const timeline = new ChatEventTimeline();
+
+  timeline.append(agentEvent(1, "turn.started", { userTask: "old request" }));
+  const snapshot = timeline.append(
+    agentEvent(
+      2,
+      "turn.started",
+      {
+        userTask: "edited request",
+        supersedes: {
+          messageId: "run_1:1",
+          turnId: "turn_1",
+        },
+      },
+      { turnId: "turn_2" },
+    ),
+  );
+
+  assert.deepEqual(
+    snapshot.items.map((item) => item.body),
+    ["old request", "edited request"],
+  );
+  assert.deepEqual(snapshot.supersededItemIds, ["run_1:1"]);
+  assert.deepEqual(
+    snapshot.visibleItems?.map((item) => item.body),
+    ["edited request"],
+  );
+});
+
+test("chat timeline only applies supersedes metadata from turn started events", () => {
+  const timeline = new ChatEventTimeline();
+
+  timeline.append(agentEvent(1, "turn.started", { userTask: "old request" }));
+  const snapshot = timeline.append(
+    agentEvent(2, "provider.completed", {
+      supersedes: {
+        messageId: "run_1:1",
+      },
+    }),
+  );
+
+  assert.equal(snapshot.supersededItemIds, undefined);
+  assert.deepEqual(
+    snapshot.visibleItems?.map((item) => item.body),
+    ["old request"],
+  );
+});
+
 test("chat timeline keeps completed summary visible when no assistant message exists", () => {
   const completed = createTimelineItem(agentEvent(1, "run.completed", { summary: "done" }));
   const presentation = presentTimelineItems([completed]);

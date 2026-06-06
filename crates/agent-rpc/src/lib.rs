@@ -23,7 +23,7 @@ use prole_coder_agent_core::{
         ApprovalDecision, ApprovalPolicy, ApprovalPolicyError, TextRange as CoreTextRange,
         TurnApprovalRequest, TurnAttachment as CoreTurnAttachment,
         TurnAttachmentKind as CoreTurnAttachmentKind, TurnEventSink, TurnEventSinkError,
-        TurnProvider,
+        TurnProvider, TurnSupersedes as CoreTurnSupersedes,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -314,6 +314,16 @@ pub struct SendTurnParams {
     pub mode: RpcRunMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<TurnAttachment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<TurnSupersedes>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnSupersedes {
+    pub message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,6 +373,48 @@ impl From<RpcRunMode> for AgentRunMode {
             RpcRunMode::Ask => Self::Ask,
         }
     }
+}
+
+fn core_turn_supersedes_from_rpc(
+    supersedes: &TurnSupersedes,
+) -> Result<CoreTurnSupersedes, AgentRpcHandlerError> {
+    let message_id = supersedes.message_id.trim();
+    if message_id.is_empty() || message_id.len() > 256 {
+        return Err(AgentRpcHandlerError::new(
+            JSON_RPC_INVALID_PARAMS,
+            "supersedes.messageId must be a non-empty string no longer than 256 bytes",
+        ));
+    }
+    let turn_id = supersedes
+        .turn_id
+        .as_deref()
+        .map(|value| {
+            if value.is_empty() || value.len() > 128 {
+                Err(AgentRpcHandlerError::new(
+                    JSON_RPC_INVALID_PARAMS,
+                    "supersedes.turnId must be a non-empty identifier no longer than 128 bytes",
+                ))
+            } else if !is_rpc_identifier_fragment(value) {
+                Err(AgentRpcHandlerError::new(
+                    JSON_RPC_INVALID_PARAMS,
+                    "supersedes.turnId must contain only ASCII letters, digits, `_`, or `-`",
+                ))
+            } else {
+                Ok(value.to_owned())
+            }
+        })
+        .transpose()?;
+
+    Ok(CoreTurnSupersedes {
+        message_id: message_id.to_owned(),
+        turn_id,
+    })
+}
+
+fn is_rpc_identifier_fragment(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 fn core_turn_attachment_from_rpc(
@@ -818,9 +870,12 @@ where
             .iter()
             .map(core_turn_attachment_from_rpc)
             .collect::<Result<Vec<_>, _>>()?;
-        let input = AgentTurnInput::new(turn_id.clone(), params.message.clone())
+        let mut input = AgentTurnInput::new(turn_id.clone(), params.message.clone())
             .with_mode(params.mode.into())
             .with_attachments(attachments);
+        if let Some(supersedes) = &params.supersedes {
+            input = input.with_supersedes(core_turn_supersedes_from_rpc(supersedes)?);
+        }
 
         let live_events = self.live_event_sender.clone();
         let active_run = spawn_active_run(ActiveRunSpawn {
@@ -3388,7 +3443,11 @@ mod tests {
                 "params": {
                     "runId": "run_rpc",
                     "message": "Read README",
-                    "mode": "ask"
+                    "mode": "ask",
+                    "supersedes": {
+                        "messageId": "run_rpc:2",
+                        "turnId": "turn_1"
+                    }
                 }
             })
             .to_string(),
@@ -3403,6 +3462,13 @@ mod tests {
         assert_eq!(handler.initialized.len(), 1);
         assert_eq!(handler.send_turns.len(), 1);
         assert_eq!(handler.send_turns[0].message, "Read README");
+        assert_eq!(
+            handler.send_turns[0]
+                .supersedes
+                .as_ref()
+                .map(|value| (value.message_id.as_str(), value.turn_id.as_deref())),
+            Some(("run_rpc:2", Some("turn_1")))
+        );
         let lines = output_lines(output);
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0]["id"], "init_1");
@@ -3911,6 +3977,7 @@ mod tests {
                 message: "First task".to_owned(),
                 mode: super::RpcRunMode::Ask,
                 attachments: Vec::new(),
+                supersedes: None,
             })
             .expect("first turn should run");
         let second = handler
@@ -3919,6 +3986,7 @@ mod tests {
                 message: "Second task".to_owned(),
                 mode: super::RpcRunMode::Ask,
                 attachments: Vec::new(),
+                supersedes: None,
             })
             .expect("second turn should append to the same run");
 
@@ -3952,6 +4020,76 @@ mod tests {
     }
 
     #[test]
+    fn turn_loop_rpc_handler_records_superseded_turn_metadata() {
+        let workspace = TestWorkspace::new("rpc");
+        let mut handler = AgentTurnLoopRpcHandler::new(final_provider_factory);
+        handler
+            .initialize(
+                serde_json::from_value(initialize_params_for(workspace.path_str()))
+                    .expect("initialize params should deserialize"),
+            )
+            .expect("handler should initialize");
+
+        handler
+            .send_turn(SendTurnParams {
+                run_id: Some("run_superseded_turn".to_owned()),
+                message: "Original request".to_owned(),
+                mode: super::RpcRunMode::Ask,
+                attachments: Vec::new(),
+                supersedes: None,
+            })
+            .expect("first turn should run");
+        handler
+            .send_turn(SendTurnParams {
+                run_id: Some("run_superseded_turn".to_owned()),
+                message: "Edited request".to_owned(),
+                mode: super::RpcRunMode::Ask,
+                attachments: Vec::new(),
+                supersedes: Some(super::TurnSupersedes {
+                    message_id: "run_superseded_turn:2".to_owned(),
+                    turn_id: Some("turn_1".to_owned()),
+                }),
+            })
+            .expect("edited turn should run");
+
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        let events = store
+            .load_run("run_superseded_turn")
+            .expect("run log should load");
+        let edited_turn_started = events
+            .iter()
+            .find(|event| {
+                event.event_type == "turn.started" && event.turn_id.as_deref() == Some("turn_2")
+            })
+            .expect("edited turn.started event should be recorded");
+
+        assert_eq!(
+            edited_turn_started.payload["supersedes"]["messageId"],
+            json!("run_superseded_turn:2")
+        );
+        assert_eq!(
+            edited_turn_started.payload["supersedes"]["turnId"],
+            json!("turn_1")
+        );
+    }
+
+    #[test]
+    fn send_turn_supersedes_rejects_invalid_turn_id() {
+        let error = super::core_turn_supersedes_from_rpc(&super::TurnSupersedes {
+            message_id: "run_superseded_turn:2".to_owned(),
+            turn_id: Some("turn_1\nnext".to_owned()),
+        })
+        .expect_err("newline in supersedes turn id should be rejected");
+
+        assert_eq!(error.code, super::JSON_RPC_INVALID_PARAMS);
+        assert!(
+            error.message.contains("supersedes.turnId"),
+            "unexpected error message: {}",
+            error.message
+        );
+    }
+
+    #[test]
     fn turn_loop_rpc_handler_deletes_inactive_run_logs() {
         let workspace = TestWorkspace::new("rpc");
         let mut handler = AgentTurnLoopRpcHandler::new(final_provider_factory);
@@ -3967,6 +4105,7 @@ mod tests {
                 message: "Say hello".to_owned(),
                 mode: super::RpcRunMode::Ask,
                 attachments: Vec::new(),
+                supersedes: None,
             })
             .expect("turn should complete before deletion");
 
@@ -4507,6 +4646,7 @@ mod tests {
                 message: "Run a command".to_owned(),
                 mode: super::RpcRunMode::Edit,
                 attachments: Vec::new(),
+                supersedes: None,
             })
             .expect("sendTurn should pause for approval");
         assert!(send_output.events.iter().any(|event| {
@@ -4575,6 +4715,7 @@ mod tests {
                     range: None,
                     text: None,
                 }],
+                supersedes: None,
             })
             .expect("file attachments should be accepted");
         let context_built = send_output

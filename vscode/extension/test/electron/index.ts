@@ -352,6 +352,8 @@ async function exerciseChatKeyboardSubmit(): Promise<void> {
     logEntry((entry) => entry.method === "agent.sendTurn" && entry.params?.message === "keyboard integration turn edited"),
   );
   assert.equal(editedSendTurn.params?.runId, sentRunId);
+  assert.equal(editedSendTurn.params?.supersedes?.turnId, sentTurnId);
+  assert.match(String(editedSendTurn.params?.supersedes?.messageId), new RegExp(`^${sentRunId}:`));
 
   const editedApproval = await waitFor("inline approval for edited resend", async () => {
     const current = await chatState();
@@ -516,6 +518,10 @@ interface RpcFixtureLogEntry {
     readonly runId?: string;
     readonly reason?: string;
     readonly attachments?: ReadonlyArray<Record<string, unknown>>;
+    readonly supersedes?: {
+      readonly messageId?: string;
+      readonly turnId?: string;
+    };
   };
   readonly event?: {
     readonly type?: string;

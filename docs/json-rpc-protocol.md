@@ -267,6 +267,12 @@ interface SendTurnParams {
   message: string;
   mode: "plan" | "edit" | "review" | "ask";
   attachments?: TurnAttachment[];
+  supersedes?: TurnSupersedes;
+}
+
+interface TurnSupersedes {
+  messageId: string;
+  turnId?: string;
 }
 
 interface TurnAttachment {
@@ -297,6 +303,8 @@ Result 返回后，进度通过 `agent.event` notification 持续到达。
 当前 Rust request loop 已能解析 `agent.sendTurn` 并分发给 `AgentRpcRequestHandler`。`crates/agent-rpc::AgentTurnLoopRpcHandler` 已能创建 run、选择注入的 provider factory、启动后台 Turn Loop worker，并在创建 run 后立即返回 `accepted`。Run Log 事件会通过独立的 live event queue 发送到 request loop 的单 writer，并持续输出为 `agent.event` notification；遇到审批时，worker 会先检查 session/workspace 持久批准，再在 pending approval 队列中等待 `agent.approve` / `agent.reject` / `agent.cancel`，并在超时时写入取消事件。如果 request loop 读到 EOF 或 writer 失败，会触发 handler shutdown / disconnect cancel；对于 active run，shutdown 会把未决审批解析为 `decision: "canceled"` 并写入 `run.canceled`，或等待已有 terminal event 收口。
 
 Phase 2c 起，Rust handler 会消费 `attachments` 并转换为 Context Capsule 来源：`file` 由 Core 在工作区内读取，复用工具执行层的路径和敏感目录保护；`selection` / `explicit_content` 由前端提供文本但受数量、大小、重复来源和路径校验限制；`diagnostic` 由 VS Code/TUI 等前端传入结构化诊断文本。VS Code 插件在发送 turn 时会把当前 Problems 快照转换为 diagnostic attachments，并按协议 attachment 上限优先保留 error；Phase 4 起，Sidebar Chat 与原生 `@prole` Chat Participant 会把历史对话/事件摘要压缩为受限长度的 `explicit_content` attachment，并为该自动上下文预留一个 attachment 槽位。Sidebar timeline 来源会在生成自动上下文前先限制单条消息长度，避免极端长 `assistant.delta` 合并内容造成过大的中间文本。当前默认限制是单 turn 最多 32 个 attachment，单个 attachment 文本最多 256 KiB；超过限制会让该 run 以 `run.failed` / `E_INVALID_ATTACHMENT` 结束。
+
+`supersedes` 用于编辑重发。前端可以在同一 run 内发送新 turn 时声明它覆盖了某个历史用户消息的 timeline `messageId`，并可附带原 `turnId`。Server 不会重写或删除旧 run log 事件，而是在新 `turn.started.payload.supersedes` 中追加审计元数据；resume/reload 时前端据此隐藏或标记被覆盖的用户消息，自动上下文压缩也应跳过这些 superseded 用户消息。`messageId` 是前端 timeline item id，不要求符合 `runId` 标识符字符集；Rust RPC handler 只接受非空且不超过 256 bytes 的 `messageId`。`turnId` 如果提供，必须是非空、不超过 128 bytes，且只包含 ASCII 字母、数字、`_` 或 `-`。
 
 ### `agent.approve`
 
@@ -581,8 +589,11 @@ interface RunCanceled {
 interface TurnStarted {
   turnId: string;
   userTask: string;
+  supersedes?: TurnSupersedes;
 }
 ```
+
+`supersedes` 与 `agent.sendTurn.supersedes` 语义一致，只出现在编辑重发的新 turn 上；旧 turn 的 `turn.started` 仍保留原始 `userTask` 以满足本地审计和故障复盘。
 
 ### `assistant.delta`
 

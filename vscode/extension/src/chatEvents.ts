@@ -36,6 +36,7 @@ export interface ChatTimelineSnapshot {
   readonly items: readonly ChatTimelineItem[];
   readonly visibleItems?: readonly ChatTimelineItem[];
   readonly workItems?: readonly ChatTimelineItem[];
+  readonly supersededItemIds?: readonly string[];
   readonly latestRunId?: string;
   readonly latestStatus?: string;
 }
@@ -48,6 +49,7 @@ export class ChatEventTimeline {
   private readonly maxItems: number;
   private readonly items: ChatTimelineItem[] = [];
   private readonly assistantItemsByTurn = new Map<string, string>();
+  private readonly supersededItemIds = new Set<string>();
   private eventCount = 0;
   private latestRunId: string | undefined;
   private latestStatus: string | undefined;
@@ -59,6 +61,10 @@ export class ChatEventTimeline {
   append(event: AgentEventEnvelope): ChatTimelineSnapshot {
     this.eventCount += 1;
     this.latestRunId = event.runId;
+    const supersededItemId = supersededItemIdFromEvent(event);
+    if (supersededItemId !== undefined) {
+      this.supersededItemIds.add(supersededItemId);
+    }
 
     if (event.type === "assistant.delta") {
       this.appendAssistantDelta(event);
@@ -75,6 +81,7 @@ export class ChatEventTimeline {
   clear(): ChatTimelineSnapshot {
     this.items.length = 0;
     this.assistantItemsByTurn.clear();
+    this.supersededItemIds.clear();
     this.eventCount = 0;
     this.latestRunId = undefined;
     this.latestStatus = undefined;
@@ -83,12 +90,15 @@ export class ChatEventTimeline {
 
   snapshot(): ChatTimelineSnapshot {
     const items = this.items.map((item) => ({ ...item }));
-    const presentation = presentTimelineItems(items);
+    const presentation = presentTimelineItems(items, this.supersededItemIds);
     return {
       eventCount: this.eventCount,
       items,
       visibleItems: presentation.visibleItems,
       workItems: presentation.workItems,
+      ...(this.supersededItemIds.size === 0
+        ? {}
+        : { supersededItemIds: Array.from(this.supersededItemIds) }),
       ...(this.latestRunId === undefined ? {} : { latestRunId: this.latestRunId }),
       ...(this.latestStatus === undefined ? {} : { latestStatus: this.latestStatus }),
     };
@@ -331,7 +341,10 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
   }
 }
 
-export function presentTimelineItems(items: readonly ChatTimelineItem[]): {
+export function presentTimelineItems(
+  items: readonly ChatTimelineItem[],
+  supersededItemIds: ReadonlySet<string> = new Set(),
+): {
   readonly visibleItems: readonly ChatTimelineItem[];
   readonly workItems: readonly ChatTimelineItem[];
 } {
@@ -340,6 +353,9 @@ export function presentTimelineItems(items: readonly ChatTimelineItem[]): {
   const workItems: ChatTimelineItem[] = [];
 
   for (const item of items) {
+    if (supersededItemIds.has(item.id)) {
+      continue;
+    }
     if (isWorkLogItem(item, hasAssistantMessage)) {
       workItems.push(item);
     } else {
@@ -368,6 +384,16 @@ export function isWorkLogItem(item: ChatTimelineItem, hasAssistantMessage = fals
 
 function assistantKey(event: AgentEventEnvelope): string {
   return `${event.runId}:${event.turnId ?? ""}`;
+}
+
+function supersededItemIdFromEvent(event: AgentEventEnvelope): string | undefined {
+  if (event.type !== "turn.started") {
+    return undefined;
+  }
+
+  const payload = record(event.payload);
+  const supersedes = record(payload?.["supersedes"]);
+  return textField(supersedes, "messageId");
 }
 
 function latestStatusFor(item: ChatTimelineItem): string {

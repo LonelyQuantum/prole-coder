@@ -197,15 +197,19 @@ where
                 "mode": input.mode.as_str(),
             }),
         )?;
+        let mut turn_started_payload = json!({
+            "turnId": input.turn_id.clone(),
+            "userTask": input.user_task.clone(),
+        });
+        if let Some(supersedes) = &input.supersedes {
+            turn_started_payload["supersedes"] = serde_json::to_value(supersedes)?;
+        }
         append_turn_event(
             run_log,
             event_sink,
             "turn.started",
             Some(input.turn_id.clone()),
-            json!({
-                "turnId": input.turn_id.clone(),
-                "userTask": input.user_task.clone(),
-            }),
+            turn_started_payload,
         )?;
 
         let context = self.build_context(&input)?;
@@ -1253,6 +1257,7 @@ pub struct AgentTurnInput {
     pub mode: AgentRunMode,
     pub context_items: Vec<ContextItem>,
     pub attachments: Vec<TurnAttachment>,
+    pub supersedes: Option<TurnSupersedes>,
     pub cancellation_token: CancellationToken,
 }
 
@@ -1264,6 +1269,7 @@ impl AgentTurnInput {
             mode: AgentRunMode::Edit,
             context_items: Vec::new(),
             attachments: Vec::new(),
+            supersedes: None,
             cancellation_token: CancellationToken::new(),
         }
     }
@@ -1288,10 +1294,23 @@ impl AgentTurnInput {
         self
     }
 
+    pub fn with_supersedes(mut self, supersedes: TurnSupersedes) -> Self {
+        self.supersedes = Some(supersedes);
+        self
+    }
+
     pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
         self.cancellation_token = cancellation_token;
         self
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnSupersedes {
+    pub message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

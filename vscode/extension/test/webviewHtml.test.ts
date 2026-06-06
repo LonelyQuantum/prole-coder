@@ -5,6 +5,14 @@ import path from "node:path";
 import test from "node:test";
 import { Script, runInNewContext } from "node:vm";
 
+import { WEBVIEW_MARKDOWN_RENDERER_SCRIPT } from "../src/webviewMarkdown.js";
+
+test("webview markdown renderer script export exposes expected entrypoint", () => {
+  assert.ok(WEBVIEW_MARKDOWN_RENDERER_SCRIPT.trim().length > 0);
+  assert.match(WEBVIEW_MARKDOWN_RENDERER_SCRIPT, /function appendMarkdownBlocks\(/);
+  assert.match(WEBVIEW_MARKDOWN_RENDERER_SCRIPT, /function safeMarkdownHref\(/);
+});
+
 test("generated chat webview inline script parses as JavaScript", () => {
   const chatViewPath = path.resolve(__dirname, "../src/chatView.js");
   const moduleObject: { exports: Record<string, unknown> } = { exports: {} };

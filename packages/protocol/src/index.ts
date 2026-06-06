@@ -478,11 +478,17 @@ export interface TurnAttachment {
   readonly text?: string;
 }
 
+export interface TurnSupersedes {
+  readonly messageId: string;
+  readonly turnId?: string;
+}
+
 export interface SendTurnParams {
   readonly runId?: string;
   readonly message: string;
   readonly mode: RpcRunMode;
   readonly attachments?: readonly TurnAttachment[];
+  readonly supersedes?: TurnSupersedes;
 }
 
 export interface SendTurnResult {

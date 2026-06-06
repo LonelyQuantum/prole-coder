@@ -1,4 +1,4 @@
-import type { RpcRunMode, SendTurnParams, TurnAttachment } from "@prole-coder/protocol" with {
+import type { RpcRunMode, SendTurnParams, TurnAttachment, TurnSupersedes } from "@prole-coder/protocol" with {
   "resolution-mode": "import",
 };
 
@@ -15,6 +15,7 @@ export const CHAT_RUN_MODES = ["edit", "ask", "plan", "review"] as const satisfi
 export interface ChatTurnSubmission {
   readonly message: string;
   readonly mode: RpcRunMode;
+  readonly supersedes?: TurnSupersedes;
 }
 
 export type ChatTurnSubmissionParseResult =
@@ -42,11 +43,17 @@ export function parseChatTurnSubmission(value: unknown): ChatTurnSubmissionParse
     return { ok: false, error: "Choose a valid run mode." };
   }
 
+  const supersedes = parseTurnSupersedes(value["supersedes"]);
+  if (supersedes === false) {
+    return { ok: false, error: "Invalid edit resend metadata." };
+  }
+
   return {
     ok: true,
     value: {
       message,
       mode,
+      ...(supersedes === undefined ? {} : { supersedes }),
     },
   };
 }
@@ -59,6 +66,7 @@ export function sendTurnParams(
     message: submission.message,
     mode: submission.mode,
     ...(attachments.length === 0 ? {} : { attachments }),
+    ...(submission.supersedes === undefined ? {} : { supersedes: submission.supersedes }),
   };
 }
 
@@ -68,4 +76,23 @@ export function isRpcRunMode(value: unknown): value is RpcRunMode {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function parseTurnSupersedes(value: unknown): TurnSupersedes | undefined | false {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  const messageId = typeof value["messageId"] === "string" ? value["messageId"].trim() : "";
+  if (messageId.length === 0) {
+    return false;
+  }
+  const turnId = typeof value["turnId"] === "string" ? value["turnId"].trim() : "";
+  return {
+    messageId,
+    ...(turnId.length === 0 ? {} : { turnId }),
+  };
 }

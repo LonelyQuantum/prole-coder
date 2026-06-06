@@ -28,6 +28,29 @@ test("chat input accepts trimmed messages with valid run modes", () => {
   }
 });
 
+test("chat input forwards edit resend supersede metadata", () => {
+  const parsed = parseChatTurnSubmission({
+    message: "  updated request  ",
+    mode: "edit",
+    supersedes: {
+      messageId: "  run_1:2  ",
+      turnId: "  turn_1  ",
+    },
+  });
+
+  assert.equal(parsed.ok, true);
+  if (parsed.ok) {
+    assert.deepEqual(sendTurnParams(parsed.value), {
+      message: "updated request",
+      mode: "edit",
+      supersedes: {
+        messageId: "run_1:2",
+        turnId: "turn_1",
+      },
+    });
+  }
+});
+
 test("chat input rejects empty messages and invalid modes", () => {
   assert.deepEqual(parseChatTurnSubmission({ message: "  ", mode: "edit" }), {
     ok: false,
@@ -36,6 +59,10 @@ test("chat input rejects empty messages and invalid modes", () => {
   assert.deepEqual(parseChatTurnSubmission({ message: "hello", mode: "invalid" }), {
     ok: false,
     error: "Choose a valid run mode.",
+  });
+  assert.deepEqual(parseChatTurnSubmission({ message: "hello", mode: "edit", supersedes: {} }), {
+    ok: false,
+    error: "Invalid edit resend metadata.",
   });
 });
 

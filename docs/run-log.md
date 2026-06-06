@@ -60,7 +60,7 @@ Run Log 本身负责 append/load 串行化，并允许 Turn Loop 在同一 run �
 每个 run 创建时会同步创建 `summary.json`。之后每次成功追加事件，Run Log 会根据事件更新 summary：
 
 - `run.started`：记录 `startedAtUnixMs`、`mode` 和运行状态。
-- `turn.started`：使用已脱敏的 `userTask` 更新 `title`。
+- `turn.started`：使用已脱敏的 `userTask` 更新 `title`；如果 payload 带 `supersedes`，表示该新 turn 是编辑重发并覆盖某个历史用户消息的展示语义，Run Log 仍保留旧 turn 原始输入用于审计。
 - `run.completed`：状态变为 `completed`，记录完成时间、最终摘要、变更文件和验证状态。
 - `run.failed`：状态变为 `failed`，记录失败消息。
 - `run.canceled`：状态变为 `canceled`，记录取消原因。
@@ -90,6 +90,8 @@ Run Log 本身负责 append/load 串行化，并允许 Turn Loop 在同一 run �
 - `type` 使用 `docs/json-rpc-protocol.md` 中的事件名，例如 `run.started`、`assistant.delta`、`tool.completed`。
 - `payload` 当前是 `serde_json::Value`，具体 schema 后续会和 JSON-RPC 协议、TypeScript 协议包对齐。
 
+编辑重发不会修改或删除旧 JSONL 行。前端通过 `agent.sendTurn.supersedes` 把被覆盖消息的 timeline `messageId` 和可选 `turnId` 写入新 `turn.started.payload.supersedes`；`agent.resume` 回放时同一 payload 原样返回，VS Code/TUI 可以隐藏或标记被覆盖的用户消息，同时调试工具仍可从旧 `turn.started.userTask` 查看原始输入。
+
 ## 路径与标识符规则
 
 - workspace root 必须是已经存在的目录。
@@ -118,6 +120,7 @@ Run Log 本身负责 append/load 串行化，并允许 Turn Loop 在同一 run �
 - 写入前脱敏敏感字段和明显密钥片段。
 - malformed tool-call arguments 会写入 run-scoped 诊断文件，并在 `run.failed.diagnosticFile` 暴露本地路径。
 - run-scoped payload 文件支持 chunk append 和读取，用于 `apply_patch.payloadRef` 这类大参数引用；chunk 追加不触碰 workspace 文件。
+- 编辑重发的 `turn.started.payload.supersedes` 会随 run log 保存；RPC/VS Code 测试覆盖同一 run 内新 turn 覆盖旧用户消息且 resume 后可重建隐藏集合。
 - 超长字符串和数组会被截断，并记录 `runLogTruncation` 元数据。
 - `SerializedRunLog` 多线程 clone 并发追加时，仍生成连续 `seq`，并可被重新打开为正确的下一条序号。
 - summary metadata 随事件追加更新，并可按最近更新时间列出。

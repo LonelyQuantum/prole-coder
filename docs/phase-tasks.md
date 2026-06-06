@@ -1,6 +1,6 @@
 # 详细任务索引
 
-状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-14 已完成；P5-15 真实试用 UX backlog 仍未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
+状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-15 已完成；P5-16 真实试用 UX backlog 仍未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
 
 本文档是详细设计文档里的任务账本。README 保留高层开发计划；这里把各模块文档中出现的“已实现、尚未实现、后续增强、下一步”收敛为可勾选任务，避免后续工作只散落在说明文字里。
 
@@ -113,7 +113,7 @@
 
 ## Phase 5：VS Code Codex-like UX 与开发工作流
 
-状态：进行中。P5-1 到 P5-14 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收、Output Channel、API key/model 配置、错误恢复、只读 Git context、GitLens-like commit / PR 文案生成工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误码与恢复动作，以及真实试用回归修复包；P5-15 真实试用 UX backlog 持续收敛仍未完成。G4 自动 commit / push / create PR 留作后续增强。
+状态：进行中。P5-1 到 P5-15 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收、Output Channel、API key/model 配置、错误恢复、只读 Git context、GitLens-like commit / PR 文案生成工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误码与恢复动作、真实试用回归修复包，以及第二批真实试用 UX 收敛；P5-16 真实试用 UX backlog 持续收敛仍未完成。G4 自动 commit / push / create PR 留作后续增强。
 
 | 状态 | 任务 | 来源 | 说明 |
 | --- | --- | --- | --- |
@@ -139,14 +139,14 @@
 | [x] | P5-14g：Sidebar Markdown 渲染与渲染错误隔离 | `docs/vscode-extension.md`、`docs/testing.md` | 已完成：Sidebar 可见对话消息使用安全 DOM Markdown 渲染，覆盖标题、列表、代码块、表格、链接和行内格式；Work log / 工具输出继续保持纯文本便于排错；单条 Markdown 渲染失败会回退为纯文本，并通过 webview error -> `Output > ProleCoder` 记录诊断。验收：`pnpm --filter prole-coder-vscode typecheck`、`pnpm --filter prole-coder-vscode test`、`pnpm run vscode:test-electron`。 |
 | [x] | P5-14h：Sidebar composer 交互与 Settings 入口回归修复 | `README.md`、`docs/vscode-extension.md`、`docs/testing.md` | 已完成：Enter 与 Send 按钮统一提交路径，Shift+Enter 继续换行；发送后立即显示 pending 用户消息，避免等待后端事件时界面空白；Settings 入口移到右上角齿轮按钮，composer 保留 API Key / Model 快捷入口。验收：`pnpm --filter prole-coder-vscode typecheck`、`pnpm --filter prole-coder-vscode test`、`pnpm run vscode:test-electron`。 |
 | [x] | P5-15a：Sidebar webview bootstrap、历史加载与发送交互回归修复 | `docs/testing.md`、`docs/vscode-extension.md` | 已完成：webview 初始化和事件处理增加异常隔离并写入 `Output > ProleCoder`，初始化成功会发送 ready 诊断；CSP 明确允许 VS Code webview nonce script 执行，Markdown parser 在 HTML template literal 中的反斜杠转义已修正，避免 inline script parse error 后历史加载和发送事件全部失效；`agent.event` 高频 replay 的 snapshot/submission/context 推送改为短延迟合并，避免历史 `assistant.delta` 连续回放时反复完整 Markdown 重渲染卡住 Sidebar；安全 DOM Markdown renderer 已补齐 horizontal rule 分隔线渲染和表格 `\|` 转义边界；新增 `webviewHtml.test.ts` 解析生成后的内联脚本，extension-host fixture 用中文 Markdown 表格、inline code 与 horizontal rule 分块 replay 覆盖历史对话渲染；Enter 默认发送、Shift+Enter 换行，composition 状态下 Enter 先阻止 textarea 换行但不误发；Send/keyboard 交互继续由 extension-host probe 覆盖。 |
-| [ ] | P5-15b：Sidebar Markdown renderer 模块化与独立边界测试 | `docs/testing.md`、`docs/vscode-extension.md` | 未完成：将当前 webview inline Markdown parser 抽取为可独立测试的模块或共享 renderer，覆盖 horizontal rule、表格转义、嵌套/未闭合行内标记、链接边界和大文本性能；当前已由 `webviewHtml.test.ts` parse smoke 与 extension-host probe 覆盖主要回归。 |
+| [x] | P5-15b：Sidebar Markdown renderer 模块化与独立边界测试 | `docs/testing.md`、`docs/vscode-extension.md` | 已完成：抽取 `webviewMarkdown.ts` 作为 Sidebar 安全 DOM Markdown renderer 脚本模块，`chatView.ts` 只负责注入和调用；新增 `webviewMarkdown.test.ts` 用轻量 fake DOM 独立覆盖 horizontal rule、表格 `\|` 转义、嵌套/未闭合行内标记、链接安全边界和大文本渲染，`webviewHtml.test.ts` 继续覆盖生成后 inline script parse smoke。 |
 | [x] | P5-15c：Workspace patch 免审批与 patch mismatch 可恢复 | `docs/approval-model.md`、`docs/tool-system.md`、`docs/vscode-extension.md` | 已完成：`apply_patch` 仍报告 `write` 风险，但最多 5 个 `expectedFiles` 的受限 workspace 代码修改默认 `approval=none`，不会在 Sidebar 打断对话；超过阈值的 bulk patch 或 workspace policy 文件 patch 会动态要求审批并展示风险原因；`InvalidPatch` / `PatchFileMismatch` / `PatchHunkMismatch` 会作为 `tool.completed status=failed` 返回给模型，便于重新读取文件后重试，而不是直接 `run.failed` 终止，且这些可恢复失败发生在写盘前，`reversePatch` 为空。 |
 | [x] | P5-15d：历史 run resume 审批副作用隔离 | `docs/vscode-extension.md`、`docs/testing.md` | 已完成：VS Code `RpcServerManager` 会把 `agent.resume` 返回的 replay 事件在本地标记为 `replay: true`；`ApprovalEventController` 和 `PatchDiffPreviewController` 忽略 replayed `tool.approvalRequired` / patch preview，避免打开旧对话时重新弹出历史审批卡片或重开旧 diff；后续同一 run 的 live 事件达到 `nextSeq` 后恢复正常审批。验收：`pnpm --filter prole-coder-vscode typecheck`、`pnpm --filter prole-coder-vscode test`。 |
 | [x] | P5-15e：Sidebar 编辑重发与发送中停止入口 | `docs/vscode-extension.md`、`docs/testing.md` | 已完成：用户消息新增 Edit 回填入口，可修改后在同一会话继续发送；当前 Sidebar 会隐藏被编辑消息，避免同屏保留旧消息副本，并把 superseded message id 写入 VS Code webview state 以跨 webview reload 保留；composer 发送按钮改为回车符号，turn 运行中切换为方块停止按钮并复用 `agent.cancel`，隐藏旧的独立 Cancel 按钮；Enter 只负责发送，运行中不会误触停止。验收：补充 extension-host probe 覆盖编辑重发、旧消息隐藏、superseded id 持久化和停止按钮取消路径。 |
 | [x] | P5-15f：输出长度上限放宽与 length 截断工具调用续写 | `docs/cli.md`、`docs/turn-loop.md`、`docs/vscode-extension.md` | 已完成：CLI/RPC DeepSeek 默认 `--max-output-tokens` 从 1024 放宽到 65536，避免真实项目修复时过早触发长度截断；当 provider 以 `finishReason=length` 结束且已经拼出工具调用列表时，Turn Loop 不执行可能截断的工具调用，而是追加恢复提示，要求模型丢弃半截参数并重新发出完整 JSON 工具调用或继续简短工作。验收：新增 Turn Loop fixture 覆盖 length 截断工具调用不会执行 partial call、后续完整 `apply_patch` 可继续完成。 |
 | [x] | P5-15g：Patch preview 宽容 hunk 计数解析 | `docs/vscode-extension.md`、`docs/testing.md` | 已完成：VS Code native diff preview 对模型生成的小幅 underdeclared hunk header 改为按实际 patch 行重新计算 old/new count，避免 `hunk contains more lines than declared` 只影响预览；严重超量仍会拒绝预览，防止损坏 patch 被误展示；Core 仍保留真实 patch 应用与路径安全校验。验收：补充 `patchPreview.test.ts` 覆盖计数偏小的 unified diff 仍能生成 preview、严重偏差会失败。 |
-| [ ] | P5-15h：编辑重发的后端历史覆盖 / 分叉语义 | `docs/json-rpc-protocol.md`、`docs/run-log.md`、`docs/vscode-extension.md` | 未完成：当前 Edit 主要是 Sidebar 交互层的回填与本地旧消息隐藏，真实 run log 仍以新 turn 追加记录。后续需要协议化 `agent.resendTurn` / run fork / supersede metadata，使 reload/resume 后也能稳定隐藏或标记被覆盖的用户消息，并明确审计日志如何保留原始输入。 |
-| [ ] | P5-15z：真实试用 UX backlog 持续收敛 | `README.md`、`docs/testing.md`、`docs/vscode-extension.md` | 未完成：继续根据真实 VS Code 插件试用收集 Runs、Key/Model/Settings、审批、Chat、Output 日志、上下文压缩、Markdown 兼容性和大工具参数稳定性问题；新增可执行项时优先拆成新的 P5-15 子任务或后续 Phase 任务，不能把新需求继续堆进本行。 |
+| [x] | P5-15h：编辑重发的后端历史覆盖 / 分叉语义 | `docs/json-rpc-protocol.md`、`docs/run-log.md`、`docs/vscode-extension.md` | 已完成：在 `agent.sendTurn` 增加可选 `supersedes` 元数据，Sidebar Edit 重发会传递被覆盖用户消息的 `messageId` 和可选 `turnId`；Rust RPC/Core 会把该信息写入新 `turn.started.payload.supersedes`，Run Log 继续追加保留旧输入用于审计；`ChatEventTimeline` 和自动上下文会据此隐藏/跳过 superseded 用户消息，reload/resume 后不再只依赖 webview state。验收：新增 TS timeline/input/automatic-context/Electron fixture 覆盖与 Rust `agent-rpc` run log 测试。 |
+| [ ] | P5-16z：真实试用 UX backlog 持续收敛 | `README.md`、`docs/testing.md`、`docs/vscode-extension.md` | 未完成：继续根据真实 VS Code 插件试用收集 Runs、Key/Model/Settings、审批、Chat、Output 日志、上下文压缩、Markdown 兼容性和大工具参数稳定性问题；新增可执行项时优先拆成新的 P5-16 子任务或后续 Phase 任务，不能把新需求继续堆进本行。 |
 
 ## Phase 6：TUI 与生态扩展
 

@@ -152,6 +152,7 @@ function handleSendTurn(request) {
     });
     emitEvent(runId, turnId, "turn.started", {
       userTask: message,
+      ...(record(params?.supersedes) === undefined ? {} : { supersedes: params.supersedes }),
     });
     emitContextBuilt(runId, turnId);
 
