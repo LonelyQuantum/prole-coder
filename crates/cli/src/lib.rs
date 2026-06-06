@@ -46,7 +46,7 @@ use prole_coder_agent_rpc::{
 use serde_json::{Value, json};
 use thiserror::Error;
 
-const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1_024;
+const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 65_536;
 const DEFAULT_VERIFY_TIMEOUT_MS: u64 = 120_000;
 const CLI_RUN_JSON_RPC_ID: &str = "cli.run";
 const DEEPSEEK_PROVIDER_NAME: &str = "deepseek";

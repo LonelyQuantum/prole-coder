@@ -131,6 +131,26 @@ test("approval controller treats the same approval id in different runs as disti
   );
 });
 
+test("approval controller ignores replayed approval events from historical run resume", async () => {
+  const rpc = new FakeApprovalRpcClient();
+  let promptCount = 0;
+  const controller = new ApprovalEventController(rpc, fakeWindow, fakeNotifier(), async (_window, request) => {
+    promptCount += 1;
+    return {
+      kind: "approve",
+      approvalId: request.approvalId,
+      persist: "never",
+    };
+  });
+
+  rpc.emit({ ...approvalEvent(), replay: true });
+  await controller.whenIdle();
+
+  assert.equal(promptCount, 0);
+  assert.deepEqual(rpc.approvals, []);
+  assert.deepEqual(rpc.rejections, []);
+});
+
 test("approval controller prepares approval preview before prompting", async () => {
   const rpc = new FakeApprovalRpcClient();
   const order: string[] = [];

@@ -75,6 +75,8 @@ provider stream 中的 content delta 会立即写入 `assistant.delta`，payload
 
 如果 `provider.completed.finishReason` 为 `length` 且没有 tool calls，Turn Loop 不会把空文本或截断文本当作 `run.completed.summary`；它会把截断 assistant 回合保留在内部消息历史中，并追加一次只要求最终工作总结的用户追问。只有后续 provider 以 `stop` 返回无工具调用的 final content 时才写入 `run.completed`。其他非 `stop` 的无工具最终响应会按 provider error 失败，避免 UI 展示“完成但没有总结”的假终态。
 
+如果 `finishReason=length` 时 provider 已经返回了工具调用列表，Turn Loop 也不会执行该轮工具调用，因为 streaming JSON arguments 可能刚好在输出上限处被截断。此时它会保留该轮可见 assistant 文本，并追加一条恢复提示，要求模型丢弃半截工具参数，重新发出完整 JSON 工具调用或继续简短工作；只有后续非截断响应里的完整工具调用才会进入 schema 校验和执行路径。
+
 DeepSeek streaming tool call delta 在 CLI provider wrapper 内通过 `ChatToolCallAccumulator` 拼装为完整 `ChatToolCall` 后才进入 `Completed.tool_calls`。Turn Loop 不直接处理 provider 私有 delta 形态，只要求 provider 在 `Completed` 中提供完整、可校验、可执行的工具调用列表。如果累计后的 `function.arguments` 不是合法 JSON，Turn Loop 会以 `E_INVALID_TOOL_ARGUMENTS` 失败，并把脱敏后的累计 arguments 写入当前 run 的 `diagnostics/invalid-tool-arguments-<sanitizedToolCallId>-<hash>.json`，同时在 `run.failed.diagnosticFile` 暴露该本地路径。
 
 `apply_patch` 支持大 payload 引用：`tool.requested.argumentsPreview` 可以只包含 `payloadRef`，Turn Loop 在执行前从当前 run 的 `payloads/` 文件读取完整 diff，校验 `sha256` / `sizeBytes` 后 materialize 为 `unifiedDiff`。materialize 之后仍走同一套 schema 校验、路径安全、hunk metadata 和 patch staging；最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 默认不触发审批，超过阈值或修改 workspace policy 文件会动态要求审批，selected hunk 过滤只在高风险 patch 或显式审批路径存在时启用。chunk 追加阶段不会写 workspace。
@@ -106,6 +108,7 @@ RPC active run 的 Run Log 使用 `SerializedRunLog`：后台 Turn Loop worker �
 - thinking disabled 配置下，provider 返回无 `reasoning_content` 的工具调用时，Turn Loop 会按非 reasoning replay 路径继续执行工具并完成 run。
 - provider 发送多个 streaming content delta，Turn Loop 写入多条 `assistant.delta`，并避免在 `Completed` 时重复写入完整文本。
 - provider 最终响应以 `finishReason=length` 且没有工具调用结束时，Turn Loop 会自动追问一次最终工作总结，并且只有后续 `stop` 响应才写入 `run.completed.summary`。
+- provider 响应以 `finishReason=length` 且携带工具调用列表结束时，Turn Loop 会要求模型重新发出完整工具调用，不会执行可能截断的 partial call。
 - provider stream 或 shell 工具收到 `CancellationToken` 后，Turn Loop 写入 `run.canceled`，并返回 `E_RUN_CANCELED`。
 - Turn Loop 每次成功追加 Run Log 事件后，会把同一条事件交给 `TurnEventSink`，sink 看到的事件序列与本地 `events.jsonl` 一致。
 - `SerializedRunLog` 并发 append 测试验证多个 clone 同时写同一 run 时仍生成连续 `seq`。

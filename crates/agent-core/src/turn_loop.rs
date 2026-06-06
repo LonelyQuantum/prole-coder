@@ -52,6 +52,11 @@ const FINAL_RESPONSE_LENGTH_RETRY_INSTRUCTION: &str = concat!(
     "Your previous response ended because the model reached its output length limit before a complete final user-facing summary. ",
     "Do not call tools unless absolutely necessary. Return only a concise final work summary now, covering changes, important files, verification or tests, and blockers."
 );
+const TOOL_CALL_LENGTH_RETRY_INSTRUCTION: &str = concat!(
+    "Your previous response ended because the model reached its output length limit while composing a tool call. ",
+    "Discard any partial or truncated tool-call arguments from that response. ",
+    "If a tool is still needed, issue a fresh complete tool call with valid JSON arguments now; otherwise continue with the task briefly."
+);
 #[cfg(windows)]
 const TOOL_USAGE_INSTRUCTION: &str = concat!(
     "Tool usage rules: all workspace paths must be workspace-relative unless a tool explicitly says otherwise. ",
@@ -246,6 +251,16 @@ where
                 .await?;
             let response = provider_turn.response;
 
+            if response.completion.finish_reason == TurnProviderFinishReason::Length {
+                if response.tool_calls.is_empty() {
+                    push_final_response_retry_messages(&mut messages, &response);
+                    continue;
+                }
+
+                push_tool_call_length_retry_messages(&mut messages, &response);
+                continue;
+            }
+
             if !response.tool_calls.is_empty()
                 && self.reasoning.mode() == ReasoningContentMode::ThinkingEnabled
                 && response
@@ -254,17 +269,6 @@ where
                     .is_none_or(|reasoning| reasoning.trim().is_empty())
             {
                 return Err(AgentTurnLoopError::MissingAssistantReasoningContent);
-            }
-
-            if response.completion.finish_reason == TurnProviderFinishReason::Length {
-                if response.tool_calls.is_empty() {
-                    push_final_response_retry_messages(&mut messages, &response);
-                    continue;
-                }
-
-                return Err(AgentTurnLoopError::Provider(TurnProviderError::new(
-                    "provider response reached the output length limit before tool calls completed",
-                )));
             }
 
             if let Some(content) = response
@@ -1112,6 +1116,20 @@ fn push_final_response_retry_messages(
         messages.push(ChatMessage::assistant(content.to_owned()));
     }
     messages.push(ChatMessage::user(FINAL_RESPONSE_LENGTH_RETRY_INSTRUCTION));
+}
+
+fn push_tool_call_length_retry_messages(
+    messages: &mut Vec<ChatMessage>,
+    response: &TurnProviderResponse,
+) {
+    if let Some(content) = response
+        .content
+        .as_deref()
+        .filter(|content| !content.trim().is_empty())
+    {
+        messages.push(ChatMessage::assistant(content.to_owned()));
+    }
+    messages.push(ChatMessage::user(TOOL_CALL_LENGTH_RETRY_INSTRUCTION));
 }
 
 fn turn_provider_finish_reason_label(reason: TurnProviderFinishReason) -> &'static str {
@@ -2885,6 +2903,91 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0].payload["summary"], "Final work summary.");
+    }
+
+    #[tokio::test]
+    async fn turn_loop_retries_length_finished_tool_call_without_executing_partial_call() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "old\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_length_tool_retry")
+            .expect("run should be created");
+        let patch = "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n";
+        let length_response = TurnProviderResponse::tool_calls(
+            Some("The patch is needed; I will apply it.".to_owned()),
+            Some("I should edit the README.".to_owned()),
+            vec![ChatToolCall::function(
+                "partial_call",
+                "apply_patch",
+                "{\"unifiedDiff\"",
+            )],
+        )
+        .with_completion(TurnProviderCompletion::fixture(
+            TurnProviderFinishReason::Length,
+        ));
+        let provider = ScriptedProvider::new(vec![
+            length_response,
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should issue a complete tool call.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_1",
+                    "apply_patch",
+                    json!({
+                        "unifiedDiff": patch,
+                        "expectedFiles": ["README.md"],
+                    })
+                    .to_string(),
+                )],
+            ),
+            TurnProviderResponse::final_text("Updated README."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
+            .await
+            .expect("length-truncated tool call should be retried");
+
+        assert_eq!(workspace.read("README.md"), "new\n");
+        assert_eq!(outcome.final_message, "Updated README.");
+        assert_eq!(outcome.iterations, 3);
+        assert_eq!(loop_runner.provider.requests.len(), 3);
+        let retry_messages = &loop_runner.provider.requests[1].messages;
+        assert_eq!(retry_messages.len(), 3);
+        assert_eq!(
+            retry_messages[1].content.as_deref(),
+            Some("The patch is needed; I will apply it.")
+        );
+        let retry_prompt = retry_messages[2]
+            .content
+            .as_deref()
+            .expect("retry request should include a user instruction");
+        assert!(retry_prompt.contains("tool call"));
+        assert!(retry_prompt.contains("fresh complete tool call"));
+
+        let events = store
+            .load_run("run_turn_length_tool_retry")
+            .expect("events should load");
+        assert!(!events.iter().any(|event| {
+            event.event_type == "tool.requested"
+                && event.payload["toolCallId"] == json!("partial_call")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "tool.requested" && event.payload["toolCallId"] == json!("call_1")
+        }));
+        let finish_reasons = events
+            .iter()
+            .filter(|event| event.event_type == "provider.completed")
+            .map(|event| event.payload["finishReason"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            finish_reasons,
+            vec![json!("length"), json!("tool_calls"), json!("stop")]
+        );
+        assert!(!events.iter().any(|event| event.event_type == "run.failed"));
     }
 
     #[tokio::test]

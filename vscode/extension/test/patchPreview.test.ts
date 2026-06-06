@@ -36,6 +36,67 @@ test("applyParsedPatchFile builds patched preview content without writing files"
   assert.equal(after, "one\nnew\nthree\n\nkeep\ninsert\nremove\n");
 });
 
+test("parseUnifiedDiff tolerates hunk headers with underdeclared line counts", () => {
+  const parsed = parseUnifiedDiff(
+    [
+      "--- a/README.md",
+      "+++ b/README.md",
+      "@@ -1,1 +1,1 @@",
+      " one",
+      "-old",
+      "+new",
+      " three",
+      "",
+    ].join("\n"),
+  );
+  const file = parsed.files[0];
+  assert.ok(file);
+  const hunk = file.hunks[0];
+  assert.ok(hunk);
+  assert.equal(hunk.oldCount, 3);
+  assert.equal(hunk.newCount, 3);
+  assert.equal(applyParsedPatchFile(file, "one\nold\nthree\n"), "one\nnew\nthree\n");
+});
+
+test("parseUnifiedDiff keeps deleted content that resembles a file header", () => {
+  const parsed = parseUnifiedDiff(
+    [
+      "--- a/README.md",
+      "+++ b/README.md",
+      "@@ -1,2 +1,2 @@",
+      " keep",
+      "--- heading",
+      "+renamed heading",
+      "",
+    ].join("\n"),
+  );
+  const file = parsed.files[0];
+  assert.ok(file);
+  assert.equal(applyParsedPatchFile(file, "keep\n-- heading\n"), "keep\nrenamed heading\n");
+});
+
+test("parseUnifiedDiff rejects severely underdeclared hunk headers", () => {
+  assert.throws(
+    () =>
+      parseUnifiedDiff(
+        [
+          "--- a/README.md",
+          "+++ b/README.md",
+          "@@ -1,1 +1,1 @@",
+          " one",
+          " two",
+          " three",
+          " four",
+          " five",
+          " six",
+          " seven",
+          "",
+        ].join("\n"),
+      ),
+    /too many more lines than declared/,
+  );
+});
+
 test("PatchDiffPreviewController opens native diff requests before approval prompting", async () => {
   const rpc = new FakePatchEventSource();
   const host = new FakePatchDiffPreviewHost({
@@ -55,6 +116,25 @@ test("PatchDiffPreviewController opens native diff requests before approval prom
   assert.equal(host.opened[0]?.afterContent, "one\nnew\nthree\n\nkeep\ninsert\nremove\n");
   assert.equal(host.opened[0]?.boundary.mode, "whole_patch");
   assert.equal(controller.approvalBoundary("approval_1")?.hunks.length, 2);
+  assert.deepEqual(host.warnings, []);
+});
+
+test("PatchDiffPreviewController ignores replayed patch approval events", async () => {
+  const rpc = new FakePatchEventSource();
+  const host = new FakePatchDiffPreviewHost({
+    "README.md": "one\nold\nthree\n\nkeep\nremove\n",
+  });
+  const controller = new PatchDiffPreviewController(rpc, host);
+
+  rpc.emit({ ...toolRequestedEvent(), replay: true });
+  await controller.prepareApproval({ ...approvalEvent(), replay: true }, {
+    approvalId: "approval_1",
+    toolCallId: "tool_call_1",
+    toolName: "apply_patch",
+  });
+
+  assert.equal(host.opened.length, 0);
+  assert.equal(controller.approvalBoundary("approval_1"), undefined);
   assert.deepEqual(host.warnings, []);
 });
 

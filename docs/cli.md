@@ -21,14 +21,14 @@ prole rpc [options]
 - `--auto-approve` / `-y`：允许需要审批的工具执行。默认在 CLI 二进制中交互式询问；如果 stdin 已关闭或不可读，则拒绝该审批。
 - `--verify <command>`：回合成功后运行显式验证命令。因为它执行 shell command，必须同时传 `--auto-approve`。
 - `--json`：输出 newline-delimited JSON-RPC。成功执行中输出 `agent.event` notifications；失败时最后输出 JSON-RPC error response。
-- `--max-input-tokens <n>`、`--max-model-turns <n>`、`--max-output-tokens <n>`：预算与轮次限制。
+- `--max-input-tokens <n>`、`--max-model-turns <n>`、`--max-output-tokens <n>`：预算与轮次限制。DeepSeek 默认输出上限为 65536 tokens，可按需要显式覆盖。
 - `--thinking <enabled|disabled>`：控制 DeepSeek thinking mode，默认 `enabled`。
 
 `rpc` 子命令使用同一套 provider 相关参数：
 
 - `--provider <deepseek|fixture>`
 - `--fixture <final|readme|patch|shell>`
-- `--max-input-tokens <n>`、`--max-model-turns <n>`、`--max-output-tokens <n>`
+- `--max-input-tokens <n>`、`--max-model-turns <n>`、`--max-output-tokens <n>`；DeepSeek 默认 `--max-output-tokens` 为 65536，避免真实项目修复时过早触发模型输出长度截断。
 - `--thinking <enabled|disabled>`
 
 `prole rpc` 从 stdin 读取 newline-delimited JSON-RPC request，并把 response / `agent.event` notification 写到 stdout。它当前接入 `AgentTurnLoopRpcHandler`：`agent.sendTurn` 会创建 run log、启动后台 Turn Loop worker，并立即返回 accepted；后续事件由全双工 live event queue 持续输出。`agent.approve` / `agent.reject` 会唤醒 pending approval 队列并继续输出后续事件。显式取消、审批过期、EOF shutdown 取消和 writer failure 断连取消已实现。

@@ -410,6 +410,48 @@ test("RPC server manager sends typed run list, resume, and delete requests", asy
   });
 });
 
+test("RPC server manager marks resume replay events without marking later live events", async () => {
+  const factory = new FakeProcessFactory();
+  const manager = rpcManagerWithFactory(factory);
+  const received: unknown[] = [];
+  manager.onEvent((event) => received.push(event));
+  const readyPromise = manager.start();
+  const child = factory.lastChild();
+  child.stdout.pushJson(initializeResponse(child.initializeRequest().id));
+  await readyPromise;
+
+  const resumePromise = manager.resume({ runId: "run_1" });
+  await flushMicrotasks();
+  const resumeRequest = child.requestAt(1);
+  assert.equal(resumeRequest.method, RPC_RESUME_METHOD);
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    id: resumeRequest.id,
+    result: {
+      runId: "run_1",
+      nextSeq: 4,
+      replayStarted: true,
+    },
+  });
+  await resumePromise;
+
+  child.stdout.pushJson(agentEventNotification({ seq: 1, type: "run.started" }));
+  child.stdout.pushJson(agentEventNotification({ seq: 3, type: "tool.approvalRequired" }));
+  child.stdout.pushJson(agentEventNotification({ seq: 4, type: "turn.started" }));
+
+  assert.deepEqual(
+    received.map((event) => ({
+      seq: (event as { seq: number }).seq,
+      replay: (event as { replay?: boolean }).replay,
+    })),
+    [
+      { seq: 1, replay: true },
+      { seq: 3, replay: true },
+      { seq: 4, replay: undefined },
+    ],
+  );
+});
+
 test("RPC server manager sends typed approval requests", async () => {
   const factory = new FakeProcessFactory();
   const manager = rpcManagerWithFactory(factory);
@@ -906,14 +948,14 @@ function initializeResponse(id: unknown): unknown {
   };
 }
 
-function agentEventNotification(): unknown {
+function agentEventNotification(options: { readonly seq?: number; readonly type?: string } = {}): unknown {
   return {
     jsonrpc: "2.0",
     method: "agent.event",
     params: {
-      seq: 1,
+      seq: options.seq ?? 1,
       time: "1970-01-01T00:00:00.000Z",
-      type: "run.started",
+      type: options.type ?? "run.started",
       runId: "run_1",
       payload: { mode: "ask" },
     },

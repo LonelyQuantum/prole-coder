@@ -45,10 +45,11 @@ VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server
 
 - 在 Activity Bar 暴露 ProleCoder view container 和 Chat view。
 - 通过 `RpcServerManager.onEvent()` 订阅 live `agent.event`。
+- `RpcServerManager` 会在 `agent.resume` response 后把本次回放范围内的事件标记为本地 `replay: true`。Sidebar timeline 仍正常渲染这些历史事件，但审批 controller、patch diff preview 等会忽略 replayed approval events，避免打开旧 run 时重复弹出历史审批。
 - 使用 `ChatEventTimeline` 把 `assistant.delta`、tool lifecycle、approval、context/provider 和 terminal event 转换为 timeline item；默认对话流只显示 `You` 用户消息、`DeepSeek` 回复和失败/取消错误，tool/provider/context/run completed 等过程事件收敛进默认折叠的 Work log，Work log 摘要在运行中只暴露当前工作状态；可见对话消息使用安全 DOM Markdown 渲染，覆盖标题、列表、引用、代码块、表格、链接、inline code 和 horizontal rule，Work log 和工具输出仍保留纯文本，单条消息渲染失败会回退为纯文本并写入 `Output > ProleCoder`；历史 replay 或 streaming 中的高频 `agent.event` 会合并 snapshot/submission/context 推送，避免连续 `assistant.delta` 触发重复完整 Markdown 重渲染。
 - 同一 run/turn 的连续 `assistant.delta` 会合并为一条 assistant 消息，避免流式输出刷屏。
-- 提供 prompt 输入、mode 选择和运行中 Cancel 按钮；通过 Webview `submitTurn` 消息调用 typed `RpcServerManager.sendTurn()`，发送时把 Problems 快照转换为 diagnostic attachments，并按协议 attachment 上限优先保留 error；如果当前已 resume/发送过 run，会复用该 `runId` 继续同一会话并由后端递增 `turn_N`；accepted 后等待同一 run 的 terminal event 收口输入状态，Cancel 会调用 typed `RpcServerManager.cancel()`。
-- Sidebar 右上角提供齿轮 Settings 入口；composer 常驻 API Key / Model 快捷入口。Enter 和 Send 按钮走同一提交路径，Shift+Enter 保留换行；发送后会先在当前对话中显示本地 pending 用户消息，等待真实 run event 覆盖。
+- 提供 prompt 输入、mode 选择和运行中停止入口；通过 Webview `submitTurn` 消息调用 typed `RpcServerManager.sendTurn()`，发送时把 Problems 快照转换为 diagnostic attachments，并按协议 attachment 上限优先保留 error；如果当前已 resume/发送过 run，会复用该 `runId` 继续同一会话并由后端递增 `turn_N`；accepted 后等待同一 run 的 terminal event 收口输入状态，运行中点击方块停止按钮会调用 typed `RpcServerManager.cancel()`。
+- Sidebar 右上角提供齿轮 Settings 入口；composer 常驻 API Key / Model 快捷入口。Enter 和回车符号发送按钮走同一提交路径，Shift+Enter 保留换行；发送后会先在当前对话中显示本地 pending 用户消息，等待真实 run event 覆盖；用户消息可通过 Edit 回填到 composer，修改后在同一会话继续发送，被编辑消息的 superseded id 会写入 VS Code webview state，以便 webview reload 后仍保持隐藏。
 - Run List 支持 `agent.listRuns` / `agent.resume` / `agent.deleteRun`，可回放历史 run、继续多轮会话，也可删除 inactive run。
 - 失败状态会在 Sidebar Chat 中显示短消息，并把 sendTurn、Run List refresh/resume/delete/cancel、原生 `@prole` Chat Participant 和 RPC 启动/运行 warning 的完整错误写入 VS Code `Output > ProleCoder`；Sidebar Chat 还会把完整 `agent.event` payload 写入 Output 便于 debug。
 
@@ -56,7 +57,7 @@ VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server
 
 - 默认使用 Sidebar 内联审批卡片展示审批摘要。
 - 主审批动作只展示 `Approve` / `Reject`；`Approve` 映射为一次性批准，`Reject` 映射为拒绝。
-- 最多 5 个 `expectedFiles` 的普通 workspace 代码 `apply_patch` 默认直接执行，不弹出审批卡片；超过阈值的 bulk patch、workspace policy 文件 patch 以及需要审批的 shell / network / destructive 操作仍使用 Sidebar 内联 approval card。`apply_patch` 多 hunk 审批边界保留在 Core/RPC/VS Code 中，供高风险 patch 或显式审批路径复用；持久化批准能力保留在 Core/RPC 策略与队列中，不在主审批 UI 暴露复杂选项。
+- 最多 5 个 `expectedFiles` 的普通 workspace 代码 `apply_patch` 默认直接执行，不弹出审批卡片；超过阈值的 bulk patch、workspace policy 文件 patch 以及需要审批的 shell / network / destructive 操作仍使用 Sidebar 内联 approval card。`apply_patch` 多 hunk 审批边界保留在 Core/RPC/VS Code 中，供高风险 patch 或显式审批路径复用；Native diff preview 会对模型生成的小幅 hunk header 计数偏差做宽容预览解析，但严重超量仍拒绝预览，真实写盘仍由 Core 的 patch staging、路径安全和 hunk 校验决定；持久化批准能力保留在 Core/RPC 策略与队列中，不在主审批 UI 暴露复杂选项。
 
 `vscode/extension/src/approvalFlow.ts` 当前接入真实 RPC pending approval：
 
@@ -71,7 +72,7 @@ VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server
 {
   "prole-coder.rpc.autoStart": true,
   "prole-coder.rpc.command": "prole",
-  "prole-coder.rpc.args": ["rpc", "--max-output-tokens", "65536"],
+  "prole-coder.rpc.args": ["rpc"],
   "prole-coder.provider.model": "deepseek-v4-pro"
 }
 ```
@@ -81,11 +82,11 @@ VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server
 ```json
 {
   "prole-coder.rpc.command": "cargo",
-  "prole-coder.rpc.args": ["run", "-p", "prole-coder-cli", "--", "rpc", "--max-output-tokens", "65536"]
+  "prole-coder.rpc.args": ["run", "-p", "prole-coder-cli", "--", "rpc"]
 }
 ```
 
-这些设置可通过 Sidebar composer 的 Settings 按钮或命令面板 `ProleCoder: Open Settings` 打开；需要手动编辑 JSON 时使用 VS Code `Preferences: Open User Settings (JSON)`，也可以在测试 workspace 的 `.vscode/settings.json` 中写入 workspace 级配置。`prole-coder.rpc.args` 改动后需要重启 RPC server 或 reload Extension Development Host，已启动的子进程不会自动继承新参数。
+CLI/RPC 的 DeepSeek 默认输出上限为 65536 tokens；通常不需要额外传 `--max-output-tokens`。这些设置可通过 Sidebar composer 的 Settings 按钮或命令面板 `ProleCoder: Open Settings` 打开；需要手动编辑 JSON 时使用 VS Code `Preferences: Open User Settings (JSON)`，也可以在测试 workspace 的 `.vscode/settings.json` 中写入 workspace 级配置。`prole-coder.rpc.args` 改动后需要重启 RPC server 或 reload Extension Development Host，已启动的子进程不会自动继承新参数。
 
 配置不保存 API Key。DeepSeek API Key 由插件命令写入 VS Code SecretStorage 的多 key 管理器，或由 CLI/RPC server 继续按既有规则从环境变量读取；Key 管理器展示 alias 与 masked key，支持添加 key+alias、选择 active key、改 alias 和删除指定 key。DeepSeek model ID 是非敏感配置，可通过 `prole-coder.provider.model` 或 Sidebar 的 Model 按钮选择。
 

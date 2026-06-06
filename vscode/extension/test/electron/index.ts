@@ -7,6 +7,8 @@ const extensionId = "prole-coder.prole-coder-vscode";
 const TEST_CHAT_MESSAGE_COMMAND = "prole-coder.test.chatMessage";
 const TEST_CHAT_STATE_COMMAND = "prole-coder.test.chatState";
 const TEST_CHAT_PROBE_COMMAND = "prole-coder.test.chatProbe";
+const SEND_ICON = String.fromCharCode(0x21B5);
+const STOP_ICON = String.fromCharCode(0x25A0);
 const CONTRIBUTED_COMMANDS = [
   "prole-coder.openChat",
   "prole-coder.openSettings",
@@ -141,24 +143,14 @@ async function exerciseChatCancel(): Promise<void> {
     type: "showRuns",
   });
 
-  await postChatMessage({
-    type: "submitTurn",
-    message: "integration cancel flow",
-    mode: "edit",
-  });
-
-  const running = await waitFor("running cancelable chat turn", async () => {
-    const current = await chatState();
-    return current.submission.status === "running" && current.submission.runId === "run-cancel-1"
-      ? current
-      : undefined;
-  });
-  assert.equal(running.submission.busy, true);
-
-  await postChatMessage({
-    type: "cancelTurn",
-    runId: "run-cancel-1",
-  });
+  await chatProbe({ type: "setPrompt", value: "integration cancel flow" });
+  const sendingProbe = await chatProbe({ type: "click", selector: "#send" });
+  assert.equal(sendingProbe.snapshot.sendLabel, STOP_ICON);
+  assert.equal(sendingProbe.snapshot.sendTitle, "Stop current turn");
+  assert.equal(sendingProbe.snapshot.sendIsStop, true);
+  assert.equal(sendingProbe.snapshot.sendDisabled, false);
+  assert.equal(sendingProbe.snapshot.cancelDisabled, true);
+  await chatProbe({ type: "click", selector: "#send" });
 
   const canceled = await waitFor("canceled chat turn", async () => {
     const current = await chatState();
@@ -293,6 +285,8 @@ async function exerciseChatKeyboardSubmit(): Promise<void> {
 
   const submitted = await chatProbe({ type: "keydown", key: "Enter" });
   assert.equal(submitted.defaultPrevented, true);
+  assert.equal(submitted.snapshot.sendLabel, STOP_ICON);
+  assert.equal(submitted.snapshot.sendDisabled, false);
 
   const sentTurn = await waitFor("logged keyboard sendTurn", async () =>
     logEntry((entry) => entry.method === "agent.sendTurn" && entry.params?.message === "keyboard integration turn"),
@@ -340,6 +334,51 @@ async function exerciseChatKeyboardSubmit(): Promise<void> {
   await waitFor("logged keyboard turn approval", async () =>
     logEntry((entry) => entry.method === "agent.approve" && entry.params?.approvalId === expectedApprovalId),
   );
+
+  const editable = await chatProbeSnapshot();
+  assert.equal(editable.sendLabel, SEND_ICON);
+  assert.equal(editable.sendTitle, "Send message");
+  assert.equal(editable.sendIsStop, false);
+  assert.ok(editable.messageEditButtons.includes("Edit"));
+  assert.ok(editable.messageEditDisabled.every((disabled) => disabled === false));
+
+  const editProbe = await chatProbe({ type: "click", selector: ".item.user .message-edit" });
+  assert.equal(editProbe.snapshot.promptValue, "keyboard integration turn");
+
+  await chatProbe({ type: "setPrompt", value: "keyboard integration turn edited" });
+  await chatProbe({ type: "click", selector: "#send" });
+
+  const editedSendTurn = await waitFor("logged edited resend", async () =>
+    logEntry((entry) => entry.method === "agent.sendTurn" && entry.params?.message === "keyboard integration turn edited"),
+  );
+  assert.equal(editedSendTurn.params?.runId, sentRunId);
+
+  const editedApproval = await waitFor("inline approval for edited resend", async () => {
+    const current = await chatState();
+    return current.approval?.approvalId !== undefined && current.approval.approvalId !== expectedApprovalId
+      ? current
+      : undefined;
+  });
+  const editedApprovalId = editedApproval.approval?.approvalId;
+  assert.ok(typeof editedApprovalId === "string");
+
+  await chatProbe({ type: "click", selector: ".approval-action.approve" });
+
+  await waitFor("edited resend completed", async () => {
+    const current = await chatState();
+    return current.submission.status === "completed" &&
+      current.timeline.items.some((item) => item.type === "run.completed" && item.turnId !== sentTurnId)
+      ? current
+      : undefined;
+  });
+
+  await waitFor("logged edited turn approval", async () =>
+    logEntry((entry) => entry.method === "agent.approve" && entry.params?.approvalId === editedApprovalId),
+  );
+  const editedProbe = await chatProbeSnapshot();
+  assert.ok(editedProbe.userMessages.includes("keyboard integration turn edited"));
+  assert.ok(!editedProbe.userMessages.includes("keyboard integration turn"));
+  assert.ok(editedProbe.supersededUserItemIds.some((id) => id.includes(sentRunId)));
 }
 
 async function postChatMessage(message: unknown): Promise<void> {
@@ -508,6 +547,7 @@ interface WebviewProbeSnapshot {
   readonly runIds: readonly string[];
   readonly visibleItemTitles: readonly string[];
   readonly visibleItemTypes: readonly string[];
+  readonly userMessages: readonly string[];
   readonly markdownBlockCount: number;
   readonly markdownCodeBlocks: readonly string[];
   readonly markdownInlineCodes: readonly string[];
@@ -520,8 +560,14 @@ interface WebviewProbeSnapshot {
   readonly workLogTitle: string;
   readonly workLogTypes: readonly string[];
   readonly promptValue: string;
+  readonly sendLabel: string;
+  readonly sendTitle: string;
+  readonly sendIsStop: boolean;
   readonly sendDisabled: boolean;
   readonly cancelDisabled: boolean;
+  readonly messageEditButtons: readonly string[];
+  readonly messageEditDisabled: readonly boolean[];
+  readonly supersededUserItemIds: readonly string[];
   readonly providerActions: readonly string[];
   readonly settingsActionVisible: boolean;
 }

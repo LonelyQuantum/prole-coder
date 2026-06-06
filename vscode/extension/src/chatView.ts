@@ -212,6 +212,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   private snapshotPostQueued = false;
   private submissionPostQueued = false;
   private contextPostQueued = false;
+  private cancelActiveTurnRequested = false;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -414,6 +415,10 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       await this.cancelTurn(cancelRunId);
       return;
     }
+    if (isCancelTurnMessage(message)) {
+      await this.cancelActiveTurn();
+      return;
+    }
 
     if (isConfigureDeepSeekApiKeyMessage(message)) {
       await this.configureDeepSeekApiKey();
@@ -463,6 +468,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       return;
     }
 
+    this.cancelActiveTurnRequested = false;
     this.setSubmission({
       busy: true,
       status: "sending",
@@ -487,7 +493,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       this.activeConversationRunId = result.runId;
       void this.refreshRuns("Refreshing runs...");
       const terminal = this.terminalRuns.get(result.runId);
-      this.setSubmission(
+      const nextSubmission: ChatSubmissionSnapshot =
         terminal === undefined
           ? {
               busy: true,
@@ -496,9 +502,16 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
               runId: result.runId,
               turnId: result.turnId,
             }
-          : terminalSubmission(result.runId, result.turnId, terminal),
-      );
+          : terminalSubmission(result.runId, result.turnId, terminal);
+      this.setSubmission(nextSubmission);
+      if (this.cancelActiveTurnRequested && nextSubmission.busy) {
+        this.cancelActiveTurnRequested = false;
+        await this.cancelTurn(result.runId);
+      } else {
+        this.cancelActiveTurnRequested = false;
+      }
     } catch (error) {
+      this.cancelActiveTurnRequested = false;
       const messageText = `Failed to send turn: ${errorMessage(error)}`;
       const redacted = this.redact(messageText);
       const action = chatSubmissionActionFromProviderAction(
@@ -815,6 +828,25 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
         canceling: false,
       });
     }
+  }
+
+  private async cancelActiveTurn(): Promise<void> {
+    const runId = this.submission.runId;
+    if (runId !== undefined && runId.length > 0) {
+      await this.cancelTurn(runId);
+      return;
+    }
+
+    if (!this.submission.busy || this.submission.canceling) {
+      return;
+    }
+
+    this.cancelActiveTurnRequested = true;
+    this.setSubmission({
+      ...this.submission,
+      message: "Cancel requested...",
+      canceling: true,
+    });
   }
 
   private collectDiagnosticAttachments(): NonNullable<SendTurnParams["attachments"]> {
@@ -1485,6 +1517,40 @@ function renderChatViewHtml(
       font-size: 11px;
     }
 
+    .message-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .message-heading .title {
+      min-width: 0;
+    }
+
+    .message-edit {
+      flex: 0 0 auto;
+      min-width: 42px;
+      height: 24px;
+      padding: 0 7px;
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+      border: 0;
+      border-radius: 4px;
+      font: 11px var(--vscode-font-family);
+      font-weight: 600;
+    }
+
+    .message-edit:hover:enabled {
+      background: var(--vscode-button-secondaryHoverBackground);
+    }
+
+    .message-edit:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
     .item.work-log {
       background: transparent;
       border-style: dashed;
@@ -1819,6 +1885,7 @@ function renderChatViewHtml(
     .mode:focus,
     .send:focus,
     .cancel:focus,
+    .message-edit:focus,
     .settings-action:focus,
     .provider-action:focus,
     .conversation-back:focus,
@@ -1853,7 +1920,7 @@ function renderChatViewHtml(
     .send,
     .cancel {
       flex: 0 0 auto;
-      min-width: 64px;
+      min-width: 34px;
       height: 28px;
       padding: 0 10px;
       color: var(--vscode-button-foreground);
@@ -1863,11 +1930,21 @@ function renderChatViewHtml(
       font-weight: 600;
     }
 
+    .send.stop {
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+    }
+
     .send:hover:enabled {
       background: var(--vscode-button-hoverBackground);
     }
 
+    .send.stop:hover:enabled {
+      background: var(--vscode-button-secondaryHoverBackground);
+    }
+
     .cancel {
+      display: none;
       color: var(--vscode-button-secondaryForeground);
       background: var(--vscode-button-secondaryBackground);
       font-weight: 500;
@@ -1987,8 +2064,8 @@ function renderChatViewHtml(
         <select id="mode" class="mode" aria-label="Run mode"></select>
         <button id="api-key" class="provider-action" type="button" title="Configure DeepSeek API key">API Key</button>
         <button id="model" class="provider-action" type="button" title="Select DeepSeek model">Model</button>
-        <button id="send" class="send" type="button">Send</button>
-        <button id="cancel" class="cancel" type="button">Cancel</button>
+        <button id="send" class="send" type="button" title="Send message" aria-label="Send message">&#8629;</button>
+        <button id="cancel" class="cancel" type="button" hidden>Cancel</button>
         <div id="submission" class="submission" aria-live="polite"></div>
       </div>
     </form>
@@ -2004,6 +2081,8 @@ function renderChatViewHtml(
     const testProbeEnabled = ${safeScriptJson(process.env["PROLE_CODER_VSCODE_TEST"] === "1")};
     const WORK_LOG_RENDER_LIMIT = 80;
     const WORK_LOG_STATUS_IGNORED_TYPES = new Set(["run.completed"]);
+    const SEND_ICON = String.fromCharCode(0x21B5);
+    const STOP_ICON = String.fromCharCode(0x25A0);
     const vscodeApi = acquireVsCodeApi();
     window.addEventListener("error", (event) => {
       postWebviewError(event.message, event.error && event.error.stack);
@@ -2035,12 +2114,15 @@ function renderChatViewHtml(
     const cancelButton = document.getElementById("cancel");
     const submissionRoot = document.getElementById("submission");
     const approvalRoot = document.getElementById("approval");
+    const restoredWebviewState = readWebviewState();
     let currentSnapshot = initialSnapshot;
     let currentSubmission = initialSubmission;
     let currentRuns = initialRuns;
     let currentContext = initialContext;
     let currentApproval = initialApproval;
     let pendingRunDeleteId = "";
+    let editingMessageId = "";
+    const supersededUserItemIds = new Set(restoredWebviewState.supersededUserItemIds);
     const resolvedApprovalIds = new Set();
     let contextSourceTab = "included";
 
@@ -2096,18 +2178,22 @@ function renderChatViewHtml(
     }));
 
     cancelButton.addEventListener("click", safeWebviewEventHandler("cancel click", () => {
-      const runId = cancelButton.dataset.runId;
-      if (typeof runId === "string" && runId.length > 0) {
-        vscodeApi.postMessage({ type: "cancelTurn", runId });
-      }
+      requestCancelCurrentTurn();
     }));
 
     composer.addEventListener("submit", safeWebviewEventHandler("composer submit", (event) => {
       event.preventDefault();
+      if (currentSubmission && currentSubmission.busy === true) {
+        return;
+      }
       submitComposerMessage();
     }));
 
     sendButton.addEventListener("click", safeWebviewEventHandler("send click", () => {
+      if (currentSubmission && currentSubmission.busy === true) {
+        requestCancelCurrentTurn();
+        return;
+      }
       submitComposerMessage();
     }));
 
@@ -2115,6 +2201,9 @@ function renderChatViewHtml(
       if (event.key === "Enter" && event.shiftKey !== true) {
         event.preventDefault();
         if (event.isComposing === true) {
+          return;
+        }
+        if (currentSubmission && currentSubmission.busy === true) {
           return;
         }
         submitComposerMessage();
@@ -2153,6 +2242,11 @@ function renderChatViewHtml(
         status: "sending",
         message: "Sending turn...",
       };
+      if (editingMessageId.length > 0) {
+        supersededUserItemIds.add(editingMessageId);
+        persistSupersededUserItems();
+        editingMessageId = "";
+      }
       renderPendingUserMessage(message);
       renderSubmission(currentSubmission);
       vscodeApi.postMessage({
@@ -2160,6 +2254,54 @@ function renderChatViewHtml(
         message,
         mode: modeInput.value,
       });
+    }
+
+    function requestCancelCurrentTurn() {
+      const runId = sendButton.dataset.runId || cancelButton.dataset.runId || "";
+      const canceling = currentSubmission && currentSubmission.canceling === true;
+      if (canceling === true) {
+        return;
+      }
+      vscodeApi.postMessage({
+        type: "cancelTurn",
+        ...(runId.length > 0 ? { runId } : {}),
+      });
+    }
+
+    function readWebviewState() {
+      let state = {};
+      if (typeof vscodeApi.getState === "function") {
+        const restored = vscodeApi.getState();
+        state = isWebviewStateRecord(restored) ? restored : {};
+      }
+      return {
+        ...state,
+        supersededUserItemIds: readStringArray(state.supersededUserItemIds),
+      };
+    }
+
+    function persistSupersededUserItems() {
+      const state = readWebviewState();
+      const nextIds = Array.from(supersededUserItemIds).slice(-200);
+      supersededUserItemIds.clear();
+      for (const id of nextIds) {
+        supersededUserItemIds.add(id);
+      }
+      vscodeApi.setState({
+        ...state,
+        supersededUserItemIds: nextIds,
+      });
+    }
+
+    function readStringArray(value) {
+      if (!Array.isArray(value)) {
+        return [];
+      }
+      return value.filter((item) => typeof item === "string" && item.length > 0);
+    }
+
+    function isWebviewStateRecord(value) {
+      return value !== null && typeof value === "object" && Array.isArray(value) !== true;
     }
 
     function postWebviewError(message, stack) {
@@ -2189,7 +2331,7 @@ function renderChatViewHtml(
     function renderPendingUserMessage(message) {
       const snapshot = currentSnapshot && typeof currentSnapshot === "object" ? currentSnapshot : initialSnapshot;
       const items = Array.isArray(snapshot.items) ? snapshot.items : [];
-      const visibleItems = Array.from(timelineVisibleItems(snapshot, items));
+      const visibleItems = visibleTimelineItems(snapshot, items);
       const workItems = Array.from(timelineWorkItems(snapshot, items));
       const pendingRunId = activeConversationRunId() || "pending";
       visibleItems.push({
@@ -2216,7 +2358,7 @@ function renderChatViewHtml(
     function render(snapshot) {
       currentSnapshot = snapshot && typeof snapshot === "object" ? snapshot : initialSnapshot;
       const items = Array.isArray(currentSnapshot.items) ? currentSnapshot.items : [];
-      const visibleItems = timelineVisibleItems(currentSnapshot, items);
+      const visibleItems = visibleTimelineItems(currentSnapshot, items);
       const workItems = timelineWorkItems(currentSnapshot, items);
       statusTitle.textContent = currentSnapshot.latestStatus || "ProleCoder";
       statusSubtitle.textContent = currentSnapshot.latestRunId
@@ -2792,8 +2934,8 @@ function renderChatViewHtml(
       const busy = state.busy === true;
       const runId = typeof state.runId === "string" ? state.runId : "";
       const cancelable = busy && runId.length > 0 && state.canceling !== true;
-      setComposerBusy(busy, cancelable);
-      cancelButton.dataset.runId = runId;
+      const canceling = state.canceling === true;
+      setComposerBusy(busy, cancelable, runId, canceling);
       submissionRoot.className = "submission " + status;
       const submissionMessage = typeof state.message === "string" ? state.message : "";
       submissionRoot.title = typeof state.error === "string" ? state.error : submissionMessage;
@@ -2844,11 +2986,25 @@ function renderChatViewHtml(
       return undefined;
     }
 
-    function setComposerBusy(busy, cancelable) {
+    function setComposerBusy(busy, cancelable, runId, canceling) {
       promptInput.disabled = busy;
       modeInput.disabled = busy;
-      sendButton.disabled = busy;
-      cancelButton.disabled = cancelable !== true;
+      sendButton.disabled = busy && canceling === true;
+      sendButton.textContent = busy ? STOP_ICON : SEND_ICON;
+      sendButton.title = busy ? "Stop current turn" : "Send message";
+      sendButton.setAttribute("aria-label", busy ? "Stop current turn" : "Send message");
+      sendButton.classList.toggle("stop", busy);
+      sendButton.dataset.runId = cancelable === true ? runId : "";
+      cancelButton.dataset.runId = cancelable === true ? runId : "";
+      cancelButton.disabled = true;
+      cancelButton.hidden = true;
+      syncMessageEditButtons(busy);
+    }
+
+    function syncMessageEditButtons(disabled) {
+      for (const button of document.querySelectorAll(".message-edit")) {
+        button.disabled = disabled === true;
+      }
     }
 
     function syncConversationChrome() {
@@ -2880,6 +3036,12 @@ function renderChatViewHtml(
       // Fallback only; chatEvents.presentTimelineItems is the authoritative grouping source.
       const hasAssistant = items.some((item) => item && item.kind === "assistant");
       return items.filter((item) => !isWorkLogItem(item, hasAssistant));
+    }
+
+    function visibleTimelineItems(snapshot, items) {
+      return Array.from(timelineVisibleItems(snapshot, items)).filter(
+        (item) => supersededUserItemIds.has(item.id) !== true,
+      );
     }
 
     function timelineWorkItems(snapshot, items) {
@@ -3055,9 +3217,8 @@ function renderChatViewHtml(
       const title = document.createElement("div");
       title.className = "title";
       title.textContent = item && typeof item.title === "string" ? item.title : "Message";
-      article.append(meta, title);
-
       const bodyText = itemBodyText(item);
+      appendMessageHeader(article, meta, title, item, bodyText);
       if (bodyText.length > 0) {
         const body = document.createElement("div");
         body.className = "body";
@@ -3088,15 +3249,15 @@ function renderChatViewHtml(
       const title = document.createElement("div");
       title.className = "title";
       title.textContent = item.title;
+      const bodyText = itemBodyText(item);
 
       if (collapsed) {
         const summary = document.createElement("summary");
         summary.append(meta, title);
         article.append(summary);
       } else {
-        article.append(meta, title);
+        appendMessageHeader(article, meta, title, item, bodyText);
       }
-      const bodyText = itemBodyText(item);
       if (bodyText.length > 0) {
         const body = document.createElement("div");
         if (shouldRenderMarkdown(item)) {
@@ -3110,6 +3271,52 @@ function renderChatViewHtml(
       }
 
       return article;
+    }
+
+    function appendMessageHeader(container, meta, title, item, bodyText) {
+      if (!isEditableUserItem(item, bodyText)) {
+        container.append(meta, title);
+        return;
+      }
+
+      const heading = document.createElement("div");
+      heading.className = "message-heading";
+      heading.append(title, renderMessageEditButton(item.id, bodyText));
+      container.append(meta, heading);
+    }
+
+    function isEditableUserItem(item, bodyText) {
+      return item && typeof item === "object" && item.kind === "user" && bodyText.length > 0;
+    }
+
+    function renderMessageEditButton(itemId, message) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "message-edit";
+      button.textContent = "Edit";
+      button.title = "Edit and resend message";
+      button.setAttribute("aria-label", "Edit and resend message");
+      button.disabled = currentSubmission && currentSubmission.busy === true;
+      button.addEventListener("click", () => {
+        editComposerMessage(itemId, message);
+      });
+      return button;
+    }
+
+    function editComposerMessage(itemId, message) {
+      if (currentSubmission && currentSubmission.busy === true) {
+        return;
+      }
+
+      editingMessageId = typeof itemId === "string" ? itemId : "";
+      promptInput.disabled = false;
+      promptInput.value = message;
+      promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+      promptInput.focus();
+      if (typeof promptInput.setSelectionRange === "function") {
+        const end = promptInput.value.length;
+        promptInput.setSelectionRange(end, end);
+      }
     }
 
     function itemBodyText(item) {
@@ -3617,6 +3824,7 @@ function renderChatViewHtml(
         runIds: textAttributes(".run-entry-row", "data-run-id"),
         visibleItemTitles: textContents("#events > .item:not(.work-log) .title"),
         visibleItemTypes: textContents("#events > .item:not(.work-log) .type"),
+        userMessages: textContents("#events > .item.user .body"),
         markdownBlockCount: document.querySelectorAll("#events > .item:not(.work-log) .body.markdown").length,
         markdownCodeBlocks: textContents("#events > .item:not(.work-log) .body.markdown pre code"),
         markdownInlineCodes: textContents("#events > .item:not(.work-log) .body.markdown code:not(pre code)"),
@@ -3629,8 +3837,14 @@ function renderChatViewHtml(
         workLogTitle: workLogSummary ? workLogSummary.textContent || "" : "",
         workLogTypes: textContents(".work-log-row-meta span:last-child"),
         promptValue: promptInput.value,
+        sendLabel: sendButton.textContent || "",
+        sendTitle: sendButton.title || "",
+        sendIsStop: sendButton.classList.contains("stop"),
         sendDisabled: sendButton.disabled,
         cancelDisabled: cancelButton.disabled,
+        messageEditButtons: textContents(".message-edit"),
+        messageEditDisabled: Array.from(document.querySelectorAll(".message-edit")).map((element) => element.disabled === true),
+        supersededUserItemIds: Array.from(supersededUserItemIds),
         providerActions: textContents(".provider-action"),
         settingsActionVisible: document.querySelector(".settings-action") !== null,
       };
@@ -3756,12 +3970,16 @@ function truncateLogText(value: string): string {
 }
 
 function cancelRunIdFromMessage(message: unknown): string | undefined {
-  if (!isRecord(message) || message["type"] !== "cancelTurn") {
+  if (!isCancelTurnMessage(message)) {
     return undefined;
   }
 
   const runId = message["runId"];
   return typeof runId === "string" && runId.length > 0 ? runId : undefined;
+}
+
+function isCancelTurnMessage(message: unknown): message is Record<string, unknown> {
+  return isRecord(message) && message["type"] === "cancelTurn";
 }
 
 function isConfigureDeepSeekApiKeyMessage(message: unknown): boolean {

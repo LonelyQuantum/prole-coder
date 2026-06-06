@@ -14,6 +14,7 @@ fs.writeFileSync(logPath, "");
 let seq = 1;
 const pendingApprovals = new Map();
 const runs = new Map();
+const runTurnCounters = new Map();
 
 const ledgerHistorySummary = [
   "## 代码库检查总结",
@@ -123,7 +124,7 @@ function handleSendTurn(request) {
     ? params.runId
     : message.includes("cancel") ? "run-cancel-1" : "run-approval-1";
   const existing = runs.get(runId);
-  const turnIndex = typeof existing?.eventCount === "number" ? existing.eventCount + 1 : 1;
+  const turnIndex = nextTurnIndex(runId, existing);
   const turnId = message.includes("cancel") ? "turn-cancel-1" : `turn-${turnIndex}`;
   const now = new Date().toISOString();
   runs.set(runId, {
@@ -178,6 +179,16 @@ function handleSendTurn(request) {
     });
     updateRun(runId, { lastSeq: seq - 1, eventCount: 4 });
   }, 10);
+}
+
+function nextTurnIndex(runId, existing) {
+  const current = runTurnCounters.get(runId);
+  const baseline = Number.isInteger(current)
+    ? current
+    : Number.isInteger(existing?.eventCount) ? existing.eventCount : 0;
+  const next = baseline + 1;
+  runTurnCounters.set(runId, next);
+  return next;
 }
 
 function handleDeleteRun(request) {

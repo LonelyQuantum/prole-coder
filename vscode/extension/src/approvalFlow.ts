@@ -89,6 +89,10 @@ export class ApprovalEventController implements DisposableLike {
   }
 
   private handleEvent(event: AgentEventEnvelope): void {
+    if (event.replay === true) {
+      return;
+    }
+
     if (event.type !== APPROVAL_EVENT_TYPE) {
       return;
     }

@@ -62,6 +62,9 @@ test("generated chat webview inline script parses as JavaScript", () => {
     { status: "idle" },
   ) as string;
 
+  assert.match(html, /aria-label="Send message"/);
+  assert.match(html, /message-edit/);
+
   const script = extractInlineScript(html);
   assert.doesNotThrow(() => new Script(script, { filename: "prole-chat-webview-inline.js" }));
 });

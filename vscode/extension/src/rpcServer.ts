@@ -99,7 +99,9 @@ export interface RpcProcessFactory {
   spawn(command: string, args: readonly string[], options: RpcSpawnOptions): RpcChildProcess;
 }
 
-export type AgentEventEnvelope = ProtocolAgentEventEnvelope;
+export type AgentEventEnvelope = ProtocolAgentEventEnvelope & {
+  readonly replay?: boolean;
+};
 
 export interface DisposableLike {
   dispose(): unknown;
@@ -134,6 +136,7 @@ interface JsonRpcNotification {
 }
 
 interface PendingRpcRequest<TResult> {
+  readonly method: string;
   resolve(value: TResult): void;
   reject(error: Error): void;
 }
@@ -192,6 +195,7 @@ export class RpcServerManager implements DisposableLike {
   private readonly notifier: RpcServerNotifier | undefined;
   private readonly eventHandlers = new Set<(event: AgentEventEnvelope) => void>();
   private readonly pendingRequests = new Map<string, PendingRpcRequest<unknown>>();
+  private readonly replayUpperBounds = new Map<string, number>();
   private processEnv: Record<string, string | undefined>;
 
   private child: RpcChildProcess | undefined;
@@ -321,6 +325,7 @@ export class RpcServerManager implements DisposableLike {
 
     const promise = new Promise<TResult>((resolve, reject) => {
       this.pendingRequests.set(id, {
+        method,
         resolve: resolve as (value: unknown) => void,
         reject,
       });
@@ -488,8 +493,9 @@ export class RpcServerManager implements DisposableLike {
   }
 
   private dispatchAgentEvent(event: AgentEventEnvelope): void {
+    const eventToDispatch = this.markReplayEvent(event);
     for (const handler of this.eventHandlers) {
-      handler(event);
+      handler(eventToDispatch);
     }
   }
 
@@ -506,7 +512,33 @@ export class RpcServerManager implements DisposableLike {
       return;
     }
 
+    if (pending.method === RPC_RESUME_METHOD && isResumeResult(message.result)) {
+      this.markReplayRange(message.result);
+    }
     pending.resolve(message.result);
+  }
+
+  private markReplayRange(result: ResumeResult): void {
+    if (result.replayStarted && result.nextSeq > 0) {
+      this.replayUpperBounds.set(result.runId, result.nextSeq);
+    }
+  }
+
+  private markReplayEvent(event: AgentEventEnvelope): AgentEventEnvelope {
+    const nextLiveSeq = this.replayUpperBounds.get(event.runId);
+    if (nextLiveSeq === undefined) {
+      return event;
+    }
+
+    if (event.seq >= nextLiveSeq) {
+      this.replayUpperBounds.delete(event.runId);
+      return event;
+    }
+
+    return {
+      ...event,
+      replay: true,
+    };
   }
 
   private handleStderrData(chunk: Buffer | string): void {
@@ -689,6 +721,15 @@ function isAgentEventBatchParams(value: unknown): value is {
     typeof value["lastSeq"] === "number" &&
     typeof value["count"] === "number" &&
     value["events"].length === value["count"]
+  );
+}
+
+function isResumeResult(value: unknown): value is ResumeResult {
+  return (
+    isRecord(value) &&
+    typeof value["runId"] === "string" &&
+    typeof value["nextSeq"] === "number" &&
+    typeof value["replayStarted"] === "boolean"
   );
 }
 
