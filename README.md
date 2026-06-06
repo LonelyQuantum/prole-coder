@@ -568,7 +568,7 @@ extension.ts
 
 ## 开发计划
 
-当前进度：Phase 1 到 Phase 4 已完成；Phase 5：VS Code Codex-like UX 与开发工作流仍在进行中。Phase 5 已完成原生 Chat、简化审批、自动上下文压缩、Output Channel、API key/model 配置、Git 工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误恢复、真实试用回归修复和 P5-15 第二批 UX 收敛；P5-16 真实试用 UX backlog 持续收敛仍未完成。完成 P5-16 后再进入 Phase 6：TUI 与生态扩展。
+当前进度：Phase 1 到 Phase 4 已完成；Phase 5：VS Code Codex-like UX 与开发工作流仍在进行中。Phase 5 已完成原生 Chat、简化审批、自动上下文压缩、Output Channel、API key/model 配置、Git 工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误恢复、真实试用回归修复、P5-15 第二批 UX 收敛，以及 P5-16a 模型回合预算 continuation approval 和 P5-16b Provider Key/Model 图标按钮同排展示；P5-16 真实试用 UX backlog 持续收敛仍未完成。完成 P5-16 后再进入 Phase 6：TUI 与生态扩展。
 
 阶段完成口径：README 中某个 Phase 只有在 `docs/phase-tasks.md` 对应 Phase 下的所有任务都标记为 `[x]` 后，才能在高层开发计划中表述为“全部完成”。如果某阶段核心功能已完成但仍有 P1/P2 增强或发布/文档验收项未完成，README 必须继续把该阶段表述为进行中，并列出剩余任务。
 
@@ -678,7 +678,7 @@ extension.ts
 - [x] P5-13：结构化 provider 配置错误码与恢复动作。
 - [x] P5-14：真实试用回归修复包：收敛 Sidebar 对话视图、内联确认、Work log 折叠、Markdown 渲染、webview 渲染诊断、provider/shell 稳定性和 composer / Settings 入口回归；具体子项与完成口径见 `docs/phase-tasks.md`。
 - [x] P5-15：真实试用 UX backlog 第二批收敛：补齐 Sidebar webview/Markdown/patch/resume/edit resend/output length 等真实试用回归，并把 Markdown renderer 模块化测试与 edit resend 后端 supersede 语义纳入协议和 run log。
-- [ ] P5-16：真实试用 UX backlog 持续收敛：继续收集并拆分真实 VS Code 插件试用中的对话、审批、Runs、Key/Model、Output 日志、上下文压缩、Markdown 兼容性、输出长度截断和大工具参数稳定性问题。
+- [ ] P5-16：真实试用 UX backlog 持续收敛：已完成模型回合预算 continuation approval 和 Provider Key/Model 图标按钮同排展示；后续补齐 Chat run mode 自动推断并隐藏默认 `edit` / `ask` / `plan` / `review` 下拉框；继续收集并拆分真实 VS Code 插件试用中的对话、审批、Runs、Key/Model、Output 日志、上下文压缩、Markdown 兼容性、输出长度截断和大工具参数稳定性问题。
 
 验收标准：
 

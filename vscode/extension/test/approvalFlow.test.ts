@@ -292,6 +292,15 @@ test("approvalPromptRequestFromEvent maps protocol payloads to modal requests", 
   });
 });
 
+test("approvalPromptRequestFromEvent accepts model turn budget continuation approvals", () => {
+  const request = approvalPromptRequestFromEvent(
+    approvalEvent({ toolName: "model_turn_budget" }),
+  );
+
+  assert.equal(request?.toolName, "model_turn_budget");
+  assert.equal(request?.approvalId, "approval_1");
+});
+
 const fakeWindow: ApprovalWindowMessenger = {
   showWarningMessage() {
     return undefined;

@@ -1559,7 +1559,7 @@ fn run_help_text() -> String {
         "  --verify <command>          Run an explicit verification command after success.",
         "  --json                      Emit agent.event JSON-RPC notifications.",
         "  --max-input-tokens <n>",
-        "  --max-model-turns <n>",
+        "  --max-model-turns <n>      Provider request window before continuation approval (default 50).",
         "  --max-output-tokens <n>",
         "  --thinking <enabled|disabled>",
     ]
@@ -1572,7 +1572,7 @@ fn rpc_help_text() -> String {
         "  --provider <deepseek|fixture>",
         "  --fixture <final|readme|patch|shell>",
         "  --max-input-tokens <n>",
-        "  --max-model-turns <n>",
+        "  --max-model-turns <n>      Provider request window before continuation approval (default 50).",
         "  --max-output-tokens <n>",
         "  --thinking <enabled|disabled>",
     ]

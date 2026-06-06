@@ -286,7 +286,7 @@ test("requestApproval maps the simple approve choice to one-shot approval", asyn
   assert.equal(modal, true);
   assert.ok(message?.includes("Command: cargo test"));
   assert.ok(message?.includes("Cwd: crates/cli"));
-  assert.ok(message?.includes("Output: last run passed"));
+  assert.equal(message?.includes("Output: last run passed"), false);
   assert.deepEqual(items, [APPROVAL_APPROVE_LABEL, APPROVAL_REJECT_LABEL]);
 });
 

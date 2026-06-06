@@ -7,8 +7,8 @@ const extensionId = "prole-coder.prole-coder-vscode";
 const TEST_CHAT_MESSAGE_COMMAND = "prole-coder.test.chatMessage";
 const TEST_CHAT_STATE_COMMAND = "prole-coder.test.chatState";
 const TEST_CHAT_PROBE_COMMAND = "prole-coder.test.chatProbe";
-const SEND_ICON = String.fromCharCode(0x21B5);
-const STOP_ICON = String.fromCharCode(0x25A0);
+const SEND_LABEL = "Send message";
+const STOP_LABEL = "Stop current turn";
 const CONTRIBUTED_COMMANDS = [
   "prole-coder.openChat",
   "prole-coder.openSettings",
@@ -87,7 +87,10 @@ async function exerciseChatSendTurnDiagnosticsAndApproval(): Promise<void> {
     assert.equal(approvalProbe.approvalVisible, true);
     assert.equal(approvalProbe.workLogVisible, true);
     assert.equal(approvalProbe.workLogOpen, false);
-    assert.deepEqual(approvalProbe.providerActions, ["API Key", "Model"]);
+    assert.deepEqual(approvalProbe.providerActions, [
+      "Configure DeepSeek API key",
+      "Select DeepSeek model",
+    ]);
     assert.equal(approvalProbe.settingsActionVisible, true);
     assert.ok(approvalProbe.visibleItemTitles.includes("You"));
     assert.ok(!approvalProbe.visibleItemTitles.includes("Approval required: shell"));
@@ -145,9 +148,10 @@ async function exerciseChatCancel(): Promise<void> {
 
   await chatProbe({ type: "setPrompt", value: "integration cancel flow" });
   const sendingProbe = await chatProbe({ type: "click", selector: "#send" });
-  assert.equal(sendingProbe.snapshot.sendLabel, STOP_ICON);
-  assert.equal(sendingProbe.snapshot.sendTitle, "Stop current turn");
+  assert.equal(sendingProbe.snapshot.sendLabel, STOP_LABEL);
+  assert.equal(sendingProbe.snapshot.sendTitle, STOP_LABEL);
   assert.equal(sendingProbe.snapshot.sendIsStop, true);
+  assert.deepEqual(sendingProbe.snapshot.sendVisibleIcons, ["stop"]);
   assert.equal(sendingProbe.snapshot.sendDisabled, false);
   assert.equal(sendingProbe.snapshot.cancelDisabled, true);
   await chatProbe({ type: "click", selector: "#send" });
@@ -285,7 +289,8 @@ async function exerciseChatKeyboardSubmit(): Promise<void> {
 
   const submitted = await chatProbe({ type: "keydown", key: "Enter" });
   assert.equal(submitted.defaultPrevented, true);
-  assert.equal(submitted.snapshot.sendLabel, STOP_ICON);
+  assert.equal(submitted.snapshot.sendLabel, STOP_LABEL);
+  assert.deepEqual(submitted.snapshot.sendVisibleIcons, ["stop"]);
   assert.equal(submitted.snapshot.sendDisabled, false);
 
   const sentTurn = await waitFor("logged keyboard sendTurn", async () =>
@@ -336,9 +341,10 @@ async function exerciseChatKeyboardSubmit(): Promise<void> {
   );
 
   const editable = await chatProbeSnapshot();
-  assert.equal(editable.sendLabel, SEND_ICON);
-  assert.equal(editable.sendTitle, "Send message");
+  assert.equal(editable.sendLabel, SEND_LABEL);
+  assert.equal(editable.sendTitle, SEND_LABEL);
   assert.equal(editable.sendIsStop, false);
+  assert.deepEqual(editable.sendVisibleIcons, ["submit"]);
   assert.ok(editable.messageEditButtons.includes("Edit"));
   assert.ok(editable.messageEditDisabled.every((disabled) => disabled === false));
 
@@ -569,6 +575,7 @@ interface WebviewProbeSnapshot {
   readonly sendLabel: string;
   readonly sendTitle: string;
   readonly sendIsStop: boolean;
+  readonly sendVisibleIcons: readonly string[];
   readonly sendDisabled: boolean;
   readonly cancelDisabled: boolean;
   readonly messageEditButtons: readonly string[];

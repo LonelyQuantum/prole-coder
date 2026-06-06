@@ -40,6 +40,7 @@ const TOOL_NAME_LOOKUP = {
   git_diff: true,
   lsp_diagnostics: true,
   plan_update: true,
+  model_turn_budget: true,
 } as const satisfies Record<ToolName, true>;
 
 export interface ApprovalRpcClient {

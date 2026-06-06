@@ -58,7 +58,7 @@ pub struct ToolDefinition {
 `implementationStatus` / `implementation_status` 只描述当前仓库是否已有基础执行器实现：
 
 - `executor_implemented`：已接入 `WorkspaceToolExecutor`，可被基础 Agent Turn Loop 调用。
-- `schema_only`：协议名称、参数 schema、风险和审批策略已注册，但执行器尚未实现；如果模型在当前阶段请求这类工具，Turn Loop 必须返回显式 unsupported tool 错误。
+- `schema_only`：协议名称、参数 schema、风险和审批策略已注册，但执行器尚未实现；如果模型在当前阶段请求这类工具，Turn Loop 必须返回显式 unsupported tool 错误。`model_turn_budget` 是例外：它不是模型可调用工具，而是 Turn Loop 本地发出的 continuation approval 控制点。
 
 ## 通用结果字段
 

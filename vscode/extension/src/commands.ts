@@ -342,10 +342,6 @@ function formatApprovalMessage(request: ApprovalPromptRequest): string {
     detail.push(`Cwd: ${request.cwd}`);
   }
 
-  if (request.outputSummary !== undefined) {
-    detail.push(`Output: ${request.outputSummary}`);
-  }
-
   if (request.paths !== undefined && request.paths.length > 0) {
     detail.push(`Paths: ${request.paths.join(", ")}`);
   }

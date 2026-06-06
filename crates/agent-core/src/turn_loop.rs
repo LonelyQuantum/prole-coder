@@ -38,11 +38,13 @@ use crate::{
 
 const DEFAULT_MAX_ATTACHMENTS: usize = 32;
 const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 256 * 1024;
+const DEFAULT_MAX_MODEL_TURNS: usize = 50;
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_LINES: usize = 8;
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 const TOOL_ARGUMENT_DIAGNOSTIC_MAX_BYTES: usize = 128 * 1024;
 const MAX_AUTO_APPROVED_PATCH_FILES: usize = 5;
 const WORKSPACE_POLICY_PATCH_FILES: &[&str] = &[".gitignore", ".prole-coderignore"];
+const MODEL_TURN_BUDGET_TOOL_NAME: &str = "model_turn_budget";
 const FINAL_RESPONSE_SUMMARY_INSTRUCTION: &str = concat!(
     "When the task is complete, make the final assistant message a concise work summary for the user. ",
     "Mention what changed, important files, verification or tests, and any blockers. ",
@@ -226,141 +228,153 @@ where
         let mut changed_files = Vec::new();
         let mut last_shell_output_summary = None;
 
-        for iteration in 1..=self.config.max_model_turns {
-            let prepared = self.reasoning.prepare_messages(&messages)?;
-            append_turn_event(
-                run_log,
-                event_sink,
-                "provider.requested",
-                Some(input.turn_id.clone()),
-                json!({
-                    "iteration": iteration,
-                    "messageCount": prepared.messages.len(),
-                    "reasoningState": reasoning_state_payload(prepared.state),
-                }),
-            )?;
-
-            let provider_turn = self
-                .collect_provider_response(
-                    TurnProviderRequest {
-                        iteration,
-                        messages: prepared.messages,
-                        cancellation_token: input.cancellation_token.clone(),
-                    },
-                    &input.turn_id,
-                    iteration,
-                    run_log,
-                    event_sink,
-                )
-                .await?;
-            let response = provider_turn.response;
-
-            if response.completion.finish_reason == TurnProviderFinishReason::Length {
-                if response.tool_calls.is_empty() {
-                    push_final_response_retry_messages(&mut messages, &response);
-                    continue;
-                }
-
-                push_tool_call_length_retry_messages(&mut messages, &response);
-                continue;
-            }
-
-            if !response.tool_calls.is_empty()
-                && self.reasoning.mode() == ReasoningContentMode::ThinkingEnabled
-                && response
-                    .reasoning_content
-                    .as_deref()
-                    .is_none_or(|reasoning| reasoning.trim().is_empty())
-            {
-                return Err(AgentTurnLoopError::MissingAssistantReasoningContent);
-            }
-
-            if let Some(content) = response
-                .content
-                .as_deref()
-                .filter(|content| !content.is_empty())
-                .filter(|_| !provider_turn.emitted_content_delta)
-            {
+        let mut next_iteration = 1usize;
+        loop {
+            let budget_start = next_iteration;
+            let budget_end = budget_start + self.config.max_model_turns - 1;
+            for iteration in budget_start..=budget_end {
+                let prepared = self.reasoning.prepare_messages(&messages)?;
                 append_turn_event(
                     run_log,
                     event_sink,
-                    "assistant.delta",
+                    "provider.requested",
                     Some(input.turn_id.clone()),
                     json!({
                         "iteration": iteration,
-                        "text": content,
+                        "messageCount": prepared.messages.len(),
+                        "reasoningState": reasoning_state_payload(prepared.state),
                     }),
                 )?;
-            }
 
-            if response.tool_calls.is_empty() {
-                if response.completion.finish_reason != TurnProviderFinishReason::Stop {
-                    return Err(AgentTurnLoopError::Provider(TurnProviderError::new(
-                        format!(
-                            "provider finished with `{}` before a final assistant summary",
-                            turn_provider_finish_reason_label(response.completion.finish_reason)
-                        ),
-                    )));
+                let provider_turn = self
+                    .collect_provider_response(
+                        TurnProviderRequest {
+                            iteration,
+                            messages: prepared.messages,
+                            cancellation_token: input.cancellation_token.clone(),
+                        },
+                        &input.turn_id,
+                        iteration,
+                        run_log,
+                        event_sink,
+                    )
+                    .await?;
+                let response = provider_turn.response;
+
+                if response.completion.finish_reason == TurnProviderFinishReason::Length {
+                    if response.tool_calls.is_empty() {
+                        push_final_response_retry_messages(&mut messages, &response);
+                        continue;
+                    }
+
+                    push_tool_call_length_retry_messages(&mut messages, &response);
+                    continue;
                 }
-                let final_message = response.content.unwrap_or_default();
-                append_turn_event(
-                    run_log,
-                    event_sink,
-                    "run.completed",
-                    Some(input.turn_id.clone()),
-                    json!({
-                        "summary": final_message,
-                        "changedFiles": changed_files.clone(),
-                        "verificationStatus": "skipped",
-                    }),
-                )?;
 
-                return Ok(AgentTurnOutcome {
-                    final_message,
-                    iterations: iteration,
-                    tool_results,
-                    changed_files,
-                });
-            }
+                if !response.tool_calls.is_empty()
+                    && self.reasoning.mode() == ReasoningContentMode::ThinkingEnabled
+                    && response
+                        .reasoning_content
+                        .as_deref()
+                        .is_none_or(|reasoning| reasoning.trim().is_empty())
+                {
+                    return Err(AgentTurnLoopError::MissingAssistantReasoningContent);
+                }
 
-            let tool_calls = response.tool_calls;
-            messages.push(ChatMessage::assistant_with_tool_calls(
-                response.content,
-                response.reasoning_content,
-                tool_calls.clone(),
-            ));
+                if let Some(content) = response
+                    .content
+                    .as_deref()
+                    .filter(|content| !content.is_empty())
+                    .filter(|_| !provider_turn.emitted_content_delta)
+                {
+                    append_turn_event(
+                        run_log,
+                        event_sink,
+                        "assistant.delta",
+                        Some(input.turn_id.clone()),
+                        json!({
+                            "iteration": iteration,
+                            "text": content,
+                        }),
+                    )?;
+                }
 
-            for (tool_index, tool_call) in tool_calls.iter().enumerate() {
-                let tool_context = ToolCallContext {
-                    turn_id: &input.turn_id,
-                    iteration,
-                    tool_index: tool_index + 1,
-                    previous_shell_output_summary: last_shell_output_summary.as_deref(),
-                    cancellation_token: &input.cancellation_token,
-                };
-                let executed =
-                    self.execute_tool_call(tool_call, tool_context, run_log, event_sink)?;
-                let follow_up_output_summary = executed.follow_up_output_summary.clone();
-                changed_files.extend(executed.changed_files.iter().cloned());
-                messages.push(ChatMessage::tool_result(
-                    tool_call.id.clone(),
-                    executed.message_content.clone(),
+                if response.tool_calls.is_empty() {
+                    if response.completion.finish_reason != TurnProviderFinishReason::Stop {
+                        return Err(AgentTurnLoopError::Provider(TurnProviderError::new(
+                            format!(
+                                "provider finished with `{}` before a final assistant summary",
+                                turn_provider_finish_reason_label(
+                                    response.completion.finish_reason
+                                )
+                            ),
+                        )));
+                    }
+                    let final_message = response.content.unwrap_or_default();
+                    append_turn_event(
+                        run_log,
+                        event_sink,
+                        "run.completed",
+                        Some(input.turn_id.clone()),
+                        json!({
+                            "summary": final_message,
+                            "changedFiles": changed_files.clone(),
+                            "verificationStatus": "skipped",
+                        }),
+                    )?;
+
+                    return Ok(AgentTurnOutcome {
+                        final_message,
+                        iterations: iteration,
+                        tool_results,
+                        changed_files,
+                    });
+                }
+
+                let tool_calls = response.tool_calls;
+                messages.push(ChatMessage::assistant_with_tool_calls(
+                    response.content,
+                    response.reasoning_content,
+                    tool_calls.clone(),
                 ));
-                tool_results.push(AgentToolResult {
-                    tool_call_id: tool_call.id.clone(),
-                    name: tool_call.function.name.clone(),
-                    status: executed.status,
-                    result: executed.log_result,
-                });
-                if let Some(output_summary) = follow_up_output_summary {
-                    last_shell_output_summary = Some(output_summary);
+
+                for (tool_index, tool_call) in tool_calls.iter().enumerate() {
+                    let tool_context = ToolCallContext {
+                        turn_id: &input.turn_id,
+                        iteration,
+                        tool_index: tool_index + 1,
+                        previous_shell_output_summary: last_shell_output_summary.as_deref(),
+                        cancellation_token: &input.cancellation_token,
+                    };
+                    let executed =
+                        self.execute_tool_call(tool_call, tool_context, run_log, event_sink)?;
+                    let follow_up_output_summary = executed.follow_up_output_summary.clone();
+                    changed_files.extend(executed.changed_files.iter().cloned());
+                    messages.push(ChatMessage::tool_result(
+                        tool_call.id.clone(),
+                        executed.message_content.clone(),
+                    ));
+                    tool_results.push(AgentToolResult {
+                        tool_call_id: tool_call.id.clone(),
+                        name: tool_call.function.name.clone(),
+                        status: executed.status,
+                        result: executed.log_result,
+                    });
+                    if let Some(output_summary) = follow_up_output_summary {
+                        last_shell_output_summary = Some(output_summary);
+                    }
                 }
             }
-        }
 
-        Err(AgentTurnLoopError::MaxModelTurnsExceeded {
-            max_model_turns: self.config.max_model_turns,
-        })
+            next_iteration = budget_end + 1;
+            self.ensure_model_turn_budget_continuation(
+                &input.turn_id,
+                budget_end,
+                &input.cancellation_token,
+                run_log,
+                event_sink,
+            )?;
+        }
     }
 
     async fn collect_provider_response<L>(
@@ -1038,6 +1052,104 @@ where
             }
         }
     }
+
+    fn ensure_model_turn_budget_continuation(
+        &mut self,
+        turn_id: &str,
+        completed_iterations: usize,
+        cancellation_token: &CancellationToken,
+        run_log: &mut (impl RunLogWriter + ?Sized),
+        event_sink: &mut (impl TurnEventSink + ?Sized),
+    ) -> Result<(), AgentTurnLoopError> {
+        cancellation_token.check()?;
+        let request = TurnApprovalRequest {
+            approval_id: format!("approval_model_turn_budget_{completed_iterations}"),
+            tool_call_id: format!("model_turn_budget_{completed_iterations}"),
+            tool_name: MODEL_TURN_BUDGET_TOOL_NAME.to_owned(),
+            risk: RiskLevel::Exec,
+            title: "Continue agent turn".to_owned(),
+            detail: format!(
+                "The model has used {completed_iterations} provider turn(s) without finishing. Approve to continue for up to {} more provider turn(s).",
+                self.config.max_model_turns
+            ),
+            command: None,
+            cwd: None,
+            output_summary: None,
+            paths: None,
+            hunks: None,
+            risk_reasons: vec!["model turn budget reached".to_owned()],
+            persistable: false,
+        };
+
+        append_turn_event(
+            run_log,
+            event_sink,
+            "tool.approvalRequired",
+            Some(turn_id.to_owned()),
+            approval_payload(&request),
+        )?;
+
+        cancellation_token.check()?;
+        match self.approval_policy.decide(&request)? {
+            ApprovalDecision::Approved | ApprovalDecision::ApprovedHunks { .. } => {
+                append_turn_event(
+                    run_log,
+                    event_sink,
+                    "tool.approvalResolved",
+                    Some(turn_id.to_owned()),
+                    approval_resolved_payload(
+                        &request,
+                        "approved",
+                        None,
+                        Some(&ApprovalScope::All),
+                    ),
+                )?;
+                Ok(())
+            }
+            ApprovalDecision::Rejected { reason } => {
+                append_turn_event(
+                    run_log,
+                    event_sink,
+                    "tool.approvalResolved",
+                    Some(turn_id.to_owned()),
+                    approval_resolved_payload(&request, "rejected", Some(reason.as_str()), None),
+                )?;
+                Err(AgentTurnLoopError::ApprovalRejected {
+                    approval_id: request.approval_id,
+                    tool_call_id: request.tool_call_id,
+                    reason,
+                })
+            }
+            ApprovalDecision::Canceled { reason } => {
+                append_turn_event(
+                    run_log,
+                    event_sink,
+                    "tool.approvalResolved",
+                    Some(turn_id.to_owned()),
+                    approval_resolved_payload(&request, "canceled", Some(reason.as_str()), None),
+                )?;
+                Err(AgentTurnLoopError::ApprovalCanceled {
+                    approval_id: request.approval_id,
+                    tool_call_id: request.tool_call_id,
+                    reason,
+                })
+            }
+            ApprovalDecision::Expired { reason } => {
+                append_turn_event(
+                    run_log,
+                    event_sink,
+                    "tool.approvalResolved",
+                    Some(turn_id.to_owned()),
+                    approval_resolved_payload(&request, "expired", Some(reason.as_str()), None),
+                )?;
+                Err(AgentTurnLoopError::ApprovalExpired {
+                    approval_id: request.approval_id,
+                    tool_call_id: request.tool_call_id,
+                    reason,
+                })
+            }
+        }
+    }
 }
 
 pub trait TurnEventSink {
@@ -1242,7 +1354,7 @@ impl Default for AgentTurnLoopConfig {
     fn default() -> Self {
         Self {
             max_input_tokens: 1_000_000,
-            max_model_turns: 8,
+            max_model_turns: DEFAULT_MAX_MODEL_TURNS,
             reasoning_mode: ReasoningContentMode::ThinkingEnabled,
             max_attachments: DEFAULT_MAX_ATTACHMENTS,
             max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
@@ -2632,10 +2744,10 @@ mod tests {
 
     use super::{
         AgentRunMode, AgentTurnInput, AgentTurnLoop, AgentTurnLoopConfig, AgentTurnLoopError,
-        AutoApprovePolicy, CancellationToken, TextRange, TurnAttachment, TurnEventSink,
-        TurnEventSinkError, TurnProvider, TurnProviderCompletion, TurnProviderDelta,
-        TurnProviderError, TurnProviderEvent, TurnProviderFinishReason, TurnProviderFuture,
-        TurnProviderRequest, TurnProviderResponse, TurnProviderStream,
+        AutoApprovePolicy, CancellationToken, MODEL_TURN_BUDGET_TOOL_NAME, TextRange,
+        TurnAttachment, TurnEventSink, TurnEventSinkError, TurnProvider, TurnProviderCompletion,
+        TurnProviderDelta, TurnProviderError, TurnProviderEvent, TurnProviderFinishReason,
+        TurnProviderFuture, TurnProviderRequest, TurnProviderResponse, TurnProviderStream,
         TurnProviderStreamingSummary, TurnProviderUsage, turn_provider_response_stream,
     };
 
@@ -2922,6 +3034,128 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0].payload["summary"], "Final work summary.");
+    }
+
+    #[test]
+    fn default_model_turn_budget_is_fifty() {
+        assert_eq!(AgentTurnLoopConfig::default().max_model_turns, 50);
+    }
+
+    #[tokio::test]
+    async fn turn_loop_requests_approval_to_continue_after_model_turn_budget() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_budget_continue")
+            .expect("run should be created");
+        let length_response = TurnProviderResponse {
+            content: Some("Partial work".to_owned()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            completion: TurnProviderCompletion::fixture(TurnProviderFinishReason::Length),
+        };
+        let provider = ScriptedProvider::new(vec![
+            length_response,
+            TurnProviderResponse::final_text("Completed after continuation."),
+        ]);
+        let config = AgentTurnLoopConfig {
+            max_model_turns: 1,
+            ..AgentTurnLoopConfig::default()
+        };
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
+                .expect("turn loop should initialize")
+                .with_config(config);
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Finish the task"), &mut run)
+            .await
+            .expect("approved model turn budget continuation should complete");
+
+        assert_eq!(outcome.final_message, "Completed after continuation.");
+        assert_eq!(outcome.iterations, 2);
+        let events = store
+            .load_run("run_turn_budget_continue")
+            .expect("events should load");
+        let approval = events
+            .iter()
+            .find(|event| event.event_type == "tool.approvalRequired")
+            .expect("continuation approval should be requested");
+        assert_eq!(approval.payload["toolName"], MODEL_TURN_BUDGET_TOOL_NAME);
+        assert_eq!(approval.payload["title"], "Continue agent turn");
+        assert_eq!(approval.payload["persistable"], false);
+        assert_eq!(
+            approval.payload["riskReasons"],
+            json!(["model turn budget reached"])
+        );
+        assert!(events.iter().any(|event| {
+            event.event_type == "tool.approvalResolved"
+                && event.payload["toolName"] == MODEL_TURN_BUDGET_TOOL_NAME
+                && event.payload["decision"] == "approved"
+        }));
+        assert!(!events.iter().any(|event| {
+            event.event_type == "run.failed" && event.payload["code"] == json!("E_MAX_MODEL_TURNS")
+        }));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_cancels_model_turn_budget_continuation_before_approval_decision() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_budget_cancel")
+            .expect("run should be created");
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse {
+                content: Some("Partial work".to_owned()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                completion: TurnProviderCompletion::fixture(TurnProviderFinishReason::Length),
+            },
+            TurnProviderResponse::final_text("Should not be requested."),
+        ]);
+        let config = AgentTurnLoopConfig {
+            max_model_turns: 1,
+            ..AgentTurnLoopConfig::default()
+        };
+        let cancellation_token = CancellationToken::new();
+        let mut sink = CancelOnEventSink::new(
+            cancellation_token.clone(),
+            "tool.approvalRequired",
+            "stop before model turn continuation",
+        );
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
+                .expect("turn loop should initialize")
+                .with_config(config);
+
+        let error = loop_runner
+            .run_turn_with_event_sink(
+                AgentTurnInput::new("turn_1", "Finish the task")
+                    .with_cancellation_token(cancellation_token),
+                &mut run,
+                &mut sink,
+            )
+            .await
+            .expect_err("cancellation should stop before continuation approval decision");
+
+        assert!(matches!(error, AgentTurnLoopError::Canceled { .. }));
+        assert_eq!(loop_runner.provider.requests.len(), 1);
+        let events = store
+            .load_run("run_turn_budget_cancel")
+            .expect("events should load");
+        assert!(events.iter().any(|event| {
+            event.event_type == "tool.approvalRequired"
+                && event.payload["toolName"] == MODEL_TURN_BUDGET_TOOL_NAME
+        }));
+        assert!(!events.iter().any(|event| {
+            event.event_type == "tool.approvalResolved"
+                && event.payload["toolName"] == MODEL_TURN_BUDGET_TOOL_NAME
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "run.canceled"
+                && event.payload["reason"] == "stop before model turn continuation"
+        }));
     }
 
     #[tokio::test]

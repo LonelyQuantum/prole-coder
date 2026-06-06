@@ -1909,6 +1909,14 @@ function renderChatViewHtml(
       min-width: 0;
     }
 
+    .provider-actions {
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+
     .mode {
       min-width: 92px;
       height: 28px;
@@ -1921,11 +1929,14 @@ function renderChatViewHtml(
     .send,
     .cancel {
       flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       min-width: 34px;
       height: 28px;
       padding: 0 10px;
-      color: var(--vscode-button-foreground);
-      background: var(--vscode-button-background);
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
       border: 0;
       font: var(--vscode-font-size) var(--vscode-font-family);
       font-weight: 600;
@@ -1937,7 +1948,7 @@ function renderChatViewHtml(
     }
 
     .send:hover:enabled {
-      background: var(--vscode-button-hoverBackground);
+      background: var(--vscode-button-secondaryHoverBackground);
     }
 
     .send.stop:hover:enabled {
@@ -1953,14 +1964,30 @@ function renderChatViewHtml(
 
     .provider-action {
       flex: 0 0 auto;
-      min-width: 58px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      min-width: 28px;
       height: 28px;
-      padding: 0 8px;
+      padding: 0;
       color: var(--vscode-button-secondaryForeground);
       background: var(--vscode-button-secondaryBackground);
       border: 0;
       font: var(--vscode-font-size) var(--vscode-font-family);
       font-weight: 500;
+    }
+
+    .provider-action-icon,
+    .send-icon {
+      display: block;
+      width: 16px;
+      height: 16px;
+      pointer-events: none;
+    }
+
+    .send-icon[hidden] {
+      display: none;
     }
 
     .cancel:hover:enabled {
@@ -2063,9 +2090,31 @@ function renderChatViewHtml(
       <textarea id="prompt" class="prompt" rows="3" placeholder="Ask ProleCoder" aria-label="Chat message"></textarea>
       <div class="composer-row">
         <select id="mode" class="mode" aria-label="Run mode"></select>
-        <button id="api-key" class="provider-action" type="button" title="Configure DeepSeek API key">API Key</button>
-        <button id="model" class="provider-action" type="button" title="Select DeepSeek model">Model</button>
-        <button id="send" class="send" type="button" title="Send message" aria-label="Send message">&#8629;</button>
+        <div class="provider-actions" aria-label="Provider controls">
+          <button id="api-key" class="provider-action" type="button" title="Configure DeepSeek API key" aria-label="Configure DeepSeek API key">
+            <svg class="provider-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <circle cx="7.5" cy="15.5" r="4.5" fill="none" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M10.7 12.3 21 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              <path d="m15.5 6.5 3 3M18 4l2 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button id="model" class="provider-action" type="button" title="Select DeepSeek model" aria-label="Select DeepSeek model">
+            <svg class="provider-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M9.2 4.2c-1.5 0-2.8 1.1-3 2.6-1.6.4-2.7 1.8-2.7 3.5 0 1 .4 1.9 1.1 2.6-.5.6-.8 1.4-.8 2.3 0 2 1.6 3.6 3.6 3.6.5 1 1.5 1.8 2.7 1.8 1.6 0 2.9-1.3 2.9-2.9V7.1c0-1.6-1.3-2.9-2.9-2.9h-.9Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              <path d="M14.8 4.2c1.5 0 2.8 1.1 3 2.6 1.6.4 2.7 1.8 2.7 3.5 0 1-.4 1.9-1.1 2.6.5.6.8 1.4.8 2.3 0 2-1.6 3.6-3.6 3.6-.5 1-1.5 1.8-2.7 1.8-1.6 0-2.9-1.3-2.9-2.9V7.1c0-1.6 1.3-2.9 2.9-2.9h.9Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              <path d="M12 8.2c-.8-.8-2.1-.9-3-.2M12 12c-1.1-.7-2.5-.5-3.3.5M12 15.8c-.8.9-2.1 1.2-3.2.6M12 8.2c.8-.8 2.1-.9 3-.2M12 12c1.1-.7 2.5-.5 3.3.5M12 15.8c.8.9 2.1 1.2 3.2.6" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+        <button id="send" class="send" type="button" title="Send message" aria-label="Send message">
+          <svg class="send-icon send-icon-submit" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M20 4v7a4 4 0 0 1-4 4H5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="m10 10-5 5 5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <svg class="send-icon send-icon-stop" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden>
+            <rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/>
+          </svg>
+        </button>
         <button id="cancel" class="cancel" type="button" hidden>Cancel</button>
         <div id="submission" class="submission" aria-live="polite"></div>
       </div>
@@ -2082,8 +2131,6 @@ function renderChatViewHtml(
     const testProbeEnabled = ${safeScriptJson(process.env["PROLE_CODER_VSCODE_TEST"] === "1")};
     const WORK_LOG_RENDER_LIMIT = 80;
     const WORK_LOG_STATUS_IGNORED_TYPES = new Set(["run.completed"]);
-    const SEND_ICON = String.fromCharCode(0x21B5);
-    const STOP_ICON = String.fromCharCode(0x25A0);
 ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     const vscodeApi = acquireVsCodeApi();
     window.addEventListener("error", (event) => {
@@ -2113,6 +2160,8 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     const modelButton = document.getElementById("model");
     const settingsButton = document.getElementById("settings");
     const sendButton = document.getElementById("send");
+    const sendSubmitIcon = sendButton.querySelector(".send-icon-submit");
+    const sendStopIcon = sendButton.querySelector(".send-icon-stop");
     const cancelButton = document.getElementById("cancel");
     const submissionRoot = document.getElementById("submission");
     const approvalRoot = document.getElementById("approval");
@@ -3002,7 +3051,12 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       promptInput.disabled = busy;
       modeInput.disabled = busy;
       sendButton.disabled = busy && canceling === true;
-      sendButton.textContent = busy ? STOP_ICON : SEND_ICON;
+      if (sendSubmitIcon) {
+        sendSubmitIcon.hidden = busy;
+      }
+      if (sendStopIcon) {
+        sendStopIcon.hidden = !busy;
+      }
       sendButton.title = busy ? "Stop current turn" : "Send message";
       sendButton.setAttribute("aria-label", busy ? "Stop current turn" : "Send message");
       sendButton.classList.toggle("stop", busy);
@@ -3456,15 +3510,18 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
         workLogTitle: workLogSummary ? workLogSummary.textContent || "" : "",
         workLogTypes: textContents(".work-log-row-meta span:last-child"),
         promptValue: promptInput.value,
-        sendLabel: sendButton.textContent || "",
+        sendLabel: sendButton.getAttribute("aria-label") || "",
         sendTitle: sendButton.title || "",
         sendIsStop: sendButton.classList.contains("stop"),
+        sendVisibleIcons: Array.from(document.querySelectorAll(".send-icon"))
+          .filter((element) => !isDisplayNone(element))
+          .map((element) => element.classList.contains("send-icon-stop") ? "stop" : "submit"),
         sendDisabled: sendButton.disabled,
         cancelDisabled: cancelButton.disabled,
         messageEditButtons: textContents(".message-edit"),
         messageEditDisabled: Array.from(document.querySelectorAll(".message-edit")).map((element) => element.disabled === true),
         supersededUserItemIds: Array.from(supersededUserItemIds),
-        providerActions: textContents(".provider-action"),
+        providerActions: Array.from(document.querySelectorAll(".provider-action")).map((element) => element.getAttribute("aria-label") || ""),
         settingsActionVisible: document.querySelector(".settings-action") !== null,
       };
     }

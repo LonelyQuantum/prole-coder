@@ -62,6 +62,12 @@
       "risk": "read",
       "approval": "none",
       "status": "schema_only"
+    },
+    {
+      "name": "model_turn_budget",
+      "risk": "exec",
+      "approval": "required",
+      "status": "schema_only"
     }
   ]
 }

@@ -169,6 +169,7 @@ export const toolNames = [
   "git_diff",
   "lsp_diagnostics",
   "plan_update",
+  "model_turn_budget",
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 
@@ -416,6 +417,20 @@ export const toolDefinitions = [
           },
         },
       },
+    },
+    resultSchema: statusResultSchema,
+  },
+  {
+    name: "model_turn_budget",
+    description: "Approve continuing an agent turn after the provider-turn budget window is exhausted.",
+    risk: "exec",
+    approval: "required",
+    implementationStatus: "schema_only",
+    // Intentionally zero-argument: only `{}` is valid for this local continuation control point.
+    argumentSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
     },
     resultSchema: statusResultSchema,
   },

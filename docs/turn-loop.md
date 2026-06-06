@@ -13,7 +13,7 @@ crates/agent-core/src/turn_loop.rs
 当前实现提供：
 
 - `AgentTurnLoop`：持有 provider、审批策略、工具执行器、reasoning 状态机和回合配置。
-- `AgentTurnLoopConfig`：配置最大输入 token、最大模型子回合数和 reasoning 模式。CLI 会把 `--thinking enabled|disabled` 同步映射到 provider thinking 选项与 Turn Loop reasoning 状态机，避免在 thinking disabled 时仍要求工具调用携带 `reasoning_content`。
+- `AgentTurnLoopConfig`：配置最大输入 token、每次继续审批前的 provider request 窗口和 reasoning 模式。CLI 会把 `--thinking enabled|disabled` 同步映射到 provider thinking 选项与 Turn Loop reasoning 状态机，避免在 thinking disabled 时仍要求工具调用携带 `reasoning_content`。
 - `TurnProvider`：异步 streaming provider trait。`complete_stream` 返回 `TurnProviderEvent` 流，provider 可以先发送 `AssistantDelta`，再发送唯一的 `Completed` 响应。
 - `TurnProviderEvent`：当前包含 `AssistantDelta` 和 `Completed`。`AssistantDelta` 只用于前端展示和 run log 增量；`Completed` 必须包含完整 content、`reasoning_content` 和 tool calls，供后续 reasoning replay 与工具执行使用。
 - `CancellationToken`：协作式取消信号。`AgentTurnInput` 持有 token，Turn Loop 会把它传给 `TurnProviderRequest` 和 `WorkspaceToolExecutor`。
@@ -77,6 +77,8 @@ provider stream 中的 content delta 会立即写入 `assistant.delta`，payload
 
 如果 `finishReason=length` 时 provider 已经返回了工具调用列表，Turn Loop 也不会执行该轮工具调用，因为 streaming JSON arguments 可能刚好在输出上限处被截断。此时它会保留该轮可见 assistant 文本，并追加一条恢复提示，要求模型丢弃半截工具参数，重新发出完整 JSON 工具调用或继续简短工作；只有后续非截断响应里的完整工具调用才会进入 schema 校验和执行路径。
 
+Turn Loop 默认允许每个预算窗口最多 50 次 provider request。窗口耗尽时不会直接写入 `E_MAX_MODEL_TURNS` 失败，而是写入 `tool.approvalRequired(toolName="model_turn_budget")`，由前端/CLI 通过同一套 `agent.approve` / `agent.reject` 队列决定是否继续；批准后再开启下一段 provider request 窗口，拒绝、取消或过期才按已有审批错误路径结束当前 run。
+
 DeepSeek streaming tool call delta 在 CLI provider wrapper 内通过 `ChatToolCallAccumulator` 拼装为完整 `ChatToolCall` 后才进入 `Completed.tool_calls`。Turn Loop 不直接处理 provider 私有 delta 形态，只要求 provider 在 `Completed` 中提供完整、可校验、可执行的工具调用列表。如果累计后的 `function.arguments` 不是合法 JSON，Turn Loop 会以 `E_INVALID_TOOL_ARGUMENTS` 失败，并把脱敏后的累计 arguments 写入当前 run 的 `diagnostics/invalid-tool-arguments-<sanitizedToolCallId>-<hash>.json`，同时在 `run.failed.diagnosticFile` 暴露该本地路径。
 
 `apply_patch` 支持大 payload 引用：`tool.requested.argumentsPreview` 可以只包含 `payloadRef`，Turn Loop 在执行前从当前 run 的 `payloads/` 文件读取完整 diff，校验 `sha256` / `sizeBytes` 后 materialize 为 `unifiedDiff`。materialize 之后仍走同一套 schema 校验、路径安全、hunk metadata 和 patch staging；最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 默认不触发审批，超过阈值或修改 workspace policy 文件会动态要求审批，selected hunk 过滤只在高风险 patch 或显式审批路径存在时启用。chunk 追加阶段不会写 workspace。
@@ -109,6 +111,7 @@ RPC active run 的 Run Log 使用 `SerializedRunLog`：后台 Turn Loop worker �
 - provider 发送多个 streaming content delta，Turn Loop 写入多条 `assistant.delta`，并避免在 `Completed` 时重复写入完整文本。
 - provider 最终响应以 `finishReason=length` 且没有工具调用结束时，Turn Loop 会自动追问一次最终工作总结，并且只有后续 `stop` 响应才写入 `run.completed.summary`。
 - provider 响应以 `finishReason=length` 且携带工具调用列表结束时，Turn Loop 会要求模型重新发出完整工具调用，不会执行可能截断的 partial call。
+- provider request 窗口耗尽时，Turn Loop 会发出 `model_turn_budget` continuation approval；批准后继续下一段窗口，不再直接 `E_MAX_MODEL_TURNS` 失败。
 - provider stream 或 shell 工具收到 `CancellationToken` 后，Turn Loop 写入 `run.canceled`，并返回 `E_RUN_CANCELED`。
 - Turn Loop 每次成功追加 Run Log 事件后，会把同一条事件交给 `TurnEventSink`，sink 看到的事件序列与本地 `events.jsonl` 一致。
 - `SerializedRunLog` 并发 append 测试验证多个 clone 同时写同一 run 时仍生成连续 `seq`。

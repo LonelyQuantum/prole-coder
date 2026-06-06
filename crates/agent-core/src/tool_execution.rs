@@ -961,10 +961,12 @@ where
                         program: program.to_owned(),
                         source,
                     })?;
+            let stdout = sanitize_command_output(&output.stdout);
+            let stderr = sanitize_command_output(&output.stderr);
             return Ok(CommandOutput {
                 exit_code: output.status.code(),
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                stdout,
+                stderr,
                 duration_ms: start.elapsed().as_millis(),
             });
         }
@@ -979,6 +981,87 @@ where
 
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn sanitize_command_output(output: &[u8]) -> String {
+    String::from_utf8_lossy(&strip_powershell_progress_clixml_bytes(output)).into_owned()
+}
+
+#[cfg(test)]
+fn strip_powershell_progress_clixml(text: &str) -> String {
+    String::from_utf8_lossy(&strip_powershell_progress_clixml_bytes(text.as_bytes())).into_owned()
+}
+
+fn strip_powershell_progress_clixml_bytes(output: &[u8]) -> Vec<u8> {
+    const MARKER: &[u8] = b"#< CLIXML";
+    const OBJS_START: &[u8] = b"<Objs ";
+    const END: &[u8] = b"</Objs>";
+    const PROGRESS: &[u8] = b"S=\"progress\"";
+    const ERROR: &[u8] = b"S=\"Error\"";
+
+    if !contains_bytes(output, MARKER) {
+        return output.to_vec();
+    }
+
+    let mut result = Vec::with_capacity(output.len());
+    let mut remaining = output;
+    while let Some(start) = find_bytes(remaining, MARKER) {
+        result.extend_from_slice(&remaining[..start]);
+        let after_marker = &remaining[start + MARKER.len()..];
+        let after_marker_newline = strip_one_line_break_bytes(after_marker);
+        if !trim_start_ascii(after_marker_newline).starts_with(OBJS_START) {
+            result.extend_from_slice(MARKER);
+            remaining = after_marker;
+            continue;
+        }
+
+        let Some(end) = find_bytes(after_marker_newline, END) else {
+            result.extend_from_slice(MARKER);
+            result.extend_from_slice(after_marker);
+            remaining = &[];
+            break;
+        };
+        let block_end = end + END.len();
+        let block = &after_marker_newline[..block_end];
+        if contains_bytes(block, PROGRESS) && !contains_bytes(block, ERROR) {
+            remaining = strip_one_line_break_bytes(&after_marker_newline[block_end..]);
+        } else {
+            result.extend_from_slice(MARKER);
+            result.extend_from_slice(after_marker);
+            remaining = &[];
+            break;
+        }
+    }
+    result.extend_from_slice(remaining);
+    result
+}
+
+fn strip_one_line_break_bytes(bytes: &[u8]) -> &[u8] {
+    bytes
+        .strip_prefix(b"\r\n")
+        .or_else(|| bytes.strip_prefix(b"\n"))
+        .unwrap_or(bytes)
+}
+
+fn trim_start_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    &bytes[start..]
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    find_bytes(haystack, needle).is_some()
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 #[cfg(unix)]
@@ -1718,7 +1801,7 @@ mod tests {
     use super::{
         ApplyPatchArgs, GitDiffArgs, GitStatusArgs, ReadFileArgs, SearchArgs, ShellArgs,
         ShellResult, ToolExecutionError, ToolStatus, WorkspaceManifestArgs, WorkspaceToolExecutor,
-        redacted_tool_result_value,
+        redacted_tool_result_value, sanitize_command_output, strip_powershell_progress_clixml,
     };
     use crate::cancellation::CancellationToken;
     use crate::hashing::sha256_hex;
@@ -2088,6 +2171,45 @@ mod tests {
             result.stderr
         );
         assert!(!result.stderr.contains('\u{fffd}'));
+    }
+
+    #[test]
+    fn command_output_strips_powershell_progress_clixml_noise() {
+        let clixml = concat!(
+            "#< CLIXML\r\n",
+            "<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">",
+            "<Obj S=\"progress\" RefId=\"0\"><MS><PR N=\"Record\"><AV>Preparing modules for first use.</AV>",
+            "</PR></MS></Obj></Objs>\r\n",
+            "real stderr\r\n",
+        );
+
+        assert_eq!(strip_powershell_progress_clixml(clixml), "real stderr\r\n");
+    }
+
+    #[test]
+    fn command_output_strips_powershell_progress_clixml_with_non_utf8_payload() {
+        let mut clixml = concat!(
+            "#< CLIXML\r\n",
+            "<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">",
+            "<Obj S=\"progress\" RefId=\"0\"><MS><PR N=\"Record\"><AV>"
+        )
+        .as_bytes()
+        .to_vec();
+        clixml.extend_from_slice(&[0xff, 0xfe, 0xfd]);
+        clixml.extend_from_slice(b"</AV></PR></MS></Obj></Objs>\r\nreal stderr\r\n");
+
+        assert_eq!(sanitize_command_output(&clixml), "real stderr\r\n");
+    }
+
+    #[test]
+    fn command_output_preserves_powershell_error_clixml() {
+        let clixml = concat!(
+            "#< CLIXML\r\n",
+            "<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">",
+            "<Obj S=\"Error\" RefId=\"0\"><MS><S N=\"Exception\">real error</S></MS></Obj></Objs>\r\n",
+        );
+
+        assert_eq!(strip_powershell_progress_clixml(clixml), clixml);
     }
 
     #[test]
