@@ -827,7 +827,7 @@ interface PatchProposed {
 }
 ```
 
-Patch 通过其中的 `approvalId` 使用 `agent.approve` 批准。`apply_patch` 首版支持在 `tool.approvalRequired.hunks` 中暴露可批准 hunk；client 可以发送 `agent.approve` 的 `hunks.approved` 只批准其中一部分。
+需要审批的 patch 通过其中的 `approvalId` 使用 `agent.approve` 批准。普通 workspace `apply_patch` 默认不产生审批；当未来高风险 patch 或显式审批路径发出 `tool.approvalRequired` 时，payload 可以在 `hunks` 中暴露可批准 hunk，client 可以发送 `agent.approve` 的 `hunks.approved` 只批准其中一部分。
 
 ### `patch.applied`
 

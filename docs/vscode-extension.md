@@ -56,7 +56,7 @@ VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server
 
 - 默认使用 Sidebar 内联审批卡片展示审批摘要。
 - 主审批动作只展示 `Approve` / `Reject`；`Approve` 映射为一次性批准，`Reject` 映射为拒绝。
-- `apply_patch` 多 hunk 审批在内联卡片中提供 hunk checkbox，持久化批准能力保留在 Core/RPC 策略与队列中，不在主审批 UI 暴露复杂选项。
+- 最多 5 个 `expectedFiles` 的普通 workspace 代码 `apply_patch` 默认直接执行，不弹出审批卡片；超过阈值的 bulk patch、workspace policy 文件 patch 以及需要审批的 shell / network / destructive 操作仍使用 Sidebar 内联 approval card。`apply_patch` 多 hunk 审批边界保留在 Core/RPC/VS Code 中，供高风险 patch 或显式审批路径复用；持久化批准能力保留在 Core/RPC 策略与队列中，不在主审批 UI 暴露复杂选项。
 
 `vscode/extension/src/approvalFlow.ts` 当前接入真实 RPC pending approval：
 
@@ -104,7 +104,7 @@ Phase 3 P0 顺序：
 5. 通过 JSON-RPC request client 回传用户动作。已完成 approval approve/reject 回传。
 6. 展示审批请求和命令输出摘要。已完成 `tool.approvalRequired` 接入真实 RPC pending queue；默认 UX 已从系统 modal 收敛为 Sidebar 内联审批卡片。
 7. 接入命令风险分类器输出，在审批 UI 中展示动态升级后的风险等级和原因。已完成：approval UI 和 Sidebar Chat 时间线都会展示 `riskReasons`。
-8. 使用 VS Code 原生 diff editor 展示 patch，并为 hunk 级审批预留交互边界。已完成：`PatchDiffPreviewController` 缓存 `tool.requested` 中的 `apply_patch` unified diff，在审批提示前打开虚拟 after 文档与 workspace before 文档的原生 diff，并保存 whole-patch 模式下的稳定 hunk boundary。
+8. 使用 VS Code 原生 diff editor 展示 patch，并为 hunk 级审批预留交互边界。已完成：`PatchDiffPreviewController` 可缓存 `tool.requested` 中的 `apply_patch` unified diff，在需要审批的 patch 路径前打开虚拟 after 文档与 workspace before 文档的原生 diff，并保存 whole-patch 模式下的稳定 hunk boundary；小规模普通 workspace 代码 patch 默认免审批，超过 5 个 `expectedFiles` 的 bulk patch 和 workspace policy 文件 patch 仍进入审批路径。
 9. 展示 Run List / resume。已完成：Sidebar Chat 顶部 Run List 调用 `agent.listRuns` 展示最近 run summary，点击历史 run 后调用 `agent.resume`，清空当前事件视图并消费 replay 的 `agent.event`。
 10. 展示 Context Capsule 可视化。已完成：Sidebar Chat 消费 `context.built` metadata，展示三层 token 分布、input/stable budget、cache/estimator 摘要、included/omitted sources 和 manifest 摘要。
 
@@ -116,7 +116,7 @@ Phase 3 P0 验收标准：
 - stdin EOF、writer BrokenPipe 或插件停用会取消 active run；run log 最终出现 `run.canceled` 或已有 terminal event。
 - Sidebar Chat 能消费 `agent.event` 并展示 `assistant.delta`、tool lifecycle 和 terminal event。已完成首版事件渲染。
 - Chat 输入能发送真实 `agent.sendTurn`，并通过事件流收到最终结果。已完成首版输入发送和事件流收口。
-- `tool.approvalRequired` 触发 Sidebar 内联审批卡片，approve/reject 能回传到 `agent.approve` / `agent.reject`。已完成真实 RPC pending queue 接入；`apply_patch` 支持 selected hunk 并通过 `agent.approve.hunks` 回传。
+- `tool.approvalRequired` 触发 Sidebar 内联审批卡片，approve/reject 能回传到 `agent.approve` / `agent.reject`。已完成真实 RPC pending queue 接入；最多 5 个 `expectedFiles` 的普通 workspace 代码 `apply_patch` 不触发审批，bulk patch / workspace policy 文件 / selected hunk / `agent.approve.hunks` 继续保留给需要审批的 patch 路径。
 - Sidebar Chat 能通过 `agent.listRuns` 展示最近 run，并用 `agent.resume` 回放历史事件。已完成首版 Run List / resume 接入。
 - Sidebar Chat 能把 `context.built` 渲染为 Context Capsule 面板，展示 token 分段、来源和 manifest/cache/estimator metadata。已完成首版 Context Capsule 可视化。
 - `ProleCoder: Open Settings` 和 Sidebar Settings 按钮能打开 VS Code 设置，并显示 server capability、模型预算、审批策略、RPC command/state；扩展配置不保存 API Key，DeepSeek model ID 作为非敏感配置保存。

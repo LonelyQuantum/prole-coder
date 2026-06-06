@@ -30,7 +30,7 @@
     {
       "name": "apply_patch",
       "risk": "write",
-      "approval": "required",
+      "approval": "none",
       "status": "executor_implemented"
     },
     {

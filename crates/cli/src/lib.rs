@@ -1315,6 +1315,7 @@ enum FixtureKind {
     Final,
     Readme,
     Patch,
+    Shell,
 }
 
 #[derive(Debug)]
@@ -1364,6 +1365,25 @@ impl FixtureProvider {
                 ),
                 TurnProviderResponse::final_text(
                     "Fixture provider applied CLI_SMOKE.txt and completed the run.",
+                ),
+            ],
+            FixtureKind::Shell => vec![
+                TurnProviderResponse::tool_calls(
+                    None,
+                    Some("Run the deterministic CLI smoke command.".to_owned()),
+                    vec![ChatToolCall::function(
+                        "call_shell",
+                        "shell",
+                        json!({
+                            "command": "echo cli-shell-approved",
+                            "cwd": ".",
+                            "timeoutMs": 10_000,
+                        })
+                        .to_string(),
+                    )],
+                ),
+                TurnProviderResponse::final_text(
+                    "Fixture provider ran the CLI shell command and completed the run.",
                 ),
             ],
         };
@@ -1475,6 +1495,7 @@ fn parse_fixture(value: &str) -> Result<FixtureKind, CliError> {
         "final" => Ok(FixtureKind::Final),
         "readme" => Ok(FixtureKind::Readme),
         "patch" => Ok(FixtureKind::Patch),
+        "shell" => Ok(FixtureKind::Shell),
         _ => Err(CliError::Usage(format!("unsupported fixture `{value}`"))),
     }
 }
@@ -1530,7 +1551,7 @@ fn run_help_text() -> String {
         "Run options:",
         "  --workspace <path>          Workspace root. Defaults to current directory.",
         "  --provider <deepseek|fixture>",
-        "  --fixture <final|readme|patch>",
+        "  --fixture <final|readme|patch|shell>",
         "  --mode <plan|edit|review|ask>",
         "  --run-id <id>",
         "  --turn-id <id>",
@@ -1549,7 +1570,7 @@ fn rpc_help_text() -> String {
     [
         "RPC options:",
         "  --provider <deepseek|fixture>",
-        "  --fixture <final|readme|patch>",
+        "  --fixture <final|readme|patch|shell>",
         "  --max-input-tokens <n>",
         "  --max-model-turns <n>",
         "  --max-output-tokens <n>",
@@ -1766,6 +1787,12 @@ mod tests {
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
         let events = store.load_run("run_cli_patch").expect("events should load");
         assert_eq!(notifications.len(), events.len());
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.approvalRequired"),
+            "fixture patch should not require CLI approval"
+        );
         let notification_seqs = notifications
             .iter()
             .map(|value| value["params"]["seq"].as_u64())
@@ -1778,9 +1805,54 @@ mod tests {
     }
 
     #[test]
-    fn fixture_patch_run_json_rejection_emits_json_rpc_error() {
+    fn fixture_patch_run_applies_without_approval_prompt() {
         let workspace = TestWorkspace::new("cli");
         workspace.write("CLI_SMOKE.txt", "old\n");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        run_cli(
+            [
+                "prole",
+                "run",
+                "--provider",
+                "fixture",
+                "--fixture",
+                "patch",
+                "--workspace",
+                workspace.path_str(),
+                "--run-id",
+                "run_cli_patch_no_prompt",
+                "--turn-id",
+                "turn_cli_patch_no_prompt",
+                "Patch smoke file",
+            ],
+            &mut stdout,
+            &mut stderr,
+        )
+        .expect("fixture patch run should succeed without approval");
+
+        assert_eq!(workspace.read("CLI_SMOKE.txt"), "new\n");
+        assert!(stderr.is_empty());
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let events = store
+            .load_run("run_cli_patch_no_prompt")
+            .expect("events should load");
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.approvalRequired"),
+            "fixture patch should not require CLI approval"
+        );
+        assert!(events.iter().any(|event| {
+            event.event_type == "run.completed"
+                && event.payload["changedFiles"] == json!(["CLI_SMOKE.txt"])
+        }));
+    }
+
+    #[test]
+    fn fixture_shell_run_json_rejection_emits_json_rpc_error() {
+        let workspace = TestWorkspace::new("cli");
         let mut stdin = std::io::Cursor::new(b"n\n".to_vec());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1792,15 +1864,15 @@ mod tests {
                 "--provider",
                 "fixture",
                 "--fixture",
-                "patch",
+                "shell",
                 "--json",
                 "--workspace",
                 workspace.path_str(),
                 "--run-id",
-                "run_cli_json_reject",
+                "run_cli_shell_json_reject",
                 "--turn-id",
-                "turn_cli_json_reject",
-                "Patch smoke file",
+                "turn_cli_shell_json_reject",
+                "Run fixture shell command",
             ],
             &mut stdin,
             &mut stdout,
@@ -1809,7 +1881,6 @@ mod tests {
         .expect_err("rejected json run should fail");
 
         assert!(error.is_reported());
-        assert_eq!(workspace.read("CLI_SMOKE.txt"), "old\n");
         let stderr = String::from_utf8(stderr).expect("stderr should be UTF-8");
         assert!(stderr.contains("Approval required"));
         assert!(!stderr.contains("status: failed"));
@@ -1838,11 +1909,11 @@ mod tests {
         assert_eq!(error_response["error"]["data"]["kind"], "turn");
         assert_eq!(
             error_response["error"]["data"]["runId"],
-            "run_cli_json_reject"
+            "run_cli_shell_json_reject"
         );
         assert_eq!(
             error_response["error"]["data"]["turnId"],
-            "turn_cli_json_reject"
+            "turn_cli_shell_json_reject"
         );
     }
 
@@ -1908,9 +1979,8 @@ mod tests {
     }
 
     #[test]
-    fn fixture_patch_run_prompts_for_approval_and_applies_when_approved() {
+    fn fixture_shell_run_prompts_for_approval_and_continues_when_approved() {
         let workspace = TestWorkspace::new("cli");
-        workspace.write("CLI_SMOKE.txt", "old\n");
         let mut stdin = std::io::Cursor::new(b"y\n".to_vec());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1922,14 +1992,14 @@ mod tests {
                 "--provider",
                 "fixture",
                 "--fixture",
-                "patch",
+                "shell",
                 "--workspace",
                 workspace.path_str(),
                 "--run-id",
-                "run_cli_prompt_approve",
+                "run_cli_shell_prompt_approve",
                 "--turn-id",
                 "turn_cli_prompt",
-                "Patch smoke file",
+                "Run fixture shell command",
             ],
             &mut stdin,
             &mut stdout,
@@ -1937,23 +2007,26 @@ mod tests {
         )
         .expect("approved prompt run should succeed");
 
-        assert_eq!(workspace.read("CLI_SMOKE.txt"), "new\n");
         let stderr = String::from_utf8(stderr).expect("stderr should be UTF-8");
         assert!(stderr.contains("Approval required"));
         assert!(stderr.contains("Approve this tool call?"));
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
         let events = store
-            .load_run("run_cli_prompt_approve")
+            .load_run("run_cli_shell_prompt_approve")
             .expect("events should load");
         assert!(events.iter().any(|event| {
             event.event_type == "tool.approvalResolved" && event.payload["decision"] == "approved"
         }));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "tool.started")
+        );
     }
 
     #[test]
-    fn fixture_patch_run_prompts_for_approval_and_rejects() {
+    fn fixture_shell_run_prompts_for_approval_and_rejects() {
         let workspace = TestWorkspace::new("cli");
-        workspace.write("CLI_SMOKE.txt", "old\n");
         let mut stdin = std::io::Cursor::new(b"n\n".to_vec());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1965,14 +2038,14 @@ mod tests {
                 "--provider",
                 "fixture",
                 "--fixture",
-                "patch",
+                "shell",
                 "--workspace",
                 workspace.path_str(),
                 "--run-id",
-                "run_cli_prompt_reject",
+                "run_cli_shell_prompt_reject",
                 "--turn-id",
                 "turn_cli_prompt",
-                "Patch smoke file",
+                "Run fixture shell command",
             ],
             &mut stdin,
             &mut stdout,
@@ -1981,12 +2054,11 @@ mod tests {
         .expect_err("rejected prompt run should fail");
 
         assert!(error.to_string().contains("rejected by user"));
-        assert_eq!(workspace.read("CLI_SMOKE.txt"), "old\n");
         let stderr = String::from_utf8(stderr).expect("stderr should be UTF-8");
         assert!(stderr.contains("status: failed"));
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
         let events = store
-            .load_run("run_cli_prompt_reject")
+            .load_run("run_cli_shell_prompt_reject")
             .expect("events should load");
         assert!(events.iter().any(|event| {
             event.event_type == "tool.approvalResolved"

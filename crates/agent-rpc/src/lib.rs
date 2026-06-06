@@ -4044,11 +4044,11 @@ mod tests {
     }
 
     #[test]
-    fn turn_loop_rpc_handler_waits_for_approval_and_applies_after_approve() {
+    fn turn_loop_rpc_handler_waits_for_shell_approval_and_continues_after_approve() {
         let workspace = TestWorkspace::new("rpc");
         workspace.write("README.md", "old\n");
         let (input, output, join) =
-            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(patch_provider_factory));
+            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(shell_provider_factory));
         send_rpc_line(
             &input,
             json!({
@@ -4066,7 +4066,7 @@ mod tests {
                 "method": "agent.sendTurn",
                 "params": {
                     "runId": "run_rpc_approval",
-                    "message": "Update README",
+                    "message": "Run an approved command",
                     "mode": "edit"
                 }
             }),
@@ -4104,7 +4104,7 @@ mod tests {
             .expect("request loop thread should not panic")
             .expect("real turn loop handler should complete after approval");
 
-        assert_eq!(workspace.read("README.md"), "new\n");
+        assert_eq!(workspace.read("README.md"), "old\n");
         let lines = output.lines();
         let events = agent_event_values(&lines);
         let approval_required_index = line_index(&lines, |line| {
@@ -4125,10 +4125,11 @@ mod tests {
             .find(|event| event["type"] == "tool.approvalRequired")
             .expect("approval required event should exist")["payload"];
         assert_eq!(approval_payload["approvalId"], "approval_1_1");
-        assert_eq!(approval_payload["toolCallId"], "call_patch");
-        assert_eq!(approval_payload["toolName"], "apply_patch");
-        assert_eq!(approval_payload["risk"], "write");
-        assert_eq!(approval_payload["paths"], json!(["README.md"]));
+        assert_eq!(approval_payload["toolCallId"], "call_shell");
+        assert_eq!(approval_payload["toolName"], "shell");
+        assert_eq!(approval_payload["risk"], "exec");
+        assert_eq!(approval_payload["command"], "echo rpc-shell-approved");
+        assert_eq!(approval_payload["cwd"], ".");
         assert_eq!(approval_payload["persistable"], true);
         assert_eq!(lines[1]["id"], "turn_1");
         assert_eq!(lines[1]["result"]["accepted"], true);
@@ -4139,13 +4140,12 @@ mod tests {
             "session"
         );
         assert!(events.iter().any(|event| {
-            event["type"] == "run.completed"
-                && event["payload"]["changedFiles"] == json!(["README.md"])
+            event["type"] == "run.completed" && event["payload"]["changedFiles"] == json!([])
         }));
     }
 
     #[test]
-    fn turn_loop_rpc_handler_rejects_pending_approval_without_running_tool() {
+    fn turn_loop_rpc_handler_applies_workspace_patch_without_approval() {
         let workspace = TestWorkspace::new("rpc");
         workspace.write("README.md", "old\n");
         let (input, output, join) =
@@ -4166,8 +4166,64 @@ mod tests {
                 "id": "turn_1",
                 "method": "agent.sendTurn",
                 "params": {
-                    "runId": "run_rpc_rejected_approval",
+                    "runId": "run_rpc_patch_without_approval",
                     "message": "Update README",
+                    "mode": "edit"
+                }
+            }),
+        );
+        output.wait_for_line(
+            |line| {
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.completed"
+                        && event["runId"] == "run_rpc_patch_without_approval"
+                })
+            },
+            RPC_TEST_TIMEOUT,
+        );
+        drop(input);
+        join.join()
+            .expect("request loop thread should not panic")
+            .expect("real turn loop handler should complete");
+
+        assert_eq!(workspace.read("README.md"), "new\n");
+        let events = agent_event_values(&output.lines());
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "tool.approvalRequired"),
+            "workspace apply_patch should not pause for approval"
+        );
+        assert!(events.iter().any(|event| {
+            event["type"] == "run.completed"
+                && event["payload"]["changedFiles"] == json!(["README.md"])
+        }));
+    }
+
+    #[test]
+    fn turn_loop_rpc_handler_rejects_pending_approval_without_running_tool() {
+        let workspace = TestWorkspace::new("rpc");
+        workspace.write("README.md", "old\n");
+        let (input, output, join) =
+            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(shell_provider_factory));
+        send_rpc_line(
+            &input,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init_1",
+                "method": "agent.initialize",
+                "params": initialize_params_for(workspace.path_str())
+            }),
+        );
+        send_rpc_line(
+            &input,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "turn_1",
+                "method": "agent.sendTurn",
+                "params": {
+                    "runId": "run_rpc_rejected_approval",
+                    "message": "Run a command",
                     "mode": "edit"
                 }
             }),
@@ -4224,7 +4280,7 @@ mod tests {
         let workspace = TestWorkspace::new("rpc");
         workspace.write("README.md", "old\n");
         let (input, output, join) =
-            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(patch_provider_factory));
+            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(shell_provider_factory));
         send_rpc_line(
             &input,
             json!({
@@ -4242,7 +4298,7 @@ mod tests {
                 "method": "agent.sendTurn",
                 "params": {
                     "runId": "run_rpc_canceled_approval",
-                    "message": "Update README",
+                    "message": "Run a command",
                     "mode": "edit"
                 }
             }),
@@ -4349,7 +4405,7 @@ mod tests {
         let workspace = TestWorkspace::new("rpc");
         workspace.write("README.md", "old\n");
         let (input, output, join) =
-            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(patch_provider_factory));
+            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(shell_provider_factory));
         send_rpc_line(
             &input,
             json!({
@@ -4367,7 +4423,7 @@ mod tests {
                 "method": "agent.sendTurn",
                 "params": {
                     "runId": "run_rpc_active_disconnect",
-                    "message": "Update README and wait for approval",
+                    "message": "Run a command and wait for approval",
                     "mode": "edit"
                 }
             }),
@@ -4436,7 +4492,7 @@ mod tests {
     fn turn_loop_rpc_handler_expires_pending_approval_without_running_tool() {
         let workspace = TestWorkspace::new("rpc");
         workspace.write("README.md", "old\n");
-        let mut handler = AgentTurnLoopRpcHandler::new(patch_provider_factory)
+        let mut handler = AgentTurnLoopRpcHandler::new(shell_provider_factory)
             .with_approval_timeout(Duration::from_millis(20));
         handler
             .initialize(
@@ -4448,7 +4504,7 @@ mod tests {
         let send_output = handler
             .send_turn(SendTurnParams {
                 run_id: Some("run_rpc_expired_approval".to_owned()),
-                message: "Update README".to_owned(),
+                message: "Run a command".to_owned(),
                 mode: super::RpcRunMode::Edit,
                 attachments: Vec::new(),
             })
@@ -5168,6 +5224,28 @@ mod tests {
     ) -> Result<ScriptedProvider, AgentRpcHandlerError> {
         Ok(ScriptedProvider::new(vec![
             TurnProviderResponse::final_text("RPC final answer"),
+        ]))
+    }
+
+    fn shell_provider_factory(
+        _params: &SendTurnParams,
+    ) -> Result<ScriptedProvider, AgentRpcHandlerError> {
+        Ok(ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should run a shell command.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_shell",
+                    "shell",
+                    json!({
+                        "command": "echo rpc-shell-approved",
+                        "cwd": ".",
+                        "timeoutMs": 10_000,
+                    })
+                    .to_string(),
+                )],
+            ),
+            TurnProviderResponse::final_text("Command approved and completed."),
         ]))
     }
 

@@ -287,7 +287,7 @@ pub const BUILTIN_TOOLS: &[ToolDefinition] = &[
         ToolName::ApplyPatch,
         "Apply a unified diff patch.",
         RiskLevel::Write,
-        ApprovalRequirement::Required,
+        ApprovalRequirement::None,
         ToolImplementationStatus::ExecutorImplemented,
         APPLY_PATCH_ARGUMENT_SCHEMA,
         STATUS_RESULT_SCHEMA,
@@ -602,28 +602,74 @@ mod tests {
     use crate::approval::{ALL_RISK_LEVELS, ApprovalRequirement, RiskLevel};
 
     #[test]
-    fn all_builtin_tools_have_matching_default_approval() {
-        for tool in BUILTIN_TOOLS {
-            assert_eq!(
-                tool.approval,
-                tool.risk.default_approval(),
-                "tool {} has mismatched approval requirement",
-                tool.name.as_str()
-            );
-        }
-    }
-
-    #[test]
-    fn write_and_exec_tools_require_approval() {
+    fn builtin_tools_have_explicit_approval_requirements() {
         let apply_patch = find_builtin_tool(ToolName::ApplyPatch.as_str())
             .expect("apply_patch tool must be registered");
         let shell =
             find_builtin_tool(ToolName::Shell.as_str()).expect("shell tool must be registered");
 
         assert_eq!(apply_patch.risk, RiskLevel::Write);
-        assert_eq!(apply_patch.approval, ApprovalRequirement::Required);
+        assert_eq!(apply_patch.approval, ApprovalRequirement::None);
         assert_eq!(shell.risk, RiskLevel::Exec);
         assert_eq!(shell.approval, ApprovalRequirement::Required);
+    }
+
+    #[test]
+    fn builtin_tool_approval_requirements_stay_within_supported_risk_constraints() {
+        for tool in BUILTIN_TOOLS {
+            if tool.risk == RiskLevel::Read {
+                assert_eq!(
+                    tool.approval,
+                    ApprovalRequirement::None,
+                    "read-only tool `{}` must not require approval",
+                    tool.name.as_str()
+                );
+            }
+
+            if tool.approval == ApprovalRequirement::Required {
+                assert_ne!(
+                    tool.risk,
+                    RiskLevel::Read,
+                    "approval-required tool `{}` needs a non-read risk",
+                    tool.name.as_str()
+                );
+            }
+
+            if tool.approval == ApprovalRequirement::AlwaysRequired {
+                assert_eq!(
+                    tool.risk,
+                    RiskLevel::Destructive,
+                    "always-required tool `{}` must be destructive",
+                    tool.name.as_str()
+                );
+            }
+
+            if tool.risk == RiskLevel::Destructive {
+                assert_eq!(
+                    tool.approval,
+                    ApprovalRequirement::AlwaysRequired,
+                    "destructive tool `{}` must always require approval",
+                    tool.name.as_str()
+                );
+            }
+
+            if matches!(tool.risk, RiskLevel::Exec | RiskLevel::Network) {
+                assert!(
+                    tool.approval.is_required(),
+                    "exec/network tool `{}` must require approval",
+                    tool.name.as_str()
+                );
+            }
+
+            if tool.risk == RiskLevel::Write && tool.approval == ApprovalRequirement::None {
+                assert_eq!(
+                    tool.name,
+                    ToolName::ApplyPatch,
+                    "write tool `{}` needs an explicit safety review before approval override",
+                    tool.name.as_str()
+                );
+            }
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@ prole rpc [options]
 
 - `--workspace <path>`：workspace root，默认当前目录。
 - `--provider <deepseek|fixture>`：provider 类型，默认 `deepseek`。
-- `--fixture <final|readme|patch>`：fixture provider 的确定性脚本。
+- `--fixture <final|readme|patch|shell>`：fixture provider 的确定性脚本。
 - `--mode <plan|edit|review|ask>`：Agent run mode。
 - `--run-id <id>` / `--turn-id <id>`：显式指定本地 run/turn id。
 - `--auto-approve` / `-y`：允许需要审批的工具执行。默认在 CLI 二进制中交互式询问；如果 stdin 已关闭或不可读，则拒绝该审批。
@@ -27,7 +27,7 @@ prole rpc [options]
 `rpc` 子命令使用同一套 provider 相关参数：
 
 - `--provider <deepseek|fixture>`
-- `--fixture <final|readme|patch>`
+- `--fixture <final|readme|patch|shell>`
 - `--max-input-tokens <n>`、`--max-model-turns <n>`、`--max-output-tokens <n>`
 - `--thinking <enabled|disabled>`
 
@@ -59,9 +59,10 @@ fixture provider 不联网，用于本地 smoke test 和 CI。它使用确定性
 
 - `final`：直接返回最终消息。
 - `readme`：请求 `read_file README.md`，随后返回最终消息。
-- `patch`：请求 `apply_patch` 修改 `CLI_SMOKE.txt`，随后返回最终消息。
+- `patch`：请求免审批 `apply_patch` 修改 `CLI_SMOKE.txt`，随后返回最终消息。
+- `shell`：请求 `shell` 执行确定性 echo 命令，用于审批 smoke test。
 
-`patch` fixture 会触发写入审批。交互式运行时可以直接输入 `y` 批准；自动化测试或非交互脚本可以使用 `--auto-approve`。
+`shell` fixture 会触发命令审批。交互式运行时可以直接输入 `y` 批准；自动化测试或非交互脚本可以使用 `--auto-approve`。普通 workspace `patch` fixture 不再触发审批。
 
 ## 输出
 
@@ -111,7 +112,7 @@ final: ...
 
 ## 交互式审批
 
-CLI 二进制默认会在 `apply_patch`、`shell` 等需要审批的工具执行前向 stderr 输出审批摘要，并从 stdin 读取 `y` / `n`。stdout 在 `--json` 模式下仍只保留 newline-delimited JSON-RPC 事件或错误响应，便于前端或脚本解析；人类提示不会混入 stdout。
+CLI 二进制默认会在 `shell` 等需要审批的工具执行前向 stderr 输出审批摘要，并从 stdin 读取 `y` / `n`。最多 5 个 `expectedFiles` 的普通 workspace 代码 `apply_patch` 默认免审批；超过阈值的 bulk patch、workspace policy 文件 patch、高风险 patch 或显式审批路径仍复用同一审批事件。stdout 在 `--json` 模式下仍只保留 newline-delimited JSON-RPC 事件或错误响应，便于前端或脚本解析；人类提示不会混入 stdout。
 
 批准后，Run Log 会出现 `tool.approvalResolved`，随后进入 `tool.started`。拒绝后，Run Log 会出现 `tool.approvalResolved` 和 `run.failed`，对应工具不会执行。
 

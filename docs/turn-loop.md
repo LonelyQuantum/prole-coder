@@ -77,7 +77,7 @@ provider stream 中的 content delta 会立即写入 `assistant.delta`，payload
 
 DeepSeek streaming tool call delta 在 CLI provider wrapper 内通过 `ChatToolCallAccumulator` 拼装为完整 `ChatToolCall` 后才进入 `Completed.tool_calls`。Turn Loop 不直接处理 provider 私有 delta 形态，只要求 provider 在 `Completed` 中提供完整、可校验、可执行的工具调用列表。如果累计后的 `function.arguments` 不是合法 JSON，Turn Loop 会以 `E_INVALID_TOOL_ARGUMENTS` 失败，并把脱敏后的累计 arguments 写入当前 run 的 `diagnostics/invalid-tool-arguments-<sanitizedToolCallId>-<hash>.json`，同时在 `run.failed.diagnosticFile` 暴露该本地路径。
 
-`apply_patch` 支持大 payload 引用：`tool.requested.argumentsPreview` 可以只包含 `payloadRef`，Turn Loop 在执行前从当前 run 的 `payloads/` 文件读取完整 diff，校验 `sha256` / `sizeBytes` 后 materialize 为 `unifiedDiff`。materialize 之后仍走同一套 schema 校验、路径安全、审批、hunk metadata、selected hunk 过滤和 patch staging；chunk 追加阶段不会写 workspace。
+`apply_patch` 支持大 payload 引用：`tool.requested.argumentsPreview` 可以只包含 `payloadRef`，Turn Loop 在执行前从当前 run 的 `payloads/` 文件读取完整 diff，校验 `sha256` / `sizeBytes` 后 materialize 为 `unifiedDiff`。materialize 之后仍走同一套 schema 校验、路径安全、hunk metadata 和 patch staging；最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 默认不触发审批，超过阈值或修改 workspace policy 文件会动态要求审批，selected hunk 过滤只在高风险 patch 或显式审批路径存在时启用。chunk 追加阶段不会写 workspace。
 
 `run.started` 记录规范化后的 workspace root，用于本地审计和前端展示当前 run 绑定的工作区。该路径只应进入本地 run log 和本机前端事件流，不应被上传到公开仓库或远程日志。
 
@@ -85,10 +85,9 @@ DeepSeek streaming tool call delta 在 CLI provider wrapper 内通过 `ChatToolC
 
 `read_file`、`search`、`git_status` 和 `git_diff` 使用静态 `read` 风险，不需要审批。
 
-`apply_patch` 和 `shell` 当前根据工具定义触发审批：
+`apply_patch` 保持 `write` 风险和 workspace/path/sensitive-file 约束，但最多 5 个 `expectedFiles` 的普通 workspace 代码修改默认 `approval=none`，不会写入 `tool.approvalRequired`；超过阈值的 bulk patch 或 `.gitignore` / `.prole-coderignore` patch 会动态要求审批。解析错误、文件集合不匹配和 hunk mismatch 会作为 `tool.completed status=failed` 返回给模型，让模型重新读取文件后重试；这些可恢复错误发生在写盘前，failed result 的 `reversePatch` 为空。
 
-- 默认策略 `RejectAllApprovalPolicy` 会拒绝执行，Turn Loop 写入 `tool.approvalRequired` 和 `tool.approvalResolved` 后以 `E_APPROVAL_REJECTED` 失败。
-- 测试可使用 `AutoApprovePolicy` 验证已批准路径。
+`shell` 当前根据工具定义触发审批。默认策略 `RejectAllApprovalPolicy` 会拒绝需要审批的 shell 执行，Turn Loop 写入 `tool.approvalRequired` 和 `tool.approvalResolved` 后以 `E_APPROVAL_REJECTED` 失败；测试可使用 `AutoApprovePolicy` 验证已批准路径。
 
 `shell` 的工具定义仍以 `exec` 作为最低风险，但 Turn Loop 会在审批前调用命令风险分类器。分类器会递归检查 shell 包装器、`$(...)` 和传统反引号子命令；依赖安装、网络访问、远程 git 和发布命令会升级为 `network`；删除、强制 push、`git reset --hard`、`git clean` 等会升级为 `destructive`。升级结果会同时写入 `tool.requested` 和 `tool.approvalRequired` 的 `risk` / `riskReasons`，供 CLI、RPC、VS Code 和后续 TUI 使用。
 
@@ -103,7 +102,7 @@ RPC active run 的 Run Log 使用 `SerializedRunLog`：后台 Turn Loop worker �
 - provider 请求 `read_file`，Turn Loop 执行工具、写入 run log、把 tool result message 回传给下一次 provider，并最终完成 run。
 - provider 请求 `shell`，默认审批策略拒绝执行，run 失败且不会写入 `tool.started`。
 - provider 请求高风险 `shell` 命令时，Turn Loop 会在审批前升级 `tool.requested` / `tool.approvalRequired` 风险并写入 `riskReasons`；网络和破坏性升级均覆盖 `persistable: false`。
-- provider 请求 `apply_patch`，测试审批策略批准后修改文件、记录 `changedFiles`，并完成 run。
+- provider 请求 `apply_patch`，最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 免审批修改文件、记录 `changedFiles` 并完成 run；超过阈值的 bulk patch 或 workspace policy 文件 patch 会触发审批；hunk mismatch 等可恢复 patch 错误会作为 failed tool result 回传并继续模型回合。
 - thinking disabled 配置下，provider 返回无 `reasoning_content` 的工具调用时，Turn Loop 会按非 reasoning replay 路径继续执行工具并完成 run。
 - provider 发送多个 streaming content delta，Turn Loop 写入多条 `assistant.delta`，并避免在 `Completed` 时重复写入完整文本。
 - provider 最终响应以 `finishReason=length` 且没有工具调用结束时，Turn Loop 会自动追问一次最终工作总结，并且只有后续 `stop` 响应才写入 `run.completed.summary`。

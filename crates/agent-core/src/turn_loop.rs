@@ -30,7 +30,7 @@ use crate::{
         validate_tool_arguments,
     },
     tool_execution::{
-        ApplyPatchArgs, PatchApprovalHunk, ReadFileArgs, ShellArgs, ShellResult,
+        ApplyPatchArgs, ApplyPatchResult, PatchApprovalHunk, ReadFileArgs, ShellArgs, ShellResult,
         ToolExecutionError, ToolStatus, WorkspaceManifestArgs, WorkspaceToolExecutor,
         filter_apply_patch_hunks, patch_approval_hunks, redacted_tool_result_value,
     },
@@ -41,6 +41,8 @@ const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 256 * 1024;
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_LINES: usize = 8;
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 const TOOL_ARGUMENT_DIAGNOSTIC_MAX_BYTES: usize = 128 * 1024;
+const MAX_AUTO_APPROVED_PATCH_FILES: usize = 5;
+const WORKSPACE_POLICY_PATCH_FILES: &[&str] = &[".gitignore", ".prole-coderignore"];
 const FINAL_RESPONSE_SUMMARY_INSTRUCTION: &str = concat!(
     "When the task is complete, make the final assistant message a concise work summary for the user. ",
     "Mention what changed, important files, verification or tests, and any blockers. ",
@@ -765,11 +767,22 @@ where
                     event_sink,
                     |tools, args, cancellation_token| {
                         let result =
-                            tools.apply_patch_with_cancellation(args, cancellation_token)?;
+                            match tools.apply_patch_with_cancellation(args, cancellation_token) {
+                                Ok(result) => result,
+                                Err(error) if is_recoverable_apply_patch_error(&error) => {
+                                    failed_apply_patch_result(&error)
+                                }
+                                Err(error) => return Err(error.into()),
+                            };
+                        let changed_files = if result.status == ToolStatus::Ok {
+                            result.files.clone()
+                        } else {
+                            Vec::new()
+                        };
                         tool_record(
                             result.status,
                             result.summary.clone(),
-                            result.files.clone(),
+                            changed_files,
                             &result,
                         )
                     },
@@ -908,7 +921,11 @@ where
         run_log: &mut (impl RunLogWriter + ?Sized),
         event_sink: &mut (impl TurnEventSink + ?Sized),
     ) -> Result<ApprovalScope, AgentTurnLoopError> {
-        let approval = effective_approval_requirement(definition.approval, risk_assessment.risk);
+        let approval = effective_approval_requirement(
+            definition.approval,
+            risk_assessment.risk,
+            risk_assessment.approval_override,
+        );
         if approval == ApprovalRequirement::None {
             return Ok(ApprovalScope::All);
         }
@@ -2095,6 +2112,7 @@ fn reasoning_state_payload(state: ReasoningContentState) -> Value {
 struct ToolRiskAssessment {
     risk: RiskLevel,
     risk_reasons: Vec<String>,
+    approval_override: Option<ApprovalRequirement>,
 }
 
 fn tool_risk_assessment(definition: &ToolDefinition, arguments: &Value) -> ToolRiskAssessment {
@@ -2105,24 +2123,113 @@ fn tool_risk_assessment(definition: &ToolDefinition, arguments: &Value) -> ToolR
         return ToolRiskAssessment {
             risk: classification.risk,
             risk_reasons: classification.reason_summaries(),
+            approval_override: None,
         };
+    }
+
+    if definition.name == ToolName::ApplyPatch
+        && let Some(expected_files) = arguments.get("expectedFiles").and_then(Value::as_array)
+    {
+        if let Some(policy_file) = expected_files
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|path| is_workspace_policy_patch_file(path))
+        {
+            return ToolRiskAssessment {
+                risk: definition.risk,
+                risk_reasons: vec![format!(
+                    "workspace policy file `{policy_file}` requires approval"
+                )],
+                approval_override: Some(ApprovalRequirement::Required),
+            };
+        }
+
+        let file_count = expected_files.len();
+        if file_count > MAX_AUTO_APPROVED_PATCH_FILES {
+            return ToolRiskAssessment {
+                risk: definition.risk,
+                risk_reasons: vec![format!(
+                    "bulk patch touches {file_count} files; limit for automatic workspace patch is {MAX_AUTO_APPROVED_PATCH_FILES}"
+                )],
+                approval_override: Some(ApprovalRequirement::Required),
+            };
+        }
     }
 
     ToolRiskAssessment {
         risk: definition.risk,
         risk_reasons: Vec::new(),
+        approval_override: None,
     }
+}
+
+fn is_workspace_policy_patch_file(path: &str) -> bool {
+    let file_name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    WORKSPACE_POLICY_PATCH_FILES
+        .iter()
+        .any(|policy_file| file_name.eq_ignore_ascii_case(policy_file))
 }
 
 fn effective_approval_requirement(
     static_approval: ApprovalRequirement,
     risk: RiskLevel,
+    approval_override: Option<ApprovalRequirement>,
 ) -> ApprovalRequirement {
     let risk_approval = risk.default_approval();
-    if approval_requirement_rank(risk_approval) > approval_requirement_rank(static_approval) {
-        risk_approval
+    let base_approval = if static_approval == ApprovalRequirement::None {
+        match risk {
+            RiskLevel::Network | RiskLevel::Destructive => risk_approval,
+            RiskLevel::Read | RiskLevel::Write | RiskLevel::Exec => ApprovalRequirement::None,
+        }
     } else {
-        static_approval
+        max_approval_requirement(static_approval, risk_approval)
+    };
+
+    match approval_override {
+        Some(override_approval) => max_approval_requirement(base_approval, override_approval),
+        None => base_approval,
+    }
+}
+
+fn max_approval_requirement(
+    left: ApprovalRequirement,
+    right: ApprovalRequirement,
+) -> ApprovalRequirement {
+    if approval_requirement_rank(right) > approval_requirement_rank(left) {
+        right
+    } else {
+        left
+    }
+}
+
+fn is_recoverable_apply_patch_error(error: &ToolExecutionError) -> bool {
+    matches!(
+        error,
+        ToolExecutionError::InvalidPatch(_)
+            | ToolExecutionError::PatchFileMismatch { .. }
+            | ToolExecutionError::PatchHunkMismatch { .. }
+    )
+}
+
+fn failed_apply_patch_result(error: &ToolExecutionError) -> ApplyPatchResult {
+    ApplyPatchResult {
+        status: ToolStatus::Failed,
+        summary: format!("Patch failed: {error}"),
+        error_code: Some(apply_patch_error_code(error).to_owned()),
+        files: Vec::new(),
+        // Recoverable patch errors are reported before workspace writes. The executor parses,
+        // validates expected files, applies all hunks in memory, and only then writes staged files.
+        // With no modified files there is intentionally no reverse patch to return.
+        reverse_patch: String::new(),
+    }
+}
+
+fn apply_patch_error_code(error: &ToolExecutionError) -> &'static str {
+    match error {
+        ToolExecutionError::InvalidPatch(_) => "E_INVALID_PATCH",
+        ToolExecutionError::PatchFileMismatch { .. } => "E_PATCH_FILE_MISMATCH",
+        ToolExecutionError::PatchHunkMismatch { .. } => "E_PATCH_HUNK_MISMATCH",
+        _ => "E_PATCH_FAILED",
     }
 }
 
@@ -2488,8 +2595,7 @@ mod tests {
 
     use super::{
         AgentRunMode, AgentTurnInput, AgentTurnLoop, AgentTurnLoopConfig, AgentTurnLoopError,
-        ApprovalDecision, ApprovalPolicy, ApprovalPolicyError, AutoApprovePolicy,
-        CancellationToken, TextRange, TurnApprovalRequest, TurnAttachment, TurnEventSink,
+        AutoApprovePolicy, CancellationToken, TextRange, TurnAttachment, TurnEventSink,
         TurnEventSinkError, TurnProvider, TurnProviderCompletion, TurnProviderDelta,
         TurnProviderError, TurnProviderEvent, TurnProviderFinishReason, TurnProviderFuture,
         TurnProviderRequest, TurnProviderResponse, TurnProviderStream,
@@ -3228,7 +3334,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_loop_executes_approved_patch_and_tracks_changed_files() {
+    async fn turn_loop_executes_workspace_patch_without_approval_and_tracks_changed_files() {
         let workspace = TestWorkspace::new("turn-loop");
         workspace.write("README.md", "old\n");
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
@@ -3259,13 +3365,12 @@ mod tests {
             TurnProviderResponse::final_text("Updated README."),
         ]);
         let mut loop_runner =
-            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
-                .expect("turn loop should initialize");
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
 
         let outcome = loop_runner
             .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
             .await
-            .expect("approved patch should complete");
+            .expect("workspace patch should complete without approval");
 
         assert_eq!(workspace.read("README.md"), "new\n");
         assert_eq!(outcome.changed_files, vec!["README.md"]);
@@ -3273,7 +3378,7 @@ mod tests {
             .load_run("run_turn_patch")
             .expect("events should load");
         assert!(
-            events
+            !events
                 .iter()
                 .any(|event| event.event_type == "tool.approvalRequired")
         );
@@ -3282,6 +3387,216 @@ mod tests {
             .find(|event| event.event_type == "run.completed")
             .expect("run should complete");
         assert_eq!(completed.payload["changedFiles"], json!(["README.md"]));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_requires_approval_for_bulk_workspace_patch() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_bulk_patch")
+            .expect("run should be created");
+        let mut patch = String::new();
+        let mut expected_files = Vec::new();
+        for index in 1..=6 {
+            let path = format!("src/file{index}.txt");
+            workspace.write(&path, "old\n");
+            expected_files.push(path.clone());
+            patch.push_str(&format!(
+                "--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n"
+            ));
+        }
+        let provider = ScriptedProvider::new(vec![TurnProviderResponse::tool_calls(
+            None,
+            Some("I should edit several files.".to_owned()),
+            vec![ChatToolCall::function(
+                "call_1",
+                "apply_patch",
+                json!({
+                    "unifiedDiff": patch,
+                    "expectedFiles": expected_files,
+                })
+                .to_string(),
+            )],
+        )]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let error = loop_runner
+            .run_turn(
+                AgentTurnInput::new("turn_1", "Update several files"),
+                &mut run,
+            )
+            .await
+            .expect_err("bulk workspace patch should require approval");
+
+        assert!(matches!(error, AgentTurnLoopError::ApprovalRejected { .. }));
+        for index in 1..=6 {
+            assert_eq!(workspace.read(&format!("src/file{index}.txt")), "old\n");
+        }
+        let events = store
+            .load_run("run_turn_bulk_patch")
+            .expect("events should load");
+        let requested = events
+            .iter()
+            .find(|event| event.event_type == "tool.requested")
+            .expect("tool.requested should be recorded");
+        assert_eq!(requested.payload["risk"], "write");
+        assert_eq!(
+            requested.payload["riskReasons"],
+            json!(["bulk patch touches 6 files; limit for automatic workspace patch is 5"])
+        );
+        let approval = events
+            .iter()
+            .find(|event| event.event_type == "tool.approvalRequired")
+            .expect("bulk patch should request approval");
+        assert_eq!(approval.payload["risk"], "write");
+        assert_eq!(approval.payload["paths"].as_array().map(Vec::len), Some(6));
+        assert_eq!(
+            approval.payload["riskReasons"],
+            json!(["bulk patch touches 6 files; limit for automatic workspace patch is 5"])
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.started")
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_requires_approval_for_workspace_policy_patch() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write(".gitignore", ".env\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_policy_patch")
+            .expect("run should be created");
+        let patch = "--- a/.gitignore\n+++ b/.gitignore\n@@ -1 +0,0 @@\n-.env\n";
+        let provider = ScriptedProvider::new(vec![TurnProviderResponse::tool_calls(
+            None,
+            Some("I should update ignore rules.".to_owned()),
+            vec![ChatToolCall::function(
+                "call_1",
+                "apply_patch",
+                json!({
+                    "unifiedDiff": patch,
+                    "expectedFiles": [".gitignore"],
+                })
+                .to_string(),
+            )],
+        )]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let error = loop_runner
+            .run_turn(
+                AgentTurnInput::new("turn_1", "Update ignore rules"),
+                &mut run,
+            )
+            .await
+            .expect_err("workspace policy patch should require approval");
+
+        assert!(matches!(error, AgentTurnLoopError::ApprovalRejected { .. }));
+        assert_eq!(workspace.read(".gitignore"), ".env\n");
+        let events = store
+            .load_run("run_turn_policy_patch")
+            .expect("events should load");
+        let requested = events
+            .iter()
+            .find(|event| event.event_type == "tool.requested")
+            .expect("tool.requested should be recorded");
+        assert_eq!(requested.payload["risk"], "write");
+        assert_eq!(
+            requested.payload["riskReasons"],
+            json!(["workspace policy file `.gitignore` requires approval"])
+        );
+        let approval = events
+            .iter()
+            .find(|event| event.event_type == "tool.approvalRequired")
+            .expect("workspace policy patch should request approval");
+        assert_eq!(approval.payload["risk"], "write");
+        assert_eq!(approval.payload["paths"], json!([".gitignore"]));
+        assert_eq!(
+            approval.payload["riskReasons"],
+            json!(["workspace policy file `.gitignore` requires approval"])
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.started")
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_reports_patch_hunk_mismatch_as_failed_tool_result_and_continues() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "old\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_patch_hunk_mismatch")
+            .expect("run should be created");
+        let patch = concat!(
+            "--- a/README.md\n",
+            "+++ b/README.md\n",
+            "@@ -1 +1 @@\n",
+            "-missing\n",
+            "+new\n"
+        );
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should edit the README.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_1",
+                    "apply_patch",
+                    json!({
+                        "unifiedDiff": patch,
+                        "expectedFiles": ["README.md"],
+                    })
+                    .to_string(),
+                )],
+            ),
+            TurnProviderResponse::final_text(
+                "Patch context did not match; I will reread the file.",
+            ),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
+            .await
+            .expect("recoverable patch failure should be returned to the provider");
+
+        assert_eq!(workspace.read("README.md"), "old\n");
+        assert!(outcome.changed_files.is_empty());
+        assert_eq!(
+            outcome.final_message,
+            "Patch context did not match; I will reread the file."
+        );
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+        let tool_result = loop_runner.provider.requests[1].messages[2]
+            .content
+            .as_deref()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+            .expect("failed apply_patch result should be sent to the provider");
+        assert_eq!(tool_result["status"], "failed");
+        assert_eq!(tool_result["errorCode"], "E_PATCH_HUNK_MISMATCH");
+
+        let events = store
+            .load_run("run_turn_patch_hunk_mismatch")
+            .expect("events should load");
+        assert!(!events.iter().any(|event| event.event_type == "run.failed"));
+        let completed = events
+            .iter()
+            .find(|event| event.event_type == "tool.completed")
+            .expect("tool.completed should record failed apply_patch");
+        assert_eq!(completed.payload["status"], "failed");
+        assert_eq!(
+            completed.payload["result"]["errorCode"],
+            "E_PATCH_HUNK_MISMATCH"
+        );
+        assert_eq!(completed.payload["result"]["reversePatch"], "");
     }
 
     #[tokio::test]
@@ -3328,8 +3643,7 @@ mod tests {
             TurnProviderResponse::final_text("Updated README."),
         ]);
         let mut loop_runner =
-            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
-                .expect("turn loop should initialize");
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
 
         loop_runner
             .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
@@ -3353,11 +3667,11 @@ mod tests {
             requested.payload["argumentsPreview"]["payloadRef"]["path"],
             "payloads/apply_patch/patch.diff"
         );
-        let approval = events
-            .iter()
-            .find(|event| event.event_type == "tool.approvalRequired")
-            .expect("approval should be required");
-        assert_eq!(approval.payload["hunks"].as_array().map(Vec::len), Some(1));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.approvalRequired")
+        );
     }
 
     #[tokio::test]
@@ -3417,7 +3731,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_loop_applies_only_approved_patch_hunks() {
+    async fn turn_loop_applies_all_workspace_patch_hunks_without_approval() {
         let workspace = TestWorkspace::new("turn-loop");
         workspace.write("README.md", "one\nold\nthree\n\nkeep\nremove\n");
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
@@ -3454,35 +3768,25 @@ mod tests {
             TurnProviderResponse::final_text("Updated README."),
         ]);
         let mut loop_runner =
-            AgentTurnLoop::with_approval_policy(workspace.path(), provider, HunkApprovePolicy)
-                .expect("turn loop should initialize");
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
 
         let outcome = loop_runner
             .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
             .await
-            .expect("hunk-approved patch should complete");
+            .expect("workspace patch should complete without approval");
 
         assert_eq!(
             workspace.read("README.md"),
-            "one\nold\nthree\n\nkeep\ninsert\nremove\n"
+            "one\nnew\nthree\n\nkeep\ninsert\nremove\n"
         );
         assert_eq!(outcome.changed_files, vec!["README.md"]);
         let events = store
             .load_run("run_turn_patch_hunks")
             .expect("events should load");
-        let required = events
-            .iter()
-            .find(|event| event.event_type == "tool.approvalRequired")
-            .expect("approval should be required");
-        assert_eq!(required.payload["hunks"].as_array().map(Vec::len), Some(2));
-        let resolved = events
-            .iter()
-            .find(|event| event.event_type == "tool.approvalResolved")
-            .expect("approval should resolve");
-        assert_eq!(resolved.payload["hunks"]["scope"], "selected");
-        assert_eq!(
-            resolved.payload["hunks"]["approved"],
-            json!(["README.md#2:old5+2:new5+3"])
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.approvalRequired")
         );
     }
 
@@ -3715,21 +4019,6 @@ mod tests {
     struct ScriptedProvider {
         responses: VecDeque<TurnProviderResponse>,
         requests: Vec<TurnProviderRequest>,
-    }
-
-    struct HunkApprovePolicy;
-
-    impl ApprovalPolicy for HunkApprovePolicy {
-        fn decide(
-            &mut self,
-            request: &TurnApprovalRequest,
-        ) -> Result<ApprovalDecision, ApprovalPolicyError> {
-            assert_eq!(request.tool_name, "apply_patch");
-            assert_eq!(request.hunks.as_ref().map(Vec::len), Some(2));
-            Ok(ApprovalDecision::ApprovedHunks {
-                hunk_ids: vec!["README.md#2:old5+2:new5+3".to_owned()],
-            })
-        }
     }
 
     impl ScriptedProvider {

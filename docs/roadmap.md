@@ -55,7 +55,7 @@
 
 - `pnpm run check` 基线验证：Windows 本机已通过默认 CI 等价检查。
 - Context Builder token 预算测试：当前已覆盖 token 报告、可选上下文超预算省略、必需上下文超预算失败和 `context.built` payload 形状。
-- Patch apply 失败恢复：`apply_patch` 已改为先 staging 再写盘，并有多文件失败不留半修改的回归测试。
+- Patch apply 失败恢复：`apply_patch` 已改为先 staging 再写盘，并有多文件失败不留半修改的回归测试；hunk mismatch / file mismatch / invalid patch 会作为 failed tool result 回传给模型重试。
 - `reasoning_content` 状态机边界：已覆盖空消息、多个 tool-call assistant message 和 replay 计数。
 - `CancellationToken` 并发语义：已覆盖 clone 共享状态、首次取消原因保持和并发取消。
 - CLI event stream 顺序：进程级 smoke test 已验证 event `seq` 连续递增和关键事件子序列。
@@ -123,13 +123,13 @@ Phase 3 已交付 VS Code 插件核心体验；Phase 4 已完成 14 项 VS Code 
 - P5-13 已完成：provider 配置失败从前端字符串匹配升级为 RPC 结构化错误数据，缺少 DeepSeek API key 时返回 `E_PROVIDER_ERROR` 和 `data.recoverableAction`，供 VS Code/TUI 统一展示配置动作。
 - P5-14：真实试用回归修复包已完成，用于收敛 Sidebar 对话视图、内联确认、Work log 折叠、Markdown 渲染、webview 渲染诊断、provider/shell 稳定性和 composer / Settings 入口回归；具体 P5-14a 到 P5-14h 子项见 `docs/phase-tasks.md`。
 - P5-15：真实试用 UX backlog 持续收敛仍未完成，用于登记新的 Runs、Key/Model/Settings、审批、Chat、Output 日志、上下文压缩和大工具参数稳定性问题。
-- 真实 hunk 级 patch 审批首版限定 `apply_patch`，再扩展 Core/RPC 审批决策和 Run Log 记录。
+- 真实 hunk 级 patch 边界首版限定 `apply_patch`；最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 默认免审批，超过阈值的 bulk patch、workspace policy 文件 patch、高风险 patch 或显式审批路径仍使用 hunk 审批边界。
 - FIM completion preview 依赖 Provider capability model，优先评估 VS Code 原生 inline completion 接入。
 - VSIX alpha / pre-release 交付已完成，`pnpm run vsix:alpha` 会生成可安装 pre-release VSIX 和 SHA-256 校验和；end-to-end 集成测试已通过本地 JSON-RPC fixture server 覆盖 Chat sendTurn、Cancel、Problems diagnostics、自动审批、Run List / resume。
 
 已完成的 Phase 3 基础：
 
-- 原生 diff editor 展示 patch 已完成：VS Code 在 `apply_patch` 审批前打开虚拟 after 文档 diff，并保留 hunk boundary。
+- 原生 diff editor 展示 patch 已完成：VS Code 已具备虚拟 after 文档 diff 和 hunk boundary；最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 默认免审批，diff / hunk 审批边界保留给 bulk patch、workspace policy 文件 patch、高风险 patch 或显式审批路径。
 - Run List / resume 已完成：Sidebar Chat 用 `agent.listRuns` 展示最近 run summary，点击历史 run 后调用 `agent.resume` 并复用同一 `agent.event` 渲染路径。
 - Context Capsule 可视化已完成：Sidebar Chat 消费 `context.built` metadata，展示三层 token 分布、来源纳入/省略、manifest、cache 和 estimator 摘要。
 - Phase 3 命令风险分类器已完成：识别网络访问、依赖安装、远程 git、发布和破坏性命令，并在审批前升级风险。

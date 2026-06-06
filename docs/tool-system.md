@@ -166,7 +166,7 @@ pub struct ToolDefinition {
 
 风险：`write`。
 
-审批：`required`。
+审批：`none`。`apply_patch` 只能修改当前 workspace 内、`expectedFiles` 明确列出的文件；最多 5 个 `expectedFiles` 的普通 workspace 代码修改默认直接执行，不打断对话。超过 5 个文件的 bulk patch，或修改 `.gitignore` / `.prole-coderignore` 这类 workspace policy 文件时，会动态要求审批。路径越界、敏感路径和非法 patch 仍会被拒绝；未来如果 patch 动态升级为 destructive 风险，仍可复用已有 hunk approval 边界。
 
 参数：
 
@@ -279,7 +279,7 @@ pub struct ToolDefinition {
 - TypeScript 协议类型：`packages/protocol/src/index.ts`。
 - 共享协议 fixture：`docs/protocol/tool-registry.v1.json`。
 
-`crates/agent-rpc` 已实现 Run Log 事件到 `agent.event` notification 的桥接，并已分发 `agent.approve` / `agent.reject`。真实 RPC handler 已能把工具请求、审批请求、审批决定和工具结果暴露给 CLI/VS Code/TUI；VS Code 已接入真实 pending 队列、命令风险展示、Native diff patch 预览和 `apply_patch` selected hunk 审批，TUI 真实队列接入仍在后续阶段。
+`crates/agent-rpc` 已实现 Run Log 事件到 `agent.event` notification 的桥接，并已分发 `agent.approve` / `agent.reject`。真实 RPC handler 已能把工具请求、审批请求、审批决定和工具结果暴露给 CLI/VS Code/TUI；VS Code 已接入真实 pending 队列、命令风险展示、Native diff patch 预览和需要审批 patch 路径的 selected hunk 边界，TUI 真实队列接入仍在后续阶段。
 
 ## 协议一致性测试
 
@@ -306,7 +306,7 @@ fixture 中的 `tools` 被当作无序集合校验；测试会按工具名规整
 - `workspace_manifest`：生成 workspace manifest v0，默认遵守 `.gitignore` 和 `.prole-coderignore`，硬排除 `.git/`、`.secrets/`、`.secret/`、`.agents/`、`.codex/` 和 `.prole-coder/`，并返回稳定排序条目、manifest hash、git 状态和截断原因。
 - `read_file`：只读取 workspace 内 UTF-8 文本文件，支持 1-based 行范围，并返回完整文件的 `sha256` 和 `sizeBytes`。
 - `search`：通过 `rg --json --fixed-strings` 搜索，默认排除 `.git/`、`.secrets/`、`.secret/`、`.env*`、`node_modules/` 和 `target/`。
-- `apply_patch`：应用受限 unified diff，要求 patch 实际文件集合与 `expectedFiles` 完全一致；执行时会先在内存中完成全部文件的 hunk 校验和 staging，再统一写盘，因此解析或 hunk mismatch 不会留下部分文件已修改的状态；成功后返回 reverse patch。Core 会从 unified diff 生成稳定 hunk id，RPC/VS Code 首版支持 selected hunk 审批；文件创建和删除如果只批准部分 hunk 会被拒绝，避免生成不可审计的半文件操作。大 patch 可以先分块追加到当前 run 的 `payloads/` 文件，再通过 `payloadRef` 引用；Turn Loop 会校验 `sha256` / `sizeBytes`，然后 materialize 为 `unifiedDiff` 进入同一条 schema、路径安全、审批和 hunk 边界链路。
+- `apply_patch`：应用受限 unified diff，要求 patch 实际文件集合与 `expectedFiles` 完全一致；执行时会先在内存中完成全部文件的 hunk 校验和 staging，再统一写盘，因此解析或 hunk mismatch 不会留下部分文件已修改的状态；成功后返回 reverse patch。最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 默认不触发审批，超过阈值或修改 workspace policy 文件会动态要求审批；Core 仍会从 unified diff 生成稳定 hunk id，供高风险 patch 或显式审批路径复用 selected hunk 边界。文件创建和删除如果只批准部分 hunk 会被拒绝，避免生成不可审计的半文件操作。大 patch 可以先分块追加到当前 run 的 `payloads/` 文件，再通过 `payloadRef` 引用；Turn Loop 会校验 `sha256` / `sizeBytes`，然后 materialize 为 `unifiedDiff` 进入同一条 schema、路径安全和 patch staging 链路。
 - `shell`：在 workspace 内执行非交互式命令，支持 workspace-relative `cwd`、超时和命令风险分类，返回 exit code、stdout、stderr 和耗时；Windows PowerShell wrapper 会先设置 UTF-8 输出，避免 PowerShell 本地化错误信息在 run log / Output Channel 中乱码。
 - `git_status`：读取 `git status --short --branch` 或普通 `git status`。
 - `git_diff`：读取 unstaged 或 staged diff，支持限定 workspace-relative 路径。
@@ -319,7 +319,7 @@ fixture 中的 `tools` 被当作无序集合校验；测试会按工具名规整
 
 当前实现暂不包含 LSP diagnostics 和 plan update 的执行逻辑；它们仍只有 schema 和静态风险定义。
 
-当前执行层已接入基础 Agent Turn Loop、审批策略、取消信号和 run log。写入与命令执行会触发审批请求，并记录 `tool.approvalResolved`；CLI 二进制可以通过 stdin/stderr 做真实 y/n 审批，测试可使用显式 auto-approve 策略验证已批准路径。Run Log 事件已能通过 RPC 桥接发送给前端；`AgentTurnLoopRpcHandler` 已能通过 `agent.sendTurn` 真实驱动 Core，并在 `tool.approvalRequired` 处检查 session/workspace 持久批准，或等待 `agent.approve` / `agent.reject` / `agent.cancel` / 审批超时。`apply_patch` 的审批 payload 会携带 hunk metadata，`agent.approve.hunks` 会被 RPC 校验后交给 Core 过滤 patch 并只执行已批准 hunks。`shell` 会在审批前分类命令并动态升级风险，审批 payload 会包含命令、cwd 和上一条 shell 输出摘要；`shell`、`search`、`git_status` 和 `git_diff` 会在子进程轮询循环中检查 `CancellationToken`，取消或超时时清理整棵命令子进程树并让 Turn Loop 写入 `run.canceled`。VS Code 已接入真实 RPC 审批队列；TUI 真实队列接入仍需要后续实现。
+当前执行层已接入基础 Agent Turn Loop、审批策略、取消信号和 run log。命令执行和动态升级为 network/destructive 的操作会触发审批请求，并记录 `tool.approvalResolved`；受限 workspace 小规模代码 `apply_patch` 默认直接执行，超过 5 个 `expectedFiles` 的 bulk patch 或 workspace policy 文件 patch 会进入审批。CLI 二进制可以通过 stdin/stderr 做真实 y/n 审批，测试可使用显式 auto-approve 策略验证已批准路径。Run Log 事件已能通过 RPC 桥接发送给前端；`AgentTurnLoopRpcHandler` 已能通过 `agent.sendTurn` 真实驱动 Core，并在 `tool.approvalRequired` 处检查 session/workspace 持久批准，或等待 `agent.approve` / `agent.reject` / `agent.cancel` / 审批超时。`apply_patch` 的 hunk metadata 仍可供审批路径携带，`agent.approve.hunks` 会被 RPC 校验后交给 Core 过滤 patch 并只执行已批准 hunks。`shell` 会在审批前分类命令并动态升级风险，审批 payload 会包含命令、cwd 和上一条 shell 输出摘要；`shell`、`search`、`git_status` 和 `git_diff` 会在子进程轮询循环中检查 `CancellationToken`，取消或超时时清理整棵命令子进程树并让 Turn Loop 写入 `run.canceled`。VS Code 已接入真实 RPC 审批队列；TUI 真实队列接入仍需要后续实现。
 
 ## 后续增强
 
@@ -360,7 +360,7 @@ Schema 校验不能只作为 typed deserialization 失败后的补救，因为 R
 ### `apply_patch`
 
 - 当前实现只支持受限 unified diff；后续需要支持更完整的 git patch 语法，包括 rename、copy、mode change 和更严格的 no-newline 语义。
-- 已增加 VS Code patch 预览和 `apply_patch` hunk 级审批；后续继续增强冲突诊断、失败时的精确 hunk mismatch 信息，以及 rename/copy/mode change 等更完整 patch 语法下的审批边界。
+- 已增加 VS Code patch 预览和 `apply_patch` hunk 级审批边界；最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 默认免审批，超过阈值或修改 workspace policy 文件会动态要求审批。Hunk mismatch / file mismatch / invalid patch 现在作为 failed tool result 返回给模型，便于重新读取文件后重试；这些可恢复错误发生在 workspace 写入前，因此 failed result 不携带 reverse patch。后续继续增强 rename/copy/mode change 等更完整 patch 语法下的审批边界。
 - 已完成 `apply_patch.payloadRef` 第一版：provider 或本地聚合器可以把大 patch 分块追加到 run-scoped `payloads/` 文件，最终调用 `apply_patch` 时只传轻量引用；后续可继续扩展为显式 RPC chunk 方法、payload GC 和更完整的大文件写入协议。
 - 用修改前快照生成 reverse patch，并在 run log 中保存 patch id、审批 id 和可审计回滚信息。
 - 如果需要抵抗磁盘写入中途失败，应进一步引入临时文件、原子替换或备份恢复机制；当前 staging 主要保证解析和 hunk 校验失败不会产生半应用 patch。

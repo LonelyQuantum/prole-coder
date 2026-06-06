@@ -92,7 +92,7 @@ Phase 5 P5-6 到 P5-13 的 API key/model、Git 工作流、Sidebar 连续会话�
 
 P5-14 作为真实试用回归修复包，已把已发现的 Sidebar 对话、Work log、Markdown、provider/shell 稳定性和 composer / Settings 入口问题拆成 `docs/phase-tasks.md` 中的 P5-14a 到 P5-14h 子任务。新增 Runs、Key/Model、审批、Chat、Output 日志或上下文压缩体验问题时，应先补可重复测试或手动验收说明，再登记到 P5-15 或后续 Phase 任务；P5-15 保留真实试用后的持续 backlog，不得在完成前标记 Phase 5 完成。
 
-P5-15 已开始登记真实 VS Code 试用回归。Sidebar webview bootstrap、历史加载、Send 按钮、Enter/Shift+Enter、composition 状态输入行为、Markdown horizontal rule / 表格转义兼容性和历史 replay 高频事件应优先通过 extension-host webview probe 覆盖；涉及 HTML template literal 内联脚本的改动还应通过 `webviewHtml.test.ts` 的 parse smoke 覆盖。Markdown renderer 抽取成独立模块和更细边界测试已登记为 P5-15c。若本机 VS Code mutex 阻塞 `pnpm run vscode:test-electron`，必须至少运行 extension 单元测试并记录需要关闭测试实例后重跑 E2E。
+P5-15 已开始登记真实 VS Code 试用回归。Sidebar webview bootstrap、历史加载、Send 按钮、Enter/Shift+Enter、composition 状态输入行为、Markdown horizontal rule / 表格转义兼容性和历史 replay 高频事件应优先通过 extension-host webview probe 覆盖；涉及 HTML template literal 内联脚本的改动还应通过 `webviewHtml.test.ts` 的 parse smoke 覆盖。Markdown renderer 抽取成独立模块和更细边界测试已登记为 P5-15b。若本机 VS Code mutex 阻塞 `pnpm run vscode:test-electron`，必须至少运行 extension 单元测试并记录需要关闭测试实例后重跑 E2E。
 
 ## 新增测试的协作要求
 

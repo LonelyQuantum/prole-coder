@@ -306,7 +306,7 @@ export const toolDefinitions = [
     name: "apply_patch",
     description: "应用统一 diff patch。",
     risk: "write",
-    approval: "required",
+    approval: "none",
     implementationStatus: "executor_implemented",
     argumentSchema: {
       type: "object",

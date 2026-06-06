@@ -498,7 +498,7 @@ DeepSeek API 默认支持上下文硬盘缓存。为了提高命中率：
 | 等级 | 示例 | 默认行为 |
 | --- | --- | --- |
 | Read | 读取文件、搜索、git status | 自动允许 |
-| Write | apply_patch、格式化当前项目文件 | 展示 diff 后审批 |
+| Write | apply_patch、格式化当前项目文件 | 受限 workspace 小规模代码 patch 默认允许；超过 5 个 `expectedFiles`、workspace policy 文件、高风险或显式写入审批路径展示 diff 后审批 |
 | Exec | 测试、构建、lint | 展示命令后审批或按规则允许 |
 | Network | 下载依赖、访问远程 API | 明确审批 |
 | Destructive | 删除、reset、清理未跟踪文件 | 总是审批，要求展示目标路径 |

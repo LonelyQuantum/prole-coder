@@ -584,8 +584,14 @@ function sortedTools(tools: readonly ToolRegistryTool[]): ToolRegistryTool[] {
   return [...tools].sort((left, right) => left.name.localeCompare(right.name));
 }
 
-test("tool approval defaults match risk defaults", () => {
+test("tool approval defaults match risk defaults except explicit overrides", () => {
   for (const tool of toolDefinitions) {
+    if (tool.name === "apply_patch") {
+      assert.equal(tool.risk, "write");
+      assert.equal(tool.approval, "none");
+      continue;
+    }
+
     assert.equal(
       tool.approval,
       riskDefaultApproval[tool.risk],
@@ -594,9 +600,9 @@ test("tool approval defaults match risk defaults", () => {
   }
 });
 
-test("mutating and executing tools require approval", () => {
+test("workspace patch is write risk without approval while shell requires approval", () => {
   assert.equal(findToolDefinition("apply_patch")?.risk, "write");
-  assert.equal(findToolDefinition("apply_patch")?.approval, "required");
+  assert.equal(findToolDefinition("apply_patch")?.approval, "none");
   assert.equal(findToolDefinition("shell")?.risk, "exec");
   assert.equal(findToolDefinition("shell")?.approval, "required");
 });
