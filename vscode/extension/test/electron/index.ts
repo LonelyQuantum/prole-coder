@@ -87,6 +87,7 @@ async function exerciseChatSendTurnDiagnosticsAndApproval(): Promise<void> {
     assert.equal(approvalProbe.approvalVisible, true);
     assert.equal(approvalProbe.workLogVisible, true);
     assert.equal(approvalProbe.workLogOpen, false);
+    assert.match(approvalProbe.workLogTitle, /^Working: /);
     assert.deepEqual(approvalProbe.providerActions, [
       "Configure DeepSeek API key",
       "Select DeepSeek model",
@@ -109,7 +110,7 @@ async function exerciseChatSendTurnDiagnosticsAndApproval(): Promise<void> {
     assert.ok(state.timeline.items.some((item) => item.type === "tool.approvalResolved"));
     const completedProbe = await chatProbeSnapshot();
     assert.equal(completedProbe.approvalVisible, false);
-    assert.equal(completedProbe.workLogVisible, true);
+    assert.equal(completedProbe.workLogVisible, false);
     assert.equal(completedProbe.workLogOpen, false);
     assert.ok(completedProbe.visibleItemTitles.includes("You"));
     assert.ok(completedProbe.visibleItemTitles.includes("DeepSeek"));
@@ -574,6 +575,7 @@ interface WebviewProbeSnapshot {
   readonly workLogOpen: boolean;
   readonly workLogTitle: string;
   readonly workLogTypes: readonly string[];
+  readonly workLogSegmentSummaries?: readonly string[];
   readonly promptValue: string;
   readonly sendLabel: string;
   readonly sendTitle: string;

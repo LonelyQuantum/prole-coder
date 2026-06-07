@@ -92,7 +92,7 @@ Phase 5 P5-6 到 P5-13 的 API key/model、Git 工作流、Sidebar 连续会话�
 
 P5-14 作为真实试用回归修复包，已把已发现的 Sidebar 对话、Work log、Markdown、provider/shell 稳定性和 composer / Settings 入口问题拆成 `docs/phase-tasks.md` 中的 P5-14a 到 P5-14h 子任务。新增 Runs、Key/Model、审批、Chat、Output 日志或上下文压缩体验问题时，应先补可重复测试或手动验收说明，再登记到 P5-15、P5-16、P5-17 或后续 Phase 任务；Phase 5 仍保留真实试用后的持续 backlog，不得在占位任务完成前标记整阶段完成。
 
-P5-15 已完成真实 VS Code 试用回归的第二批确定性覆盖：Sidebar webview bootstrap、历史加载、Send 按钮、Enter/Shift+Enter、composition 状态输入、Markdown renderer 独立边界、patch mismatch 可恢复、历史 resume 副作用隔离、编辑重发/停止入口、输出长度截断续写、patch preview hunk 计数宽容，以及 edit resend 的后端 supersede 语义。P5-16 已完成模型回合预算 continuation approval、Provider Key/Model 图标按钮、run mode 自动推断和 PowerShell 验证命令规则收敛。P5-17 已补充 pen edit icon、Work log 分组、本对话审批复用、只读 shell 白名单和运行中 steer 的确定性覆盖：Rust Turn Loop 测试覆盖只读白名单与 queued steer 注入，Protocol/RPC/VS Code 测试覆盖 `agent.steer` typed request，extension 单元测试继续覆盖 webview inline script parse 和 Electron probe 的可访问标签。P5-17z 继续承接新的真实试用 UX backlog；涉及 HTML template literal 内联脚本的改动仍应通过 `webviewHtml.test.ts` parse smoke 覆盖，涉及 Markdown renderer 的改动应同步扩展 `webviewMarkdown.test.ts`。若本机 VS Code mutex 阻塞 `pnpm run vscode:test-electron`，必须至少运行 extension 单元测试并记录需要关闭测试实例后重跑 E2E。
+P5-15 已完成真实 VS Code 试用回归的第二批确定性覆盖：Sidebar webview bootstrap、历史加载、Send 按钮、Enter/Shift+Enter、composition 状态输入、Markdown renderer 独立边界、patch mismatch 可恢复、历史 resume 副作用隔离、编辑重发/停止入口、输出长度截断续写、patch preview hunk 计数宽容，以及 edit resend 的后端 supersede 语义。P5-16 已完成模型回合预算 continuation approval、Provider Key/Model 图标按钮、run mode 自动推断和 PowerShell 验证命令规则收敛。P5-17 已补充 pen edit icon、Work log 分组、本对话审批复用、只读 shell 白名单、运行中 steer、steer 内联确认、终态后 Work log 折叠、版本查询白名单和思考段间文件/命令摘要的确定性覆盖：Rust Turn Loop 测试覆盖只读白名单、版本查询免审批与 queued steer 注入，Protocol/RPC/VS Code 测试覆盖 `agent.steer` typed request，extension 单元测试继续覆盖 webview inline script parse、steer 确认 DOM、发送按钮状态同步、timeline 工作计数和 Electron probe 的可访问标签。P5-18 已补充 assistant 按工具/steer 边界分段、`Activity` 摘要插入、平凡工具过滤、steer 消息顺序、steer 确认卡位置、运行中 active work 单行状态、pending steer 本地消息送达判断、unknown `write_file` 可恢复工具结果、pending steer queued 文案、completed run 按用户消息 / steer 边界分段折叠并展开恢复原卡片格式、provider 建连/stream idle timeout 重试收口、已知工具 schema mismatch 可恢复工具结果、完成后折叠保留用户 / steer 消息，以及长 run timeline 裁剪只移除可重放过程项、保留不可丢对话内容的覆盖。P5-19 已记录最新真实试用回归验收：`agent_misc_tests_working` 中四个独立项目的测试分别为 4/4、4/4、5/5、5/5 通过，共 18 个测试通过；P5-19z 继续承接新的真实试用 UX backlog。涉及 HTML template literal 内联脚本的改动仍应通过 `webviewHtml.test.ts` parse smoke 覆盖，涉及 Markdown renderer 的改动应同步扩展 `webviewMarkdown.test.ts`。若本机 VS Code mutex 阻塞 `pnpm run vscode:test-electron`，必须至少运行 extension 单元测试并记录需要关闭测试实例后重跑 E2E。
 
 ## 新增测试的协作要求
 
@@ -164,7 +164,7 @@ Phase 2 的默认 CI 应优先覆盖离线、确定性测试：
 - token estimator metadata：`utf8_bytes` 和校准估算器都必须明确 `exact=false`，不能误报为真实 tokenizer；校准 fixture 覆盖系数、误差和不保存 prompt 原文的边界。
 - attachment fixture：file、selection、explicit_content、diagnostic 都能进入 Context Capsule；路径越界、重复 attachment、超大小 selection / explicit content 和 diagnostic 形状错误均有稳定错误。
 - provider summary：`provider.completed` 独立记录模型、duration、usage、cache hit/miss 和 streaming 摘要；DeepSeek streaming wrapper 从 include_usage chunk 填充这些字段。
-- JSON Schema validation：tool call arguments 在 typed deserialization 前通过 schema validator，未知字段、错误类型、空字符串/空数组等会稳定失败。
+- JSON Schema validation：tool call arguments 在 typed deserialization 前通过 schema validator；malformed JSON 和终止型 payload 错误会稳定失败，已知工具的未知字段、错误类型、空字符串/空数组等 schema mismatch 会作为失败 tool result 返回 provider 重试。
 - Run Log 体积边界：工具结果、verification 输出和 Run Log payload 共用脱敏/截断函数，并记录 `runLogTruncation`。
 
 以下验收必须保持 ignored/manual，不进入普通 CI：

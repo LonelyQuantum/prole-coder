@@ -204,7 +204,7 @@ pub struct ToolDefinition {
 
 说明：`shell` 的静态风险是 `exec`。Agent Core 会在执行前分类具体命令，并递归检查 shell 包装器、`$(...)` 和传统反引号子命令；依赖安装、网络访问、远程 git 和发布命令会升级为 `network`，删除和破坏性 git 操作会升级为 `destructive`。升级原因通过 `riskReasons` 写入 `tool.requested` 和 `tool.approvalRequired`。
 
-P5-17 起，当前 workspace 内严格只读的简单 shell 命令可被降级为 `read` 并免审批执行：首版白名单包括 `rg`、`Get-Content` / `gc` / `cat` / `type`、`Select-String`、`Get-ChildItem` / `gci` / `dir`、`Test-Path`，以及 `git diff` / `status` / `log` / `show`。该白名单只接受无管道、无重定向、无变量展开、无子命令、无绝对路径、无 `..` 路径且不触及 `.env`、`.secrets`、`.git`、`.agents`、`.codex`、`.prole-coder` 等敏感 workspace 路径的简单参数；`rg --pre`、`rg --replace`、`rg -r` / 含 `r` 的组合短参数、`git --output`、`git --ext-diff`、`git --no-index` 等可能执行外部程序、写文件或越界读取的参数仍保持 `exec` 审批。
+P5-17 起，当前 workspace 内严格只读的简单 shell 命令可被降级为 `read` 并免审批执行：首版白名单包括 `rg`、`Get-Content` / `gc` / `cat` / `type`、`Select-String`、`Get-ChildItem` / `gci` / `dir`、`Test-Path`，以及 `git diff` / `status` / `log` / `show`。常见本地工具的版本查询（如 `python --version`、`node -v`、`cargo --version`、`go version`）也可免审批，但只接受裸命令名加一个版本参数。该白名单只接受无管道、无重定向、无变量展开、无子命令、无绝对路径、无 `..` 路径且不触及 `.env`、`.secrets`、`.git`、`.agents`、`.codex`、`.prole-coder` 等敏感 workspace 路径的简单参数；`rg --pre`、`rg --replace`、`rg -r` / 含 `r` 的组合短参数、`git --output`、`git --ext-diff`、`git --no-index` 等可能执行外部程序、写文件或越界读取的参数仍保持 `exec` 审批。
 
 ### `git_status`
 
@@ -309,7 +309,7 @@ fixture 中的 `tools` 被当作无序集合校验；测试会按工具名规整
 - `read_file`：只读取 workspace 内 UTF-8 文本文件，支持 1-based 行范围，并返回完整文件的 `sha256` 和 `sizeBytes`。
 - `search`：通过 `rg --json --fixed-strings` 搜索，默认排除 `.git/`、`.secrets/`、`.secret/`、`.env*`、`node_modules/` 和 `target/`。
 - `apply_patch`：应用受限 unified diff，要求 patch 实际文件集合与 `expectedFiles` 完全一致；执行时会先在内存中完成全部文件的 hunk 校验和 staging，再统一写盘，因此解析或 hunk mismatch 不会留下部分文件已修改的状态；成功后返回 reverse patch。最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 默认不触发审批，超过阈值或修改 workspace policy 文件会动态要求审批；Core 仍会从 unified diff 生成稳定 hunk id，供高风险 patch 或显式审批路径复用 selected hunk 边界。文件创建和删除如果只批准部分 hunk 会被拒绝，避免生成不可审计的半文件操作。大 patch 可以先分块追加到当前 run 的 `payloads/` 文件，再通过 `payloadRef` 引用；Turn Loop 会校验 `sha256` / `sizeBytes`，然后 materialize 为 `unifiedDiff` 进入同一条 schema、路径安全和 patch staging 链路。
-- `shell`：在 workspace 内执行非交互式命令，支持 workspace-relative `cwd`、超时和命令风险分类，返回 exit code、stdout、stderr 和耗时；Windows PowerShell wrapper 会先设置 UTF-8 输出，避免 PowerShell 本地化错误信息在 run log / Output Channel 中乱码。严格只读的 `rg`、`Get-Content`、`git diff/status/log/show` 等简单命令可按 workspace 白名单免审批，其他 shell 命令仍按 `exec` 或动态升级后的风险审批。
+- `shell`：在 workspace 内执行非交互式命令，支持 workspace-relative `cwd`、超时和命令风险分类，返回 exit code、stdout、stderr 和耗时；Windows PowerShell wrapper 会先设置 UTF-8 输出，避免 PowerShell 本地化错误信息在 run log / Output Channel 中乱码。严格只读的 `rg`、`Get-Content`、`git diff/status/log/show` 和常见 `--version` / `-v` / `-V` 查询等简单命令可按 workspace 白名单免审批，其他 shell 命令仍按 `exec` 或动态升级后的风险审批。
 - `git_status`：读取 `git status --short --branch` 或普通 `git status`。
 - `git_diff`：读取 unstaged 或 staged diff，支持限定 workspace-relative 路径。
 
@@ -321,7 +321,7 @@ fixture 中的 `tools` 被当作无序集合校验；测试会按工具名规整
 
 当前实现暂不包含 LSP diagnostics 和 plan update 的执行逻辑；它们仍只有 schema 和静态风险定义。
 
-当前执行层已接入基础 Agent Turn Loop、审批策略、取消信号和 run log。命令执行和动态升级为 network/destructive 的操作会触发审批请求，并记录 `tool.approvalResolved`；受限 workspace 小规模代码 `apply_patch` 默认直接执行，超过 5 个 `expectedFiles` 的 bulk patch 或 workspace policy 文件 patch 会进入审批。CLI 二进制可以通过 stdin/stderr 做真实 y/n 审批，测试可使用显式 auto-approve 策略验证已批准路径。Run Log 事件已能通过 RPC 桥接发送给前端；`AgentTurnLoopRpcHandler` 已能通过 `agent.sendTurn` 真实驱动 Core，并在 `tool.approvalRequired` 处检查 session/workspace 持久批准，或等待 `agent.approve` / `agent.reject` / `agent.cancel` / 审批超时。`apply_patch` 的 hunk metadata 仍可供审批路径携带，`agent.approve.hunks` 会被 RPC 校验后交给 Core 过滤 patch 并只执行已批准 hunks。`shell` 会在审批前分类命令、动态升级高风险命令，并对严格 workspace-scoped 的只读白名单命令改为免审批；审批 payload 会包含命令、cwd 和上一条 shell 输出摘要；`shell`、`search`、`git_status` 和 `git_diff` 会在子进程轮询循环中检查 `CancellationToken`，取消或超时时清理整棵命令子进程树并让 Turn Loop 写入 `run.canceled`。VS Code 已接入真实 RPC 审批队列；TUI 真实队列接入仍需要后续实现。
+当前执行层已接入基础 Agent Turn Loop、审批策略、取消信号和 run log。命令执行和动态升级为 network/destructive 的操作会触发审批请求，并记录 `tool.approvalResolved`；受限 workspace 小规模代码 `apply_patch` 默认直接执行，超过 5 个 `expectedFiles` 的 bulk patch 或 workspace policy 文件 patch 会进入审批。CLI 二进制可以通过 stdin/stderr 做真实 y/n 审批，测试可使用显式 auto-approve 策略验证已批准路径。Run Log 事件已能通过 RPC 桥接发送给前端；`AgentTurnLoopRpcHandler` 已能通过 `agent.sendTurn` 真实驱动 Core，并在 `tool.approvalRequired` 处检查 session/workspace 持久批准，或等待 `agent.approve` / `agent.reject` / `agent.cancel` / 审批超时。`apply_patch` 的 hunk metadata 仍可供审批路径携带，`agent.approve.hunks` 会被 RPC 校验后交给 Core 过滤 patch 并只执行已批准 hunks。`shell` 会在审批前分类命令、动态升级高风险命令，并对严格 workspace-scoped 的只读白名单命令改为免审批；审批 payload 会包含命令、cwd 和上一条 shell 输出摘要；`shell`、`search`、`git_status` 和 `git_diff` 会在子进程轮询循环中检查 `CancellationToken`，取消或超时时清理整棵命令子进程树并让 Turn Loop 写入 `run.canceled`。如果模型请求不存在的工具，例如 `write_file`，Turn Loop 会记录失败的 `tool.requested` / `tool.completed` 并把 `E_UNKNOWN_TOOL` 工具结果返回给 provider，提示改用现有工具；未知工具参数不会写入 run log。VS Code 已接入真实 RPC 审批队列；TUI 真实队列接入仍需要后续实现。
 
 ## 后续增强
 
@@ -349,7 +349,7 @@ fixture 中的 `tools` 被当作无序集合校验；测试会按工具名规整
 
 Phase 2d 已增加通用 tool argument validator，优先使用工具注册表中的 JSON Schema 校验模型参数。
 
-校验顺序为：解析 arguments 字符串为 `serde_json::Value` -> schema validation -> typed deserialization -> 审批 -> 执行工具。
+校验顺序为：解析 arguments 字符串为 `serde_json::Value` -> schema validation -> typed deserialization -> 审批 -> 执行工具。Malformed JSON 仍是终止型 `E_INVALID_TOOL_ARGUMENTS` 并写入脱敏诊断文件；已知工具的 schema mismatch 不再直接终止 run，而是记录失败的 `tool.requested` / `tool.completed`，把错误码、schema 错误和工具专属 guidance 作为 tool result 返回给模型重试。
 
 Schema 校验不能只作为 typed deserialization 失败后的补救，因为 Rust 结构体反序列化可能忽略未知字段，而 schema 才能稳定表达 `additionalProperties`、枚举、范围和互斥字段。当前 validator 覆盖本仓库工具 schema 使用到的 JSON Schema 子集：`type`、`required`、`properties`、`additionalProperties: false`、`items`、`enum`、`minLength`、`minItems` 和 `minimum`。
 
@@ -371,7 +371,7 @@ Schema 校验不能只作为 typed deserialization 失败后的补救，因为 R
 ### `shell`
 
 - 已在执行前加入命令风险分类：网络、破坏性、依赖安装、发布、远程 git 操作等会升级审批，并输出 `riskReasons`；分类器会递归检查 shell 包装器、`$(...)` 和传统反引号子命令。
-- 已加入严格只读 shell 白名单，允许 workspace 内简单 `rg`、`Get-Content`、`git diff/status/log/show` 等命令免审批执行；包含管道、重定向、变量展开、子命令、绝对路径、父级路径、敏感 workspace 路径或可能写文件/执行外部程序的参数时仍需审批。
+- 已加入严格只读 shell 白名单，允许 workspace 内简单 `rg`、`Get-Content`、`git diff/status/log/show` 和常见版本查询等命令免审批执行；包含管道、重定向、变量展开、子命令、绝对路径、父级路径、敏感 workspace 路径或可能写文件/执行外部程序的参数时仍需审批。
 - 已通过 Run Log 统一脱敏/截断限制输出大小并记录截断原因；取消和超时会清理命令子进程树。
 - 记录环境变量差异，但默认隐藏或脱敏敏感变量。
 - 后续按平台分别实现更强的 sandbox 策略；Windows、Linux 和 macOS 不能假设具备相同隔离能力。

@@ -1,6 +1,6 @@
 # 详细任务索引
 
-状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-16 已完成；P5-17 Codex-like 交互细化与真实试用 UX backlog 仍未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
+状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-18g、P5-18i 到 P5-18l、P5-19a 已完成；P5-18h 和 P5-19z 仍未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
 
 本文档是详细设计文档里的任务账本。README 保留高层开发计划；这里把各模块文档中出现的“已实现、尚未实现、后续增强、下一步”收敛为可勾选任务，避免后续工作只散落在说明文字里。
 
@@ -113,7 +113,7 @@
 
 ## Phase 5：VS Code Codex-like UX 与开发工作流
 
-状态：进行中。P5-1 到 P5-16 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收、Output Channel、API key/model 配置、错误恢复、只读 Git context、GitLens-like commit / PR 文案生成工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误码与恢复动作、真实试用回归修复包、第二批真实试用 UX 收敛，以及模型回合预算 continuation approval、Provider Key/Model 图标按钮、Chat run mode 自动推断和 PowerShell 验证命令规则收敛；P5-17 Codex-like 交互细化与真实试用 UX backlog 持续收敛仍未完成。G4 自动 commit / push / create PR 留作后续增强。
+状态：进行中。P5-1 到 P5-18g、P5-18i 到 P5-18l、P5-19a 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收、Output Channel、API key/model 配置、错误恢复、只读 Git context、GitLens-like commit / PR 文案生成工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误码与恢复动作、真实试用回归修复包、第二批真实试用 UX 收敛、模型回合预算 continuation approval、Provider Key/Model 图标按钮、Chat run mode 自动推断、PowerShell 验证命令规则收敛、Codex-like 交互细化、第三批真实试用 UX 收敛，以及第四批真实试用回归验收记录；P5-18h summary metadata 追踪和 P5-19z 持续 backlog 仍未完成。G4 自动 commit / push / create PR 留作后续增强。
 
 | 状态 | 任务 | 来源 | 说明 |
 | --- | --- | --- | --- |
@@ -155,7 +155,24 @@
 | [x] | P5-17c：本对话命令审批复用 | `vscode/extension/src/chatView.ts`、`vscode/extension/src/approvalFlow.ts` | 已完成：Sidebar 审批卡支持“Approve for conversation”，按 runId + cwd + command 记忆 shell 审批，后续同 run 的同命令自动发送一次性 approve；该复用不跨 run、不写入持久批准存储。 |
 | [x] | P5-17d：只读 shell 命令白名单免审批 | `crates/agent-core/src/turn_loop.rs`、`docs/tool-system.md` | 已完成：对当前 workspace 内严格只读的 `rg`、`Get-Content` / `gc` / `cat` / `type`、`Select-String`、`Get-ChildItem` / `gci` / `dir`、`Test-Path` 和 `git diff/status/log/show` 建立保守白名单，风险评估可把这些 shell 调用降为 `read` 并免审批；包含管道、重定向、变量展开、子命令、写文件参数、绝对/父级路径、`.env` / `.secrets` / `.git` 等敏感 workspace 路径的情况仍需审批。 |
 | [x] | P5-17e：运行中 steer 指导入口 | `packages/protocol`、`crates/agent-rpc`、`crates/agent-core`、`vscode/extension/src/chatView.ts` | 已完成：新增 `agent.steer`，允许 Sidebar 在 turn 运行中通过输入框发送补充指导；Turn Loop 在下一次 provider 请求前注入 steer 消息并记录 `turn.steered` 事件，停止仍由方块按钮触发 cancel。 |
-| [ ] | P5-17z：真实试用 UX backlog 持续收敛 | `README.md`、`docs/testing.md`、`docs/vscode-extension.md` | 未完成：继续根据真实 VS Code 插件试用收集 Runs、Key/Model/Settings、审批、Chat、Output 日志、上下文压缩、Markdown 兼容性和大工具参数稳定性问题；新增可执行项时优先拆成新的 P5-17 子任务或后续 Phase 任务，不能把新需求继续堆进本行。 |
+| [x] | P5-17f：composer 发送与 steer 二次确认 UX | `vscode/extension/src/chatView.ts` | 已完成：普通消息提交后立即清空输入框；turn 运行中输入框有 steer 文本时发送按钮切回发送图标，点击或回车先显示内联确认卡，用户可发送或删除该 steer；输入框为空时按钮仍是停止当前 turn。 |
+| [x] | P5-17g：最终总结后 Work log 自动折叠 | `vscode/extension/src/chatView.ts` | 已完成：运行中 Work log 自动展开以展示当前 provider/tool 分组，任务结束并返回最终总结后重新折叠历史工作过程，保留按指令调用分组的可展开细节。 |
+| [x] | P5-17h：版本查询只读 shell 白名单 | `crates/agent-core/src/turn_loop.rs`、`docs/tool-system.md`、`docs/turn-loop.md` | 已完成：`python --version`、`node --version`、`cargo --version` 等常见本地工具版本查询被识别为 workspace-safe 只读 shell 调用并免审批；带路径、额外参数或非版本查询形态仍按普通 shell 风险审批。 |
+| [x] | P5-17i：Codex-like 思考段间工作摘要 | `vscode/extension/src/chatEvents.ts`、`vscode/extension/src/chatView.ts` | 已完成：Work log 在两段 provider 思考之间显示一句简短摘要，说明上一段修改了多少文件、执行了多少条 shell 指令；统计来自结构化 timeline item 字段，避免依赖截断后的 UI 文本。 |
+| [x] | P5-18a：运行中单行 active work 状态栏 | `vscode/extension/src/chatView.ts` | 已完成：Sidebar 不再把 tool/provider/context 过程记录堆叠到对话中；turn 运行中只显示一个 `Working:` 活跃状态栏，完整工具生命周期继续写入 `Output > ProleCoder` 和 run log。 |
+| [x] | P5-18b：assistant 分段与平凡工具过滤摘要 | `vscode/extension/src/chatEvents.ts` | 已完成：同一 turn 的 assistant delta 会在工具/steer 边界后开启新消息段，避免工具前说明与最终小结合并；下一段 assistant 回复出现前插入 `Activity` 摘要，统计修改文件数和 shell 指令数，并通过平凡工具库过滤 `read_file` / `search` / manifest / git diff/status 等只读过程。 |
+| [x] | P5-18c：steer 顺序与确认卡位置 | `vscode/extension/src/chatEvents.ts`、`vscode/extension/src/chatView.ts` | 已完成：`turn.steered` 用户消息保持在后续 assistant 分段之前；steer 二次确认卡移动到聊天界面与 textarea 之间，而不是挤在底部按钮行里。 |
+| [x] | P5-18d：pending steer 即时聊天反馈 | `vscode/extension/src/chatView.ts`、`vscode/extension/src/chatEvents.ts` | 已完成：用户确认 steer 后立即在聊天框显示本地 pending 用户消息；在真实 `turn.steered` 事件写入前，运行中的 active work 状态栏会显示在 pending steer 上方，等后端返回同一 `steerId` 的事件后自动切换为 run log 回放中的正式用户消息。 |
+| [x] | P5-18e：未知工具调用可恢复与 `write_file` 纠偏 | `crates/agent-core/src/turn_loop.rs`、`docs/tool-system.md`、`docs/turn-loop.md` | 已完成：模型请求不存在的 `write_file` 等未知工具时不再直接 `run.failed`，Turn Loop 会记录失败的 `tool.requested` / `tool.completed` 并把 `E_UNKNOWN_TOOL` 工具结果喂回 provider，提示改用 `apply_patch`；未知工具参数不写入 run log，避免整文件内容或敏感文本被展开。 |
+| [x] | P5-18f：steer queued 状态与强指令注入 | `crates/agent-core/src/turn_loop.rs`、`vscode/extension/src/chatView.ts`、`docs/json-rpc-protocol.md`、`docs/turn-loop.md` | 已完成：本地 pending steer 在真实 `turn.steered` 到达前显示为 `You (queued)`，避免误导用户以为模型已消费；Turn Loop 注入 steer 时明确声明其为最新用户运行中指令，后续用户可见回复和动作必须优先遵守，提升“改用中文”等运行中指导的遵循率。 |
+| [x] | P5-18g：完成后中间 assistant / Activity 分段折叠 | `vscode/extension/src/chatEvents.ts`、`vscode/extension/test/chatEvents.test.ts` | 已完成：当 run 已完成且最终 assistant 总结可见时，最终总结前的中间过程会按用户消息 / steer 边界分成多个 `Earlier activity` 默认折叠块；展开后仍按原来的用户消息、assistant 分段和 `Activity` 摘要卡片渲染，保留每段从用户输入到下一次 steer / 总结之间的上下文。 |
+| [ ] | P5-18h：run summary changedFiles / verification metadata 追踪 | `crates/agent-core/src/turn_loop.rs`、`docs/turn-loop.md`、`docs/vscode-extension.md` | 未完成：真实试用发现 agent 通过 shell 写入文件或运行测试后，`run.completed.changedFiles` / `verificationStatus` 仍可能只反映 Core 已知工具路径，导致 summary metadata 低估实际修改和验证情况；后续需要设计可审计的 workspace diff snapshot、shell 写入检测或测试结果 metadata 收敛策略。 |
+| [x] | P5-18i：Provider idle timeout 重试与连接失败收口 | `crates/agent-core/src/turn_loop.rs`、`docs/json-rpc-protocol.md`、`docs/turn-loop.md` | 已完成：真实试用发现 run 停在 `provider.requested` 且 run log 没有后续事件时，Turn Loop 会对 `complete_stream` 建连和 streaming `next()` 等待设置默认 60 秒 no-progress timeout；连续最多 5 次 provider attempt 都没有进展时写入 `run.failed(code=E_PROVIDER_TIMEOUT)`，中间每次重试写入 `provider.retrying(reason=provider_idle_timeout, timeoutMs, retriesRemaining)`。验收：新增 Core fixture 覆盖建连 pending 最终失败、stream pending 后重试成功；Sidebar retry item 显示 `timeoutMs`。 |
+| [x] | P5-18j：已知工具 schema 错误可恢复 | `crates/agent-core/src/turn_loop.rs`、`docs/tool-system.md`、`docs/turn-loop.md` | 已完成：真实试用发现模型向 `read_file` 传入 `limit` 等未知字段时，Turn Loop 不再直接 `run.failed(code=E_INVALID_TOOL_ARGUMENTS)`；合法 JSON 但不符合已知工具 schema 的参数会记录失败的 `tool.requested` / `tool.completed`，把 `E_INVALID_TOOL_ARGUMENTS`、schema 错误和纠偏 guidance 作为 tool result 喂回 provider，让模型可改用 `startLine` / `endLine` 等正确参数继续。验收：新增 Core fixture 覆盖 schema mismatch 可恢复并继续下一轮 provider request；malformed JSON 仍保留诊断文件和终止错误。 |
+| [x] | P5-18k：完成后折叠保留用户 / steer 消息 | `vscode/extension/src/chatEvents.ts`、`vscode/extension/test/chatEvents.test.ts` | 已完成：真实试用发现最终总结出现后，`Earlier activity` 折叠块会把初始用户消息和运行中 steer 一起折叠隐藏；现在用户消息作为折叠边界并原样留在主时间线，折叠块只包含两条用户消息之间的 assistant / Activity / work 过程。验收：补充 timeline 单元测试覆盖用户消息和 steer 可见、展开后仍恢复原 assistant / Activity 卡片格式。 |
+| [x] | P5-18l：长 run timeline 裁剪与持久化边界 | `vscode/extension/src/chatEvents.ts`、`vscode/extension/test/chatEvents.test.ts`、`docs/vscode-extension.md` | 已完成：真实试用发现长 run 中大量工具 / provider 过程事件会触发 Sidebar timeline 裁剪，导致初始用户消息、steer 和 steer 前后的记录从聊天框消失；现在默认过程 item 上限从 300 提高到 1200，裁剪只移除可从 workspace run log 重放的过程项，用户消息、steer、assistant 分段和 terminal 结果不参与裁剪；`.prole-coder/runs/<run>/events.jsonl` 继续作为不可丢对话内容的 workspace 持久源，直到 `agent.deleteRun` 删除该 run。验收：补充 timeline 单元测试覆盖长 run 裁剪后用户 / steer 仍可见，完成后折叠仍按用户 / steer 边界展开为原 assistant / Activity 卡片格式。 |
+| [x] | P5-19a：四项目真实试用回归验收记录 | `docs/testing.md`、`docs/vscode-extension.md` | 已完成：真实 VS Code 插件试用在 `agent_misc_tests_working` 对四个独立测试项目完成修复，最新 run `run_7196_1780870724369` 状态为 completed；人工复验 `01-js-ledger-lite`、`02-python-note-index`、`03-rust-path-rules`、`04-js-event-reducer` 的测试分别为 4/4、4/4、5/5、5/5 通过，共 18 个测试通过。验收同时确认 UI 中长 run 折叠和 steer 后消息保留效果正常；`run.completed.changedFiles` / `verificationStatus` 低估问题继续由 P5-18h 追踪。 |
+| [ ] | P5-19z：真实试用 UX backlog 持续收敛 | `README.md`、`docs/testing.md`、`docs/vscode-extension.md` | 未完成：继续根据真实 VS Code 插件试用收集 Runs、Key/Model/Settings、审批、Chat、Output 日志、上下文压缩、Markdown 兼容性和大工具参数稳定性问题；新增可执行项时优先拆成新的 P5-19 子任务或后续 Phase 任务，不能把新需求继续堆进本行。 |
 
 ## Phase 6：TUI 与生态扩展
 

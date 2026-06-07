@@ -124,6 +124,7 @@ interface SteerResultWebviewMessage {
   readonly type: "steerResult";
   readonly ok: boolean;
   readonly message: string;
+  readonly steerId?: string;
 }
 
 type ExtensionToWebviewMessage =
@@ -904,12 +905,12 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     }
 
     try {
-      await this.rpcClient.steer(params);
+      const result = await this.rpcClient.steer(params);
       this.setSubmission({
         ...this.submission,
-        message: "Steer sent.",
+        message: "Steer queued.",
       });
-      this.postSteerResult(true, params.message);
+      this.postSteerResult(true, params.message, result.steerId);
     } catch (error) {
       const messageText = `Failed to steer turn: ${errorMessage(error)}`;
       const redacted = this.redact(messageText);
@@ -923,11 +924,12 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     }
   }
 
-  private postSteerResult(ok: boolean, message: string): void {
+  private postSteerResult(ok: boolean, message: string, steerId?: string): void {
     this.postToWebview({
       type: "steerResult",
       ok,
       message,
+      ...(steerId === undefined ? {} : { steerId }),
     });
   }
 
@@ -1849,6 +1851,17 @@ function renderChatViewHtml(
       display: none;
     }
 
+    .item-children {
+      display: grid;
+      gap: 8px;
+      padding-left: 10px;
+      border-left: 1px solid var(--vscode-editorWidget-border);
+    }
+
+    details.item:not([open]) > .item-children {
+      display: none;
+    }
+
     .work-log-body {
       display: grid;
       gap: 0;
@@ -1862,6 +1875,14 @@ function renderChatViewHtml(
     .work-log-group:first-child {
       border-top: 0;
       padding-top: 0;
+    }
+
+    .work-log-segment-summary {
+      border-top: 1px solid var(--vscode-editorWidget-border);
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      line-height: 1.35;
+      padding: 6px 0;
     }
 
     .work-log-group-summary {
@@ -1921,6 +1942,12 @@ function renderChatViewHtml(
       line-height: 1.35;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+    }
+
+    .active-work-status {
+      color: var(--vscode-descriptionForeground);
+      font-size: 12px;
+      line-height: 1.35;
     }
 
     .approval-host {
@@ -2221,14 +2248,16 @@ function renderChatViewHtml(
       color: var(--vscode-descriptionForeground);
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
       gap: 6px;
       font-size: 12px;
-      overflow: hidden;
-      white-space: nowrap;
+      overflow: visible;
+      white-space: normal;
     }
 
     .submission-message {
       min-width: 0;
+      flex: 1 1 8rem;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
@@ -2248,6 +2277,52 @@ function renderChatViewHtml(
 
     .submission-action:hover {
       background: var(--vscode-button-hoverBackground);
+    }
+
+    .steer-confirmation-host:empty {
+      display: none;
+    }
+
+    .steer-confirm {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      padding: 6px;
+      color: var(--vscode-foreground);
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-editorWidget-border);
+    }
+
+    .steer-confirm-text {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .steer-confirm button {
+      height: 24px;
+      min-width: 48px;
+      border: 1px solid transparent;
+      border-radius: 3px;
+      cursor: pointer;
+      font: var(--vscode-font-size) var(--vscode-font-family);
+    }
+
+    .steer-confirm-send {
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+    }
+
+    .steer-confirm-delete {
+      color: var(--vscode-button-secondaryForeground);
+      background: var(--vscode-button-secondaryBackground);
+    }
+
+    .steer-confirm button:hover {
+      filter: brightness(1.08);
     }
 
     .submission.failed {
@@ -2297,6 +2372,7 @@ function renderChatViewHtml(
     <section id="events" class="events" aria-label="Run events"></section>
     <section id="approval" class="approval-host" aria-live="polite"></section>
     <form id="composer" class="composer">
+      <div id="steer-confirmation" class="steer-confirmation-host" aria-live="polite"></div>
       <textarea id="prompt" class="prompt" rows="3" placeholder="Ask ProleCoder" aria-label="Chat message"></textarea>
       <div class="composer-row">
         <select id="mode" class="mode" aria-label="Run mode" hidden></select>
@@ -2374,6 +2450,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     const sendStopIcon = sendButton.querySelector(".send-icon-stop");
     const cancelButton = document.getElementById("cancel");
     const submissionRoot = document.getElementById("submission");
+    const steerConfirmationRoot = document.getElementById("steer-confirmation");
     const approvalRoot = document.getElementById("approval");
     const restoredWebviewState = readWebviewState();
     let currentSnapshot = initialSnapshot;
@@ -2385,6 +2462,10 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     let editingMessageId = "";
     let editingMessageTurnId = "";
     let pendingSteerMessage = "";
+    let pendingSteerRunId = "";
+    let pendingSteerId = "";
+    let pendingSteerAccepted = false;
+    let pendingSteerConfirmation = "";
     const supersededUserItemIds = new Set(restoredWebviewState.supersededUserItemIds);
     const resolvedApprovalIds = new Set();
     let contextSourceTab = "included";
@@ -2404,6 +2485,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
         return;
       }
       if (message && message.type === "snapshot") {
+        clearPendingSteerIfDelivered(message.snapshot);
         render(message.snapshot);
       }
       if (message && message.type === "submission") {
@@ -2450,7 +2532,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     composer.addEventListener("submit", safeWebviewEventHandler("composer submit", (event) => {
       event.preventDefault();
       if (currentSubmission && currentSubmission.busy === true) {
-        submitSteerMessage();
+        queueSteerConfirmation();
         return;
       }
       submitComposerMessage();
@@ -2458,10 +2540,18 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
 
     sendButton.addEventListener("click", safeWebviewEventHandler("send click", () => {
       if (currentSubmission && currentSubmission.busy === true) {
-        requestCancelCurrentTurn();
+        if (promptHasText()) {
+          queueSteerConfirmation();
+        } else {
+          requestCancelCurrentTurn();
+        }
         return;
       }
       submitComposerMessage();
+    }));
+
+    promptInput.addEventListener("input", safeWebviewEventHandler("prompt input", () => {
+      syncSendButtonMode();
     }));
 
     promptInput.addEventListener("keydown", safeWebviewEventHandler("prompt keydown", (event) => {
@@ -2471,7 +2561,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
           return;
         }
         if (currentSubmission && currentSubmission.busy === true) {
-          submitSteerMessage();
+          queueSteerConfirmation();
           return;
         }
         submitComposerMessage();
@@ -2523,6 +2613,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
         editingMessageTurnId = "";
       }
       renderPendingUserMessage(message);
+      clearPromptInput();
       renderSubmission(currentSubmission);
       vscodeApi.postMessage({
         type: "submitTurn",
@@ -2531,13 +2622,31 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       });
     }
 
-    function submitSteerMessage() {
+    function queueSteerConfirmation() {
+      if (sendButton.disabled) {
+        return;
+      }
       const runId = currentSubmission && typeof currentSubmission.runId === "string" ? currentSubmission.runId : "";
       const message = promptInput.value.trim();
       if (runId.length === 0 || message.length === 0) {
         return;
       }
-      pendingSteerMessage = message;
+      pendingSteerConfirmation = message;
+      clearPromptInput();
+      renderSubmission(currentSubmission);
+    }
+
+    function sendConfirmedSteerMessage(message) {
+      const runId = currentSubmission && typeof currentSubmission.runId === "string" ? currentSubmission.runId : "";
+      if (runId.length === 0 || typeof message !== "string" || message.trim().length === 0) {
+        return;
+      }
+      const trimmedMessage = message.trim();
+      pendingSteerMessage = trimmedMessage;
+      pendingSteerRunId = runId;
+      pendingSteerId = "";
+      pendingSteerAccepted = false;
+      pendingSteerConfirmation = "";
       currentSubmission = {
         ...(currentSubmission && typeof currentSubmission === "object" ? currentSubmission : {}),
         busy: true,
@@ -2545,10 +2654,11 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
         message: "Sending steer...",
       };
       renderSubmission(currentSubmission);
+      render(currentSnapshot);
       vscodeApi.postMessage({
         type: "steerTurn",
         runId,
-        message,
+        message: trimmedMessage,
       });
     }
 
@@ -2562,13 +2672,32 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
         if (promptInput.value.trim() === message) {
           promptInput.value = "";
         }
+        const steerId = typeof result.steerId === "string" ? result.steerId : "";
+        if (pendingSteerMessage === message) {
+          pendingSteerAccepted = true;
+        }
+        if (pendingSteerMessage === message && steerId.length > 0) {
+          pendingSteerId = steerId;
+        }
+        clearPendingSteerIfDelivered(currentSnapshot);
       } else if (promptInput.value.trim().length === 0) {
         promptInput.value = message;
+        if (pendingSteerMessage === message) {
+          clearPendingSteerState();
+        }
       }
 
-      if (pendingSteerMessage === message) {
-        pendingSteerMessage = "";
-      }
+      syncSendButtonMode();
+      render(currentSnapshot);
+    }
+
+    function clearPromptInput() {
+      promptInput.value = "";
+      promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    function promptHasText() {
+      return promptInput.value.trim().length > 0;
     }
 
     function requestCancelCurrentTurn() {
@@ -2670,12 +2799,73 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       });
     }
 
+    function pendingSteerTimelineItem(snapshot) {
+      if (pendingSteerMessage.length === 0) {
+        return undefined;
+      }
+
+      const runId = pendingSteerRunId || activeConversationRunId() || "pending";
+      return {
+        id: "pending-steer-message",
+        seq: 0,
+        lastSeq: 0,
+        time: new Date().toISOString(),
+        type: "turn.steerPending",
+        runId,
+        kind: "user",
+        tone: "neutral",
+        title: "You (queued)",
+        body: pendingSteerMessage,
+      };
+    }
+
+    function clearPendingSteerIfDelivered(snapshot) {
+      if (pendingSteerMessage.length === 0 || hasDeliveredPendingSteer(snapshot) !== true) {
+        return;
+      }
+      clearPendingSteerState();
+    }
+
+    function clearPendingSteerState() {
+      pendingSteerMessage = "";
+      pendingSteerRunId = "";
+      pendingSteerId = "";
+      pendingSteerAccepted = false;
+    }
+
+    function hasDeliveredPendingSteer(snapshot) {
+      if (!snapshot || typeof snapshot !== "object") {
+        return false;
+      }
+      const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+      for (const item of items) {
+        if (!item || typeof item !== "object" || item.type !== "turn.steered") {
+          continue;
+        }
+        const sameRun = pendingSteerRunId.length === 0 || item.runId === pendingSteerRunId;
+        if (sameRun !== true) {
+          continue;
+        }
+        if (pendingSteerId.length > 0) {
+          if (item.steerId === pendingSteerId) {
+            return true;
+          }
+          continue;
+        }
+        if (pendingSteerAccepted === true && item.body === pendingSteerMessage) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     function render(snapshot) {
       currentSnapshot = snapshot && typeof snapshot === "object" ? snapshot : initialSnapshot;
       syncSupersededUserItemsFromSnapshot(currentSnapshot);
       const items = Array.isArray(currentSnapshot.items) ? currentSnapshot.items : [];
       const visibleItems = visibleTimelineItems(currentSnapshot, items);
       const workItems = timelineWorkItems(currentSnapshot, items);
+      const pendingSteerItem = pendingSteerTimelineItem(currentSnapshot);
       statusTitle.textContent = currentSnapshot.latestStatus || "ProleCoder";
       statusSubtitle.textContent = currentSnapshot.latestRunId
         ? currentSnapshot.latestRunId + " - " + currentSnapshot.eventCount + " events"
@@ -2683,7 +2873,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       eventsRoot.replaceChildren();
       syncConversationChrome();
 
-      if (visibleItems.length === 0 && workItems.length === 0) {
+      if (visibleItems.length === 0 && workItems.length === 0 && pendingSteerItem === undefined) {
         const empty = document.createElement("div");
         empty.className = "empty";
         empty.textContent = "No run events yet.";
@@ -2694,8 +2884,11 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       for (const item of visibleItems) {
         eventsRoot.append(renderItemSafely(item));
       }
-      if (workItems.length > 0) {
+      if (workItems.length > 0 && shouldOpenWorkLog(workItems)) {
         eventsRoot.append(renderWorkLog(workItems));
+      }
+      if (pendingSteerItem !== undefined) {
+        eventsRoot.append(renderItemSafely(pendingSteerItem));
       }
     }
 
@@ -3304,14 +3497,52 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       if (actionButton) {
         submissionRoot.append(actionButton);
       }
+      renderSteerConfirmation();
       if (status === "running" && wasBusy !== true) {
-        promptInput.value = "";
+        clearPromptInput();
       }
       syncConversationChrome();
       syncWorkLogSummary();
       if (wasBusy === true && busy !== true) {
+        pendingSteerConfirmation = "";
         render(currentSnapshot);
       }
+    }
+
+    function renderSteerConfirmation() {
+      steerConfirmationRoot.replaceChildren();
+      if (pendingSteerConfirmation.length === 0) {
+        return;
+      }
+
+      const card = document.createElement("div");
+      card.className = "steer-confirm";
+      const text = document.createElement("div");
+      text.className = "steer-confirm-text";
+      text.textContent = pendingSteerConfirmation;
+      text.title = pendingSteerConfirmation;
+
+      const send = document.createElement("button");
+      send.type = "button";
+      send.className = "steer-confirm-send";
+      send.textContent = "Send";
+      send.addEventListener("click", () => {
+        const message = pendingSteerConfirmation;
+        sendConfirmedSteerMessage(message);
+      });
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "steer-confirm-delete";
+      remove.textContent = "Delete";
+      remove.addEventListener("click", () => {
+        pendingSteerConfirmation = "";
+        renderSubmission(currentSubmission);
+        promptInput.focus();
+      });
+
+      card.append(text, send, remove);
+      steerConfirmationRoot.append(card);
     }
 
     function renderSubmissionAction(action) {
@@ -3352,17 +3583,30 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       promptInput.setAttribute("aria-label", busy ? "Steer current turn" : "Chat message");
       modeInput.disabled = busy;
       modeInput.hidden = true;
-      sendButton.disabled = busy && canceling === true;
-      setSendIconVisible(sendSubmitIcon, busy !== true);
-      setSendIconVisible(sendStopIcon, busy === true);
-      sendButton.title = busy ? "Stop current turn" : "Send message";
-      sendButton.setAttribute("aria-label", busy ? "Stop current turn" : "Send message");
-      sendButton.classList.toggle("stop", busy);
       sendButton.dataset.runId = cancelable === true ? runId : "";
       cancelButton.dataset.runId = cancelable === true ? runId : "";
       cancelButton.disabled = true;
       cancelButton.hidden = true;
+      syncSendButtonMode();
       syncMessageEditButtons(busy);
+    }
+
+    function syncSendButtonMode() {
+      const busy = currentSubmission && currentSubmission.busy === true;
+      const canceling = currentSubmission && currentSubmission.canceling === true;
+      const steerReady = busy && promptHasText();
+      sendButton.disabled = busy && canceling === true;
+      setSendIconVisible(sendSubmitIcon, busy !== true || steerReady);
+      setSendIconVisible(sendStopIcon, busy === true && steerReady !== true);
+      sendButton.title = busy
+        ? steerReady ? "Send steer" : "Stop current turn"
+        : "Send message";
+      sendButton.setAttribute(
+        "aria-label",
+        busy ? steerReady ? "Send steer" : "Stop current turn" : "Send message",
+      );
+      sendButton.classList.toggle("stop", busy && steerReady !== true);
+      sendButton.classList.toggle("steer-ready", steerReady);
     }
 
     function setSendIconVisible(icon, visible) {
@@ -3459,17 +3703,14 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     }
 
     function renderWorkLog(items) {
-      const details = document.createElement("details");
-      details.className = "item work-log neutral";
-      details.open = false;
-
-      const summary = document.createElement("summary");
+      const article = document.createElement("article");
+      article.className = "item work-log neutral active-work-status";
       const meta = document.createElement("div");
       meta.className = "meta";
       const count = document.createElement("span");
       count.className = "seq";
-      count.textContent = items.length + " events";
       const latest = latestWorkItem(items);
+      count.textContent = latest && typeof latest.seq === "number" ? "#" + latest.seq : items.length + " events";
       const latestType = document.createElement("span");
       latestType.className = "type";
       latestType.textContent = latest && typeof latest.type === "string" ? latest.type : "work";
@@ -3478,21 +3719,12 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       const title = document.createElement("div");
       title.className = "title";
       title.textContent = workLogTitle(items);
-      summary.append(meta, title);
-      details.append(summary);
+      article.append(meta, title);
+      return article;
+    }
 
-      const body = document.createElement("div");
-      body.className = "body work-log-body";
-      const displayedItems = workLogDisplayItems(items);
-      const hiddenCount = items.length - displayedItems.length;
-      if (hiddenCount > 0) {
-        body.append(renderWorkLogNotice(hiddenCount));
-      }
-      for (const group of workLogGroups(displayedItems)) {
-        body.append(renderWorkLogGroup(group));
-      }
-      details.append(body);
-      return details;
+    function shouldOpenWorkLog(items) {
+      return currentSubmission && currentSubmission.busy === true && latestWorkItem(items) !== undefined;
     }
 
     function workLogDisplayItems(items) {
@@ -3510,6 +3742,23 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       title.textContent = hiddenCount + " earlier events hidden";
       row.append(meta, title);
       return row;
+    }
+
+    function renderWorkLogSegmentSummary(stats) {
+      const row = document.createElement("div");
+      row.className = "work-log-segment-summary";
+      row.textContent =
+        "Modified " +
+        countWithNoun(stats.changedFileCount, "file", "files") +
+        ", ran " +
+        countWithNoun(stats.commandCount, "command", "commands") +
+        ".";
+      return row;
+    }
+
+    function countWithNoun(count, singular, plural) {
+      const value = safeWorkLogCount(count);
+      return value + " " + (value === 1 ? singular : plural);
     }
 
     function renderWorkLogRow(item) {
@@ -3565,14 +3814,54 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       return groups;
     }
 
-    function renderWorkLogGroup(group) {
+    function emptyWorkLogSegmentStats() {
+      return {
+        changedFileCount: 0,
+        commandCount: 0,
+      };
+    }
+
+    function addWorkLogSegmentStats(stats, group) {
+      if (!group || !Array.isArray(group.items)) {
+        return stats;
+      }
+
+      for (const item of group.items) {
+        stats.changedFileCount += safeWorkLogCount(item && item.changedFileCount);
+        stats.commandCount += safeWorkLogCount(item && item.commandCount);
+      }
+      return stats;
+    }
+
+    function hasWorkLogSegmentStats(stats) {
+      return safeWorkLogCount(stats && stats.changedFileCount) > 0 || safeWorkLogCount(stats && stats.commandCount) > 0;
+    }
+
+    function safeWorkLogCount(value) {
+      return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+    }
+
+    function isProviderWorkLogGroup(group) {
+      return Boolean(
+        group &&
+          Array.isArray(group.items) &&
+          group.items.some(
+            (item) =>
+              item &&
+              (item.kind === "provider" ||
+                (typeof item.workGroupId === "string" && item.workGroupId.indexOf(":provider:") !== -1)),
+          ),
+      );
+    }
+
+    function renderWorkLogGroup(group, open) {
       if (!group || !Array.isArray(group.items) || group.items.length <= 1) {
         return renderWorkLogRow(group && Array.isArray(group.items) ? group.items[0] : {});
       }
 
       const details = document.createElement("details");
       details.className = "work-log-group";
-      details.open = false;
+      details.open = open === true;
 
       const summary = document.createElement("summary");
       summary.className = "work-log-group-summary";
@@ -3592,6 +3881,13 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       }
       details.append(body);
       return details;
+    }
+
+    function groupContainsItem(group, item) {
+      if (!group || !Array.isArray(group.items) || !item) {
+        return false;
+      }
+      return group.items.some((candidate) => candidate && candidate.id === item.id);
     }
 
     function workLogTitle(items) {
@@ -3618,7 +3914,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     }
 
     function syncWorkLogSummary() {
-      const title = document.querySelector(".item.work-log > summary .title");
+      const title = document.querySelector(".item.work-log .title");
       if (!title) {
         return;
       }
@@ -3712,6 +4008,15 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
         }
         article.append(body);
       }
+      const children = itemChildren(item);
+      if (children.length > 0) {
+        const childRoot = document.createElement("div");
+        childRoot.className = "item-children";
+        for (const child of children) {
+          childRoot.append(renderItemSafely(child));
+        }
+        article.append(childRoot);
+      }
 
       return article;
     }
@@ -3729,7 +4034,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     }
 
     function isEditableUserItem(item, bodyText) {
-      return item && typeof item === "object" && item.kind === "user" && bodyText.length > 0;
+      return item && typeof item === "object" && item.kind === "user" && item.type !== "turn.steerPending" && bodyText.length > 0;
     }
 
     function renderMessageEditButton(item, message) {
@@ -3790,6 +4095,12 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
         return "";
       }
       return typeof item.body === "string" ? item.body : String(item.body);
+    }
+
+    function itemChildren(item) {
+      return item && typeof item === "object" && Array.isArray(item.children)
+        ? item.children.filter((child) => child && typeof child === "object")
+        : [];
     }
 
     function shouldRenderMarkdown(item) {
@@ -3895,6 +4206,10 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
         workLogOpen: workLog && "open" in workLog ? workLog.open === true : false,
         workLogTitle: workLogSummary ? workLogSummary.textContent || "" : "",
         workLogTypes: textContents(".work-log-row-meta span:last-child"),
+        workLogSegmentSummaries: textContents(".work-log-segment-summary"),
+        workLogGroupOpen: Array.from(document.querySelectorAll(".work-log-group")).map((element) =>
+          "open" in element ? element.open === true : false,
+        ),
         promptValue: promptInput.value,
         promptPlaceholder: promptInput.getAttribute("placeholder") || "",
         promptTitle: promptInput.title || "",
@@ -3906,6 +4221,9 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
           .filter((element) => !isDisplayNone(element))
           .map((element) => element.classList.contains("send-icon-stop") ? "stop" : "submit"),
         sendDisabled: sendButton.disabled,
+        steerConfirmVisible: document.querySelector(".steer-confirm") !== null,
+        steerConfirmText: textContent(".steer-confirm-text"),
+        steerConfirmActions: textContents(".steer-confirm button"),
         modeHidden: modeInput.hidden === true,
         cancelDisabled: cancelButton.disabled,
         messageEditButtons: textContents(".message-edit"),

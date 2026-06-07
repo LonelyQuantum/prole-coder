@@ -300,7 +300,7 @@ interface SendTurnResult {
 
 Result 返回后，进度通过 `agent.event` notification 持续到达。
 
-当前 Rust request loop 已能解析 `agent.sendTurn` 并分发给 `AgentRpcRequestHandler`。`crates/agent-rpc::AgentTurnLoopRpcHandler` 已能创建 run、选择注入的 provider factory、启动后台 Turn Loop worker，并在创建 run 后立即返回 `accepted`。Run Log 事件会通过独立的 live event queue 发送到 request loop 的单 writer，并持续输出为 `agent.event` notification；遇到审批时，worker 会先检查 session/workspace 持久批准，再在 pending approval 队列中等待 `agent.approve` / `agent.reject` / `agent.cancel`，并在超时时写入取消事件。active run 还可以通过 `agent.steer` 接收运行中的用户补充指导，Turn Loop 会在下一次 provider request 前注入该 steer 消息。如果 request loop 读到 EOF 或 writer 失败，会触发 handler shutdown / disconnect cancel；对于 active run，shutdown 会把未决审批解析为 `decision: "canceled"` 并写入 `run.canceled`，或等待已有 terminal event 收口。
+当前 Rust request loop 已能解析 `agent.sendTurn` 并分发给 `AgentRpcRequestHandler`。`crates/agent-rpc::AgentTurnLoopRpcHandler` 已能创建 run、选择注入的 provider factory、启动后台 Turn Loop worker，并在创建 run 后立即返回 `accepted`。Run Log 事件会通过独立的 live event queue 发送到 request loop 的单 writer，并持续输出为 `agent.event` notification；遇到审批时，worker 会先检查 session/workspace 持久批准，再在 pending approval 队列中等待 `agent.approve` / `agent.reject` / `agent.cancel`，并在超时时写入取消事件。active run 还可以通过 `agent.steer` 接收运行中的用户补充指导，Turn Loop 会在下一次 provider request 前把它作为最新用户运行中指令注入。如果 request loop 读到 EOF 或 writer 失败，会触发 handler shutdown / disconnect cancel；对于 active run，shutdown 会把未决审批解析为 `decision: "canceled"` 并写入 `run.canceled`，或等待已有 terminal event 收口。
 
 Phase 2c 起，Rust handler 会消费 `attachments` 并转换为 Context Capsule 来源：`file` 由 Core 在工作区内读取，复用工具执行层的路径和敏感目录保护；`selection` / `explicit_content` 由前端提供文本但受数量、大小、重复来源和路径校验限制；`diagnostic` 由 VS Code/TUI 等前端传入结构化诊断文本。VS Code 插件在发送 turn 时会把当前 Problems 快照转换为 diagnostic attachments，并按协议 attachment 上限优先保留 error；Phase 4 起，Sidebar Chat 与原生 `@prole` Chat Participant 会把历史对话/事件摘要压缩为受限长度的 `explicit_content` attachment，并为该自动上下文预留一个 attachment 槽位。Sidebar timeline 来源会在生成自动上下文前先限制单条消息长度，避免极端长 `assistant.delta` 合并内容造成过大的中间文本。当前默认限制是单 turn 最多 32 个 attachment，单个 attachment 文本最多 256 KiB；超过限制会让该 run 以 `run.failed` / `E_INVALID_ATTACHMENT` 结束。
 
@@ -389,7 +389,7 @@ interface CancelResult {
 
 ### `agent.steer`
 
-向 active run 追加运行中的用户指导。该请求不创建新的 turn，不会取消当前 provider/tool 流程；Turn Loop 会在下一次 provider request 前把 steer 消息作为用户补充上下文注入，并写入 `turn.steered` 事件。
+向 active run 追加运行中的用户指导。该请求不创建新的 turn，不会取消当前 provider/tool 流程；Turn Loop 会在下一次 provider request 前把 steer 消息作为最新用户运行中指令注入，并写入 `turn.steered` 事件。
 
 ```ts
 interface SteerParams {
@@ -595,6 +595,8 @@ interface RunFailed {
 
 当 tool-call `function.arguments` 本身不是合法 JSON 时，Agent Core 会把脱敏后的原始累计 arguments 写入当前 run 目录下的诊断文件，并在 `diagnosticFile` 返回该本地文件路径。该字段只用于本地排查，不要求前端把文件内容重新发送给模型。
 
+当 provider 建立 streaming response 或等待下一段 stream event 超过配置的 idle timeout 且连续重试耗尽时，`run.failed.code` 为 `E_PROVIDER_TIMEOUT`，payload 还会包含 `timeoutMs`、`attempts`、`partialContentChars` 和 `partialReasoningChars`。该错误属于 provider 连接失败收口；JSON-RPC 方法级错误仍归入 `E_PROVIDER_ERROR` 对应的 provider 类错误码。
+
 ### `run.canceled`
 
 ```ts
@@ -628,7 +630,7 @@ interface TurnSteered {
 }
 ```
 
-该事件表示用户在 run 执行期间发送了补充指导。它用于 run log 审计和前端 timeline 展示；实际 provider 注入发生在下一次 provider request 前，因此如果 run 已在当前 provider/tool 循环内自然完成，steer 可能不会再影响模型输出。
+该事件表示用户在 run 执行期间发送了补充指导。它用于 run log 审计和前端 timeline 展示；实际 provider 注入发生在下一次 provider request 前，注入内容会明确要求模型把 steer 当作最新用户指令遵循，因此如果 run 已在当前 provider/tool 循环内自然完成，steer 可能不会再影响模型输出。
 
 ### `assistant.delta`
 
@@ -756,6 +758,22 @@ interface ProviderRequested {
   reasoningState:
     | { state: "no_replay_required" }
     | { state: "replay_required"; assistantMessages: number };
+}
+```
+
+### `provider.retrying`
+
+该事件表示 Turn Loop 已决定重新发起 provider request。当前用于 transient stream error 和 provider idle timeout 两类可重试连接问题。
+
+```ts
+interface ProviderRetrying {
+  iteration: number;
+  reason: "transient_stream_error" | "provider_idle_timeout";
+  message: string;
+  retriesRemaining: number;
+  partialContentChars: number;
+  partialReasoningChars: number;
+  timeoutMs?: number;
 }
 ```
 
@@ -949,7 +967,7 @@ JSON-RPC 标准错误保留标准语义。项目特定错误使用 `-32000` 到 
 | -32002 | `E_WORKSPACE_UNTRUSTED` | 当前 workspace 未信任，请求操作被禁用。 |
 | -32003 | `E_RUN_NOT_FOUND` | 请求的 run 不存在于本地状态。 |
 | -32004 | `E_RUN_ALREADY_ACTIVE` | 已存在冲突的 active run。 |
-| -32010 | `E_INVALID_TOOL_ARGUMENTS` | tool-call 参数不是合法 JSON，或未通过 schema 校验。 |
+| -32010 | `E_INVALID_TOOL_ARGUMENTS` | tool-call 参数不是合法 JSON、payload 引用非法或发生其他终止型参数错误；已知工具 schema mismatch 也会作为失败 `tool.completed.result.errorCode` 返回 provider 重试。 |
 | -32011 | `E_APPROVAL_NOT_FOUND` | approval id 未知、已过期或已使用。 |
 | -32012 | `E_APPROVAL_DENIED` | 审批被拒绝，操作无法继续。 |
 | -32020 | `E_CONTEXT_BUDGET_EXCEEDED` | 必需上下文无法放入配置的预算。 |

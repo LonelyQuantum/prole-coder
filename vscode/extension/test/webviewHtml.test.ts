@@ -84,6 +84,12 @@ test("generated chat webview inline script parses as JavaScript", () => {
   assert.match(html, /\.approval-section\s*\{/);
   assert.match(html, /Long shell commands intentionally wrap vertically/);
   assert.match(html, /\.approval-command \.approval-section-body\s*\{/);
+  assert.match(html, /\.steer-confirm\s*\{/);
+  assert.match(html, /id="steer-confirmation" class="steer-confirmation-host"/);
+  assert.match(html, /\.active-work-status\s*\{/);
+  assert.match(html, /\.work-log-segment-summary\s*\{/);
+  assert.match(html, /\.item-children\s*\{/);
+  assert.match(html, /details\.item:not\(\[open\]\) > \.item-children\s*\{/);
   assert.match(html, /<select id="mode" class="mode" aria-label="Run mode" hidden><\/select>/);
   assert.match(html, /class="send-icon send-icon-stop"[^>]*hidden/);
 
@@ -94,8 +100,33 @@ test("generated chat webview inline script parses as JavaScript", () => {
   assert.match(script, /modeInput\.hidden = true/);
   assert.match(script, /function renderApprovalSection\(/);
   assert.match(script, /section\.classList\.add\("approval-section", className\)/);
+  assert.match(script, /const steerConfirmationRoot = document\.getElementById\("steer-confirmation"\)/);
+  assert.match(script, /if \(workItems\.length > 0 && shouldOpenWorkLog\(workItems\)\)/);
+  assert.match(script, /steerConfirmationRoot\.append\(card\)/);
   assert.match(script, /message\.type === "steerResult"/);
   assert.match(script, /function handleSteerResult\(/);
+  assert.match(script, /let pendingSteerConfirmation = ""/);
+  assert.match(script, /let pendingSteerRunId = ""/);
+  assert.match(script, /let pendingSteerId = ""/);
+  assert.match(script, /let pendingSteerAccepted = false/);
+  assert.match(script, /function queueSteerConfirmation\(/);
+  assert.match(script, /function sendConfirmedSteerMessage\(/);
+  assert.match(script, /function pendingSteerTimelineItem\(/);
+  assert.match(script, /title: "You \(queued\)"/);
+  assert.match(script, /function itemChildren\(/);
+  assert.match(script, /childRoot\.append\(renderItemSafely\(child\)\)/);
+  assert.match(script, /clearPendingSteerIfDelivered\(message\.snapshot\);\s*render\(message\.snapshot\);/);
+  assert.match(script, /function clearPendingSteerIfDelivered\(/);
+  assert.match(script, /function clearPendingSteerState\(/);
+  assert.match(script, /function hasDeliveredPendingSteer\(/);
+  assert.doesNotMatch(script, /function pendingSteerTimelineItem\([\s\S]*?if \(hasDeliveredPendingSteer/);
+  assert.match(script, /type: "turn\.steerPending"/);
+  assert.match(script, /if \(workItems\.length > 0 && shouldOpenWorkLog\(workItems\)\)[\s\S]*if \(pendingSteerItem !== undefined\)/);
+  assert.match(script, /function syncSendButtonMode\(/);
+  assert.match(script, /promptInput\.addEventListener\("input"/);
+  assert.match(script, /clearPromptInput\(\);\s*renderSubmission\(currentSubmission\);/s);
+  assert.match(script, /renderSteerConfirmation\(\);/);
+  assert.match(script, /function shouldOpenWorkLog\(/);
   assert.match(
     script,
     /promptInput\.placeholder = busy \? "Steer the current turn\.\.\." : "Ask ProleCoder"/,

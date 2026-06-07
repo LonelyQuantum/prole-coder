@@ -832,6 +832,7 @@ fn turn_loop_error_json_rpc_code(error: &AgentTurnLoopError) -> i64 {
         AgentTurnLoopError::Reasoning(_)
         | AgentTurnLoopError::Provider(_)
         | AgentTurnLoopError::ProviderStreamInterrupted { .. }
+        | AgentTurnLoopError::ProviderIdleTimeout { .. }
         | AgentTurnLoopError::ProviderStreamEndedWithoutCompletion
         | AgentTurnLoopError::ProviderCompletedMultipleTimes
         | AgentTurnLoopError::ProviderEventAfterCompletion

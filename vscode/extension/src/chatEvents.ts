@@ -5,6 +5,20 @@ import type { AgentEventEnvelope } from "@prole-coder/protocol" with {
 const TIMELINE_DISPLAY_TEXT_LIMIT = 1200;
 const TIMELINE_COMPACT_JSON_LIMIT = 800;
 const TIMELINE_TRUNCATED_NOTICE = "\n[truncated for sidebar; see Output or run logs for full text]";
+// Keep enough process events for long real-world turns while treating run log replay
+// as the durable source. User, assistant, and terminal items are never counted here.
+const DEFAULT_TIMELINE_PROCESS_ITEM_LIMIT = 1200;
+// Dedicated read-only tools are folded out of Activity summaries. Shell remains
+// counted as a command because even read-only shell calls are explicit process work.
+const TRIVIAL_WORK_TOOL_NAMES = new Set([
+  "git_diff",
+  "git_status",
+  "lsp_diagnostics",
+  "plan_update",
+  "read_file",
+  "search",
+  "workspace_manifest",
+]);
 
 export type ChatTimelineKind =
   | "assistant"
@@ -35,6 +49,11 @@ export interface ChatTimelineItem {
   readonly defaultCollapsed?: boolean;
   readonly workGroupId?: string;
   readonly workGroupTitle?: string;
+  readonly changedFileCount?: number;
+  readonly commandCount?: number;
+  readonly toolName?: string;
+  readonly steerId?: string;
+  readonly children?: readonly ChatTimelineItem[];
 }
 
 export interface ChatTimelineSnapshot {
@@ -61,7 +80,7 @@ export class ChatEventTimeline {
   private latestStatus: string | undefined;
 
   constructor(options: ChatEventTimelineOptions = {}) {
-    this.maxItems = options.maxItems ?? 300;
+    this.maxItems = options.maxItems ?? DEFAULT_TIMELINE_PROCESS_ITEM_LIMIT;
   }
 
   append(event: AgentEventEnvelope): ChatTimelineSnapshot {
@@ -78,6 +97,9 @@ export class ChatEventTimeline {
       const item = createTimelineItem(event);
       this.items.push(item);
       this.latestStatus = latestStatusFor(item);
+      if (breaksAssistantSegment(event.type)) {
+        this.assistantItemsByTurn.delete(assistantKey(event));
+      }
       this.trimItems();
     }
 
@@ -144,21 +166,27 @@ export class ChatEventTimeline {
   }
 
   private trimItems(): void {
-    if (this.items.length <= this.maxItems) {
+    let discardableCount = 0;
+    for (const item of this.items) {
+      if (isDiscardableTimelineItem(item)) {
+        discardableCount += 1;
+      }
+    }
+
+    if (discardableCount <= this.maxItems) {
       return;
     }
 
-    this.items.splice(0, this.items.length - this.maxItems);
-    this.rebuildAssistantIndex();
-  }
-
-  private rebuildAssistantIndex(): void {
-    this.assistantItemsByTurn.clear();
-    for (const item of this.items) {
-      if (item.kind === "assistant") {
-        this.assistantItemsByTurn.set(`${item.runId}:${item.turnId ?? ""}`, item.id);
+    for (let index = 0; index < this.items.length && discardableCount > this.maxItems;) {
+      const item = this.items[index];
+      if (item !== undefined && isDiscardableTimelineItem(item)) {
+        this.items.splice(index, 1);
+        discardableCount -= 1;
+        continue;
       }
+      index += 1;
     }
+
   }
 }
 
@@ -202,14 +230,17 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         title: "You",
         body: textField(payload, "userTask") ?? textField(payload, "prompt") ?? compactJson(event.payload),
       };
-    case "turn.steered":
+    case "turn.steered": {
+      const steerId = textField(payload, "steerId");
       return {
         ...base,
         kind: "user",
         tone: "neutral",
         title: "You",
         body: textField(payload, "message") ?? compactJson(event.payload),
+        ...(steerId === undefined ? {} : { steerId }),
       };
+    }
     case "context.built":
       return {
         ...base,
@@ -263,6 +294,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         body: joinParts([
           label("Iteration", valueText(payload, "iteration")),
           label("Reason", displayTextField(payload, "reason")),
+          label("Timeout", suffix(valueText(payload, "timeoutMs"), "ms")),
           label("Retries remaining", valueText(payload, "retriesRemaining")),
           label("Partial content", suffix(valueText(payload, "partialContentChars"), " chars")),
           displayTextField(payload, "message"),
@@ -275,6 +307,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "tool",
         tone: "neutral",
         title: `Tool requested: ${toolName(payload)}`,
+        toolName: toolName(payload),
         ...toolWorkGroup(event, payload),
         body: joinParts([
           label("Risk", displayTextField(payload, "risk")),
@@ -289,6 +322,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "approval",
         tone: "warning",
         title: `Approval required: ${textField(payload, "toolName") ?? "tool"}`,
+        toolName: textField(payload, "toolName") ?? "tool",
         ...toolWorkGroup(event, payload),
         body: joinParts([
           displayTextField(payload, "title"),
@@ -321,17 +355,24 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "tool",
         tone: "running",
         title: `Tool started: ${toolName(payload)}`,
+        toolName: toolName(payload),
         ...toolWorkGroup(event, payload),
         body: label("Call", textField(payload, "toolCallId")),
         defaultCollapsed: true,
       };
     case "tool.completed": {
       const status = textField(payload, "status");
+      const completedToolName = toolName(payload);
+      const changedFileCount =
+        completedToolName === "apply_patch" && (status === "ok" || status === "success")
+          ? nestedArrayCount(payload, "result", "files")
+          : undefined;
       return {
         ...base,
         kind: "tool",
         tone: status === "ok" || status === "success" ? "success" : "warning",
-        title: `Tool completed: ${toolName(payload)}`,
+        title: `Tool completed: ${completedToolName}`,
+        toolName: completedToolName,
         ...toolWorkGroup(event, payload),
         body: joinParts([
           label("Status", status),
@@ -339,6 +380,8 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
           label("Files", displayNestedValueText(payload, "result", "files")),
         ]),
         defaultCollapsed: true,
+        ...(changedFileCount === undefined ? {} : { changedFileCount }),
+        ...(completedToolName === "shell" ? { commandCount: 1 } : {}),
       };
     }
     case "run.completed":
@@ -391,6 +434,8 @@ export function presentTimelineItems(
   const hasAssistantMessage = items.some((item) => item.kind === "assistant");
   const visibleItems: ChatTimelineItem[] = [];
   const workItems: ChatTimelineItem[] = [];
+  let hasEmittedAssistant = false;
+  let summaryStats = emptyWorkSummaryStats();
 
   for (const item of items) {
     if (supersededItemIds.has(item.id)) {
@@ -398,12 +443,25 @@ export function presentTimelineItems(
     }
     if (isWorkLogItem(item, hasAssistantMessage)) {
       workItems.push(item);
+      summaryStats = collectWorkSummaryStats(summaryStats, item);
     } else {
+      if (hasEmittedAssistant && hasWorkSummaryStats(summaryStats)) {
+        visibleItems.push(workSummaryItem(summaryStats, item));
+        summaryStats = emptyWorkSummaryStats();
+      } else if (!hasEmittedAssistant && item.kind === "assistant") {
+        summaryStats = emptyWorkSummaryStats();
+      }
       visibleItems.push(item);
+      if (item.kind === "assistant") {
+        hasEmittedAssistant = true;
+      }
     }
   }
 
-  return { visibleItems, workItems };
+  return {
+    visibleItems: collapseCompletedRunIntermediates(visibleItems, items, supersededItemIds),
+    workItems,
+  };
 }
 
 export function isWorkLogItem(item: ChatTimelineItem, hasAssistantMessage = false): boolean {
@@ -422,8 +480,107 @@ export function isWorkLogItem(item: ChatTimelineItem, hasAssistantMessage = fals
   return true;
 }
 
+export function isPersistentTimelineItem(item: ChatTimelineItem): boolean {
+  return item.kind === "assistant" || item.kind === "terminal" || item.kind === "user";
+}
+
+function isDiscardableTimelineItem(item: ChatTimelineItem): boolean {
+  return !isPersistentTimelineItem(item);
+}
+
 function assistantKey(event: AgentEventEnvelope): string {
   return `${event.runId}:${event.turnId ?? ""}`;
+}
+
+function breaksAssistantSegment(type: string): boolean {
+  return type === "turn.steered" || type.startsWith("tool.");
+}
+
+function collapseCompletedRunIntermediates(
+  visibleItems: readonly ChatTimelineItem[],
+  sourceItems: readonly ChatTimelineItem[],
+  supersededItemIds: ReadonlySet<string>,
+): readonly ChatTimelineItem[] {
+  const completed = sourceItems.some(
+    (item) => item.type === "run.completed" && supersededItemIds.has(item.id) !== true,
+  );
+  if (!completed) {
+    return visibleItems;
+  }
+
+  let finalAssistantIndex = -1;
+  for (let index = visibleItems.length - 1; index >= 0; index -= 1) {
+    if (visibleItems[index]?.kind === "assistant") {
+      finalAssistantIndex = index;
+      break;
+    }
+  }
+  if (finalAssistantIndex <= 0) {
+    return visibleItems;
+  }
+
+  const collapsedBeforeFinal = collapseCompletedIntermediateItems(visibleItems.slice(0, finalAssistantIndex));
+  if (collapsedBeforeFinal === undefined) {
+    return visibleItems;
+  }
+
+  return [...collapsedBeforeFinal, ...visibleItems.slice(finalAssistantIndex)];
+}
+
+function collapseCompletedIntermediateItems(items: readonly ChatTimelineItem[]): readonly ChatTimelineItem[] | undefined {
+  const collapsedItems: ChatTimelineItem[] = [];
+  let current: ChatTimelineItem[] = [];
+  let collapsedGroupCount = 0;
+
+  for (const item of items) {
+    if (item.kind === "user") {
+      if (current.length > 0) {
+        collapsedItems.push(completedIntermediateGroupItem(current));
+        collapsedGroupCount += 1;
+        current = [];
+      }
+      collapsedItems.push(item);
+      continue;
+    }
+    current.push(item);
+  }
+
+  if (current.length > 0) {
+    collapsedItems.push(completedIntermediateGroupItem(current));
+    collapsedGroupCount += 1;
+  }
+  return collapsedGroupCount === 0 ? undefined : collapsedItems;
+}
+
+function completedIntermediateGroupItem(items: readonly ChatTimelineItem[]): ChatTimelineItem {
+  const first = items[0];
+  const last = items[items.length - 1] ?? first;
+  const runId = first?.runId ?? "run";
+  const turnId = first?.turnId;
+  return {
+    id: `completed-intermediate:${runId}:${turnId ?? "run"}:${first?.seq ?? 0}-${last?.lastSeq ?? last?.seq ?? 0}`,
+    seq: first?.seq ?? 0,
+    lastSeq: last?.lastSeq ?? last?.seq ?? first?.seq ?? 0,
+    time: last?.time ?? first?.time ?? "",
+    type: "run.intermediate",
+    runId,
+    ...(turnId === undefined ? {} : { turnId }),
+    kind: "run",
+    tone: "neutral",
+    title: "Earlier activity",
+    body: completedIntermediateGroupBody(items),
+    defaultCollapsed: true,
+    children: items.map((item) => ({ ...item })),
+  };
+}
+
+function completedIntermediateGroupBody(items: readonly ChatTimelineItem[]): string {
+  const first = items[0];
+  const leadingText = truncate(firstLine(first?.body ?? first?.title ?? ""), 160);
+  return joinParts([
+    `Collapsed ${countWithNoun(items.length, "timeline item", "timeline items")}.`,
+    leadingText === undefined ? undefined : `Starts with: ${leadingText}`,
+  ]) ?? "";
 }
 
 function supersededItemIdFromEvent(event: AgentEventEnvelope): string | undefined {
@@ -467,6 +624,96 @@ function approvalTone(decision: string): ChatTimelineTone {
 
 function toolName(payload: Record<string, unknown> | undefined): string {
   return textField(payload, "name") ?? textField(payload, "toolName") ?? "tool";
+}
+
+interface WorkSummaryStats {
+  readonly runId?: string;
+  readonly turnId?: string;
+  readonly firstSeq?: number;
+  readonly lastSeq?: number;
+  readonly time?: string;
+  readonly changedFileCount: number;
+  readonly commandCount: number;
+}
+
+function emptyWorkSummaryStats(): WorkSummaryStats {
+  return {
+    changedFileCount: 0,
+    commandCount: 0,
+  };
+}
+
+function collectWorkSummaryStats(stats: WorkSummaryStats, item: ChatTimelineItem): WorkSummaryStats {
+  if (!isSummarizableWorkItem(item)) {
+    return stats;
+  }
+
+  const changedFileCount = stats.changedFileCount + positiveInteger(item.changedFileCount);
+  const commandCount = stats.commandCount + positiveInteger(item.commandCount);
+  if (changedFileCount === stats.changedFileCount && commandCount === stats.commandCount) {
+    return stats;
+  }
+
+  const turnId = stats.turnId ?? item.turnId;
+  return {
+    runId: stats.runId ?? item.runId,
+    ...(turnId === undefined ? {} : { turnId }),
+    firstSeq: stats.firstSeq ?? item.seq,
+    lastSeq: item.lastSeq,
+    time: item.time,
+    changedFileCount,
+    commandCount,
+  };
+}
+
+function isSummarizableWorkItem(item: ChatTimelineItem): boolean {
+  if (item.type !== "tool.completed") {
+    return false;
+  }
+
+  const name = item.toolName ?? "";
+  return TRIVIAL_WORK_TOOL_NAMES.has(name) !== true;
+}
+
+function hasWorkSummaryStats(stats: WorkSummaryStats): boolean {
+  return stats.changedFileCount > 0 || stats.commandCount > 0;
+}
+
+function workSummaryItem(stats: WorkSummaryStats, nextItem: ChatTimelineItem): ChatTimelineItem {
+  const firstSeq = stats.firstSeq ?? nextItem.seq;
+  const lastSeq = stats.lastSeq ?? firstSeq;
+  const runId = stats.runId ?? nextItem.runId;
+  const turnId = stats.turnId ?? nextItem.turnId;
+  return {
+    id: `work-summary:${runId}:${stats.turnId ?? nextItem.turnId ?? "run"}:${firstSeq}-${lastSeq}`,
+    seq: firstSeq,
+    lastSeq,
+    time: stats.time ?? nextItem.time,
+    type: "work.summary",
+    runId,
+    ...(turnId === undefined ? {} : { turnId }),
+    kind: "run",
+    tone: "neutral",
+    title: "Activity",
+    body: workSummaryText(stats),
+  };
+}
+
+function workSummaryText(stats: WorkSummaryStats): string {
+  return `Modified ${countWithNoun(stats.changedFileCount, "file", "files")}, ran ${countWithNoun(
+    stats.commandCount,
+    "command",
+    "commands",
+  )}.`;
+}
+
+function countWithNoun(count: number, singular: string, plural: string): string {
+  const value = positiveInteger(count);
+  return `${value} ${value === 1 ? singular : plural}`;
+}
+
+function positiveInteger(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
 }
 
 function providerWorkGroup(
@@ -535,8 +782,21 @@ function displayNestedValueText(
 }
 
 function arrayCount(payload: Record<string, unknown> | undefined, key: string): string | undefined {
+  const count = arrayCountNumber(payload, key);
+  return count === undefined ? undefined : count.toString();
+}
+
+function arrayCountNumber(payload: Record<string, unknown> | undefined, key: string): number | undefined {
   const value = payload?.[key];
-  return Array.isArray(value) ? value.length.toString() : undefined;
+  return Array.isArray(value) ? value.length : undefined;
+}
+
+function nestedArrayCount(
+  payload: Record<string, unknown> | undefined,
+  outer: string,
+  inner: string,
+): number | undefined {
+  return arrayCountNumber(record(payload?.[outer]), inner);
 }
 
 function arrayText(payload: Record<string, unknown> | undefined, key: string): string | undefined {
@@ -592,4 +852,13 @@ function truncate(value: string | undefined, maxLength: number): string | undefi
 
   const sliceLength = Math.max(0, maxLength - TIMELINE_TRUNCATED_NOTICE.length);
   return `${value.slice(0, sliceLength)}${TIMELINE_TRUNCATED_NOTICE}`;
+}
+
+function firstLine(value: string): string {
+  return (
+    value
+      .split(/\r?\n/u)
+      .map((part) => part.trim())
+      .find((part) => part.length > 0) ?? ""
+  );
 }
