@@ -265,8 +265,8 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       this.contextViz,
       this.pendingApprovalSnapshot(),
     );
-    this.postSnapshot();
     this.postSubmission();
+    this.postSnapshot();
     this.postRuns();
     this.postContext();
     this.postApproval();
@@ -602,11 +602,11 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     this.submissionPostQueued = false;
     this.contextPostQueued = false;
 
-    if (postSnapshot) {
-      this.postSnapshot();
-    }
     if (postSubmission) {
       this.postSubmission();
+    }
+    if (postSnapshot) {
+      this.postSnapshot();
     }
     if (postContext) {
       this.postContext();
@@ -651,8 +651,8 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     }
     this.webviewReadyWaiters.clear();
 
-    this.postSnapshot();
     this.postSubmission();
+    this.postSnapshot();
     this.postRuns();
     this.postContext();
     this.postApproval();
@@ -1767,6 +1767,8 @@ function renderChatViewHtml(
     .approval-card {
       display: grid;
       gap: 8px;
+      max-height: min(70vh, 32rem);
+      overflow: auto;
       padding: 8px;
       background: var(--vscode-editorWidget-background);
       border: 1px solid var(--vscode-editorWidget-border);
@@ -1794,14 +1796,44 @@ function renderChatViewHtml(
       font-size: 11px;
     }
 
-    .approval-detail,
-    .approval-meta,
-    .approval-output {
+    .approval-detail {
       color: var(--vscode-descriptionForeground);
       font-size: 12px;
       line-height: 1.4;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+    }
+
+    .approval-section {
+      display: grid;
+      gap: 3px;
+      padding: 6px;
+      background: var(--vscode-input-background);
+      border: 1px solid var(--vscode-input-border, transparent);
+    }
+
+    .approval-section-label {
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      line-height: 1.2;
+    }
+
+    .approval-section-body {
+      color: var(--vscode-foreground);
+      font-size: 12px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    /* Keep command text distinct from scope/output summaries for fast approval scanning. */
+    .approval-command .approval-section-body {
+      font-family: var(--vscode-editor-font-family);
+    }
+
+    .approval-meta .approval-section-body,
+    .approval-output .approval-section-body {
+      color: var(--vscode-descriptionForeground);
     }
 
     .approval-hunks {
@@ -1904,7 +1936,7 @@ function renderChatViewHtml(
     .composer-row {
       display: flex;
       align-items: center;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
       gap: 8px;
       min-width: 0;
     }
@@ -1926,15 +1958,20 @@ function renderChatViewHtml(
       font: var(--vscode-font-size) var(--vscode-font-family);
     }
 
+    .mode[hidden] {
+      display: none !important;
+    }
+
     .send,
     .cancel {
       flex: 0 0 auto;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-width: 34px;
+      width: 28px;
+      min-width: 28px;
       height: 28px;
-      padding: 0 10px;
+      padding: 0;
       color: var(--vscode-button-secondaryForeground);
       background: var(--vscode-button-secondaryBackground);
       border: 0;
@@ -1983,11 +2020,12 @@ function renderChatViewHtml(
       display: block;
       width: 16px;
       height: 16px;
+      flex: 0 0 16px;
       pointer-events: none;
     }
 
     .send-icon[hidden] {
-      display: none;
+      display: none !important;
     }
 
     .cancel:hover:enabled {
@@ -2007,7 +2045,7 @@ function renderChatViewHtml(
 
     .submission {
       min-width: 0;
-      flex: 1 1 100%;
+      flex: 1 1 auto;
       color: var(--vscode-descriptionForeground);
       display: flex;
       align-items: center;
@@ -2853,19 +2891,17 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       detail.textContent = approvalDetailText(approval);
       card.append(detail);
 
+      if (typeof approval.command === "string" && approval.command.length > 0) {
+        card.append(renderApprovalSection("Command", approval.command, "approval-command"));
+      }
+
       const meta = approvalMetaText(approval);
       if (meta.length > 0) {
-        const metaRoot = document.createElement("div");
-        metaRoot.className = "approval-meta";
-        metaRoot.textContent = meta;
-        card.append(metaRoot);
+        card.append(renderApprovalSection("Scope", meta, "approval-meta"));
       }
 
       if (typeof approval.outputSummary === "string" && approval.outputSummary.length > 0) {
-        const output = document.createElement("div");
-        output.className = "approval-output";
-        output.textContent = "Output: " + approval.outputSummary;
-        card.append(output);
+        card.append(renderApprovalSection("Previous output", approval.outputSummary, "approval-output"));
       }
 
       const hunkInputs = [];
@@ -2936,6 +2972,19 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       return card;
     }
 
+    function renderApprovalSection(label, body, className) {
+      const section = document.createElement("div");
+      section.classList.add("approval-section", className);
+      const sectionLabel = document.createElement("div");
+      sectionLabel.className = "approval-section-label";
+      sectionLabel.textContent = label;
+      const sectionBody = document.createElement("div");
+      sectionBody.className = "approval-section-body";
+      sectionBody.textContent = body;
+      section.append(sectionLabel, sectionBody);
+      return section;
+    }
+
     function markApprovalResolved(approvalId) {
       if (typeof approvalId === "string" && approvalId.length > 0) {
         resolvedApprovalIds.add(approvalId);
@@ -2955,9 +3004,6 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
 
     function approvalMetaText(approval) {
       const lines = [];
-      if (typeof approval.command === "string" && approval.command.length > 0) {
-        lines.push("Command: " + approval.command);
-      }
       if (typeof approval.cwd === "string" && approval.cwd.length > 0) {
         lines.push("Cwd: " + approval.cwd);
       }
@@ -2989,6 +3035,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     }
 
     function renderSubmission(submission) {
+      const wasBusy = currentSubmission && currentSubmission.busy === true;
       const state = submission && typeof submission === "object" ? submission : initialSubmission;
       currentSubmission = state;
       const status = typeof state.status === "string" ? state.status : "idle";
@@ -3014,6 +3061,9 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       }
       syncConversationChrome();
       syncWorkLogSummary();
+      if (wasBusy === true && busy !== true) {
+        render(currentSnapshot);
+      }
     }
 
     function renderSubmissionAction(action) {
@@ -3050,13 +3100,10 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     function setComposerBusy(busy, cancelable, runId, canceling) {
       promptInput.disabled = busy;
       modeInput.disabled = busy;
+      modeInput.hidden = busy === true;
       sendButton.disabled = busy && canceling === true;
-      if (sendSubmitIcon) {
-        sendSubmitIcon.hidden = busy;
-      }
-      if (sendStopIcon) {
-        sendStopIcon.hidden = !busy;
-      }
+      setSendIconVisible(sendSubmitIcon, busy !== true);
+      setSendIconVisible(sendStopIcon, busy === true);
       sendButton.title = busy ? "Stop current turn" : "Send message";
       sendButton.setAttribute("aria-label", busy ? "Stop current turn" : "Send message");
       sendButton.classList.toggle("stop", busy);
@@ -3065,6 +3112,14 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       cancelButton.disabled = true;
       cancelButton.hidden = true;
       syncMessageEditButtons(busy);
+    }
+
+    function setSendIconVisible(icon, visible) {
+      if (!icon) {
+        return;
+      }
+      icon.toggleAttribute("hidden", visible !== true);
+      icon.setAttribute("aria-hidden", "true");
     }
 
     function syncMessageEditButtons(disabled) {
@@ -3413,6 +3468,9 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       if (!item || typeof item !== "object") {
         return false;
       }
+      if (item.kind === "assistant" && currentSubmission && currentSubmission.busy === true) {
+        return false;
+      }
       if (item.kind === "assistant" || item.kind === "user") {
         return true;
       }
@@ -3517,6 +3575,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
           .filter((element) => !isDisplayNone(element))
           .map((element) => element.classList.contains("send-icon-stop") ? "stop" : "submit"),
         sendDisabled: sendButton.disabled,
+        modeHidden: modeInput.hidden === true,
         cancelDisabled: cancelButton.disabled,
         messageEditButtons: textContents(".message-edit"),
         messageEditDisabled: Array.from(document.querySelectorAll(".message-edit")).map((element) => element.disabled === true),

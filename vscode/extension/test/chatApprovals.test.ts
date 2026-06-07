@@ -17,6 +17,38 @@ test("chat approval snapshots expose request details without mutating hunks", ()
   assert.deepEqual(snapshot.hunks, request.hunks);
 });
 
+test("chat approval snapshots truncate long display fields without mutating the request", () => {
+  const command = `Set-Content -Path script.py -Value '${"print(1)\\n".repeat(400)}'`;
+  const outputSummary = "previous output\n".repeat(300);
+  const request = sampleApprovalRequest({ command, outputSummary }, false);
+
+  const snapshot = chatApprovalSnapshotFromRequest(request);
+
+  assert.equal(request.command, command);
+  assert.equal(request.outputSummary, outputSummary);
+  assert.ok(snapshot.command);
+  assert.ok(snapshot.outputSummary);
+  assert.ok(snapshot.command.length < command.length);
+  assert.ok(snapshot.outputSummary.length < outputSummary.length);
+  assert.ok(snapshot.command.includes("[truncated for sidebar"));
+  assert.ok(snapshot.outputSummary.includes("[truncated for sidebar"));
+});
+
+test("chat approval snapshots omit duplicated shell command details", () => {
+  const command = `@'\nprint("hello")\n'@ | Set-Content -LiteralPath script.py`;
+  const request = sampleApprovalRequest({
+    toolName: "shell",
+    title: "Run shell command",
+    detail: `Execute \`${command}\``,
+    command,
+  });
+
+  const snapshot = chatApprovalSnapshotFromRequest(request);
+
+  assert.equal(snapshot.detail, "");
+  assert.equal(snapshot.command, command);
+});
+
 test("chat approval messages map approve and reject decisions", () => {
   const request = sampleApprovalRequest({}, false);
 

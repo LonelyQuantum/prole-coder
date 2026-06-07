@@ -153,6 +153,7 @@ async function exerciseChatCancel(): Promise<void> {
   assert.equal(sendingProbe.snapshot.sendIsStop, true);
   assert.deepEqual(sendingProbe.snapshot.sendVisibleIcons, ["stop"]);
   assert.equal(sendingProbe.snapshot.sendDisabled, false);
+  assert.equal(sendingProbe.snapshot.modeHidden, true);
   assert.equal(sendingProbe.snapshot.cancelDisabled, true);
   await chatProbe({ type: "click", selector: "#send" });
 
@@ -292,6 +293,7 @@ async function exerciseChatKeyboardSubmit(): Promise<void> {
   assert.equal(submitted.snapshot.sendLabel, STOP_LABEL);
   assert.deepEqual(submitted.snapshot.sendVisibleIcons, ["stop"]);
   assert.equal(submitted.snapshot.sendDisabled, false);
+  assert.equal(submitted.snapshot.modeHidden, true);
 
   const sentTurn = await waitFor("logged keyboard sendTurn", async () =>
     logEntry((entry) => entry.method === "agent.sendTurn" && entry.params?.message === "keyboard integration turn"),
@@ -345,6 +347,7 @@ async function exerciseChatKeyboardSubmit(): Promise<void> {
   assert.equal(editable.sendTitle, SEND_LABEL);
   assert.equal(editable.sendIsStop, false);
   assert.deepEqual(editable.sendVisibleIcons, ["submit"]);
+  assert.equal(editable.modeHidden, false);
   assert.ok(editable.messageEditButtons.includes("Edit"));
   assert.ok(editable.messageEditDisabled.every((disabled) => disabled === false));
 
@@ -577,6 +580,7 @@ interface WebviewProbeSnapshot {
   readonly sendIsStop: boolean;
   readonly sendVisibleIcons: readonly string[];
   readonly sendDisabled: boolean;
+  readonly modeHidden: boolean;
   readonly cancelDisabled: boolean;
   readonly messageEditButtons: readonly string[];
   readonly messageEditDisabled: readonly boolean[];

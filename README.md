@@ -678,7 +678,7 @@ extension.ts
 - [x] P5-13：结构化 provider 配置错误码与恢复动作。
 - [x] P5-14：真实试用回归修复包：收敛 Sidebar 对话视图、内联确认、Work log 折叠、Markdown 渲染、webview 渲染诊断、provider/shell 稳定性和 composer / Settings 入口回归；具体子项与完成口径见 `docs/phase-tasks.md`。
 - [x] P5-15：真实试用 UX backlog 第二批收敛：补齐 Sidebar webview/Markdown/patch/resume/edit resend/output length 等真实试用回归，并把 Markdown renderer 模块化测试与 edit resend 后端 supersede 语义纳入协议和 run log。
-- [ ] P5-16：真实试用 UX backlog 持续收敛：已完成模型回合预算 continuation approval 和 Provider Key/Model 图标按钮同排展示；后续补齐 Chat run mode 自动推断并隐藏默认 `edit` / `ask` / `plan` / `review` 下拉框；继续收集并拆分真实 VS Code 插件试用中的对话、审批、Runs、Key/Model、Output 日志、上下文压缩、Markdown 兼容性、输出长度截断和大工具参数稳定性问题。
+- [ ] P5-16：真实试用 UX backlog 持续收敛：已完成模型回合预算 continuation approval 和 Provider Key/Model 图标按钮同排展示；后续补齐 Chat run mode 自动推断并隐藏默认 `edit` / `ask` / `plan` / `review` 下拉框，并收敛 Windows PowerShell 验证命令规则，避免模型给测试命令追加 `2>&1` 后因 CLIXML/progress 噪声造成假失败；继续收集并拆分真实 VS Code 插件试用中的对话、审批、Runs、Key/Model、Output 日志、上下文压缩、Markdown 兼容性、输出长度截断和大工具参数稳定性问题。
 
 验收标准：
 

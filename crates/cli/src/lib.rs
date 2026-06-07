@@ -831,6 +831,7 @@ fn turn_loop_error_json_rpc_code(error: &AgentTurnLoopError) -> i64 {
         ) => RPC_INTERNAL_INVARIANT,
         AgentTurnLoopError::Reasoning(_)
         | AgentTurnLoopError::Provider(_)
+        | AgentTurnLoopError::ProviderStreamInterrupted { .. }
         | AgentTurnLoopError::ProviderStreamEndedWithoutCompletion
         | AgentTurnLoopError::ProviderCompletedMultipleTimes
         | AgentTurnLoopError::ProviderEventAfterCompletion
@@ -1141,7 +1142,7 @@ impl TurnProvider for DeepSeekTurnProvider {
                 .adapter
                 .create_chat_completion_stream(chat_request)
                 .await
-                .map_err(|error| TurnProviderError::new(error.to_string()))?;
+                .map_err(turn_provider_error_from_deepseek)?;
 
             Ok(deepseek_chat_stream_to_turn_provider_stream(
                 stream,
@@ -1169,7 +1170,7 @@ fn deepseek_chat_stream_to_turn_provider_stream(
             if cancellation_token.is_canceled() {
                 Err(TurnProviderError::new(cancellation_token.cancellation_reason()))?;
             }
-            match event.map_err(|error| TurnProviderError::new(error.to_string()))? {
+            match event.map_err(turn_provider_error_from_deepseek)? {
                 StreamEvent::Chunk(chunk) => {
                     chunk_count += 1;
                     model = Some(chunk.model.clone());
@@ -1287,6 +1288,15 @@ fn turn_provider_usage_from_deepseek(usage: Usage) -> TurnProviderUsage {
         reasoning_tokens: usage
             .completion_tokens_details
             .and_then(|details| details.reasoning_tokens),
+    }
+}
+
+fn turn_provider_error_from_deepseek(error: DeepSeekApiError) -> TurnProviderError {
+    let message = error.to_string();
+    if error.is_transient_transport_error() {
+        TurnProviderError::transient(message)
+    } else {
+        TurnProviderError::new(message)
     }
 }
 
@@ -1608,7 +1618,7 @@ mod tests {
     use super::{
         CliCommand, CliRpcProviderFactory, FixtureKind, ProviderKind, RunCommand, ThinkingKind,
         deepseek_chat_stream_to_turn_provider_stream, deepseek_configuration_rpc_error, run_cli,
-        run_cli_with_input, turn_loop_error_json_rpc_code,
+        run_cli_with_input, turn_loop_error_json_rpc_code, turn_provider_error_from_deepseek,
     };
 
     #[test]
@@ -2180,6 +2190,16 @@ mod tests {
         assert_eq!(data["configurationError"], "missingApiKey");
         assert_eq!(data["recoverableAction"]["kind"], "configureDeepSeekApiKey");
         assert_eq!(data["recoverableAction"]["label"], "Configure API Key");
+    }
+
+    #[test]
+    fn deepseek_transient_stream_error_maps_to_transient_provider_error() {
+        let error = turn_provider_error_from_deepseek(DeepSeekApiError::IncompleteStreamEvent {
+            buffered_bytes: 42,
+        });
+
+        assert!(error.is_transient());
+        assert!(error.to_string().contains("incomplete SSE event"));
     }
 
     #[test]

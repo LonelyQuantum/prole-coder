@@ -5,6 +5,9 @@ import {
   type ApprovalPromptRequest,
 } from "./commands";
 
+const APPROVAL_DISPLAY_TEXT_LIMIT = 1200;
+const APPROVAL_TRUNCATED_NOTICE = "\n[truncated for sidebar; see Output or run logs for full text]";
+
 export interface ChatApprovalSnapshot {
   readonly approvalId: string;
   readonly toolCallId: string;
@@ -31,12 +34,14 @@ export function chatApprovalSnapshotFromRequest(
     toolCallId: request.toolCallId,
     toolName: request.toolName,
     risk: request.risk,
-    title: request.title,
-    detail: request.detail,
+    title: truncateDisplayText(request.title),
+    detail: approvalDetailForSnapshot(request),
     persistable: request.persistable,
-    ...(request.command === undefined ? {} : { command: request.command }),
+    ...(request.command === undefined ? {} : { command: truncateDisplayText(request.command) }),
     ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
-    ...(request.outputSummary === undefined ? {} : { outputSummary: request.outputSummary }),
+    ...(request.outputSummary === undefined
+      ? {}
+      : { outputSummary: truncateDisplayText(request.outputSummary) }),
     ...(request.paths === undefined ? {} : { paths: request.paths }),
     ...(request.riskReasons === undefined ? {} : { riskReasons: request.riskReasons }),
     ...(request.hunks === undefined
@@ -45,6 +50,32 @@ export function chatApprovalSnapshotFromRequest(
           hunks: request.hunks.map((hunk) => ({ ...hunk })),
         }),
   };
+}
+
+function approvalDetailForSnapshot(request: ApprovalPromptRequest): string {
+  if (isDuplicatedCommandDetail(request.detail, request.command)) {
+    return "";
+  }
+
+  return truncateDisplayText(request.detail);
+}
+
+function isDuplicatedCommandDetail(detail: string, command: string | undefined): boolean {
+  if (command === undefined || command.length === 0) {
+    return false;
+  }
+
+  const match = detail.trim().match(/^Execute `([\s\S]*)`$/);
+  return match?.[1] === command;
+}
+
+function truncateDisplayText(value: string): string {
+  if (value.length <= APPROVAL_DISPLAY_TEXT_LIMIT) {
+    return value;
+  }
+
+  const sliceLength = Math.max(0, APPROVAL_DISPLAY_TEXT_LIMIT - APPROVAL_TRUNCATED_NOTICE.length);
+  return `${value.slice(0, sliceLength)}${APPROVAL_TRUNCATED_NOTICE}`;
 }
 
 export function approvalDecisionFromWebviewMessage(

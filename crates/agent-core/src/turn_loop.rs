@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -39,6 +39,12 @@ use crate::{
 const DEFAULT_MAX_ATTACHMENTS: usize = 32;
 const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 256 * 1024;
 const DEFAULT_MAX_MODEL_TURNS: usize = 50;
+const DEFAULT_PROVIDER_TRANSIENT_RETRIES: usize = 2;
+const PROVIDER_STREAM_RETRY_PARTIAL_CONTENT_MAX_CHARS: usize = 2_000;
+const PROVIDER_STREAM_RETRY_REASONING_NOTICE: &str = concat!(
+    "The interrupted stream had already produced hidden reasoning before a complete user-facing ",
+    "response arrived; ProleCoder did not replay that hidden reasoning text."
+);
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_LINES: usize = 8;
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 const TOOL_ARGUMENT_DIAGNOSTIC_MAX_BYTES: usize = 128 * 1024;
@@ -58,6 +64,10 @@ const TOOL_CALL_LENGTH_RETRY_INSTRUCTION: &str = concat!(
     "Your previous response ended because the model reached its output length limit while composing a tool call. ",
     "Discard any partial or truncated tool-call arguments from that response. ",
     "If a tool is still needed, issue a fresh complete tool call with valid JSON arguments now; otherwise continue with the task briefly."
+);
+const PROVIDER_STREAM_RETRY_INSTRUCTION: &str = concat!(
+    "The previous provider response stream was interrupted by a transient connection error before ProleCoder received a completed response. ",
+    "Continue the same task from where you left off. Do not repeat completed tool results, and only call tools that are still needed."
 );
 #[cfg(windows)]
 const TOOL_USAGE_INSTRUCTION: &str = concat!(
@@ -227,6 +237,7 @@ where
         let mut tool_results = Vec::new();
         let mut changed_files = Vec::new();
         let mut last_shell_output_summary = None;
+        let mut provider_transient_retries_remaining = self.config.provider_transient_retries;
 
         let mut next_iteration = 1usize;
         loop {
@@ -246,7 +257,7 @@ where
                     }),
                 )?;
 
-                let provider_turn = self
+                let provider_turn = match self
                     .collect_provider_response(
                         TurnProviderRequest {
                             iteration,
@@ -258,8 +269,42 @@ where
                         run_log,
                         event_sink,
                     )
-                    .await?;
-                let response = provider_turn.response;
+                    .await
+                {
+                    Ok(provider_turn) => provider_turn,
+                    Err(AgentTurnLoopError::ProviderStreamInterrupted {
+                        source,
+                        partial_content,
+                        partial_reasoning_chars,
+                    }) if provider_transient_retries_remaining > 0 => {
+                        provider_transient_retries_remaining -= 1;
+                        append_turn_event(
+                            run_log,
+                            event_sink,
+                            "provider.retrying",
+                            Some(input.turn_id.clone()),
+                            json!({
+                                "iteration": iteration,
+                                "reason": "transient_stream_error",
+                                "message": source.to_string(),
+                                "partialContentChars": partial_content.chars().count(),
+                                "partialReasoningChars": partial_reasoning_chars,
+                                "retriesRemaining": provider_transient_retries_remaining,
+                            }),
+                        )?;
+                        push_provider_stream_retry_messages(
+                            &mut messages,
+                            &partial_content,
+                            partial_reasoning_chars,
+                        );
+                        continue;
+                    }
+                    Err(AgentTurnLoopError::ProviderStreamInterrupted { source, .. }) => {
+                        return Err(AgentTurnLoopError::Provider(source));
+                    }
+                    Err(error) => return Err(error),
+                };
+                let mut response = provider_turn.response;
 
                 if response.completion.finish_reason == TurnProviderFinishReason::Length {
                     if response.tool_calls.is_empty() {
@@ -271,14 +316,18 @@ where
                     continue;
                 }
 
-                if !response.tool_calls.is_empty()
-                    && self.reasoning.mode() == ReasoningContentMode::ThinkingEnabled
-                    && response
-                        .reasoning_content
-                        .as_deref()
-                        .is_none_or(|reasoning| reasoning.trim().is_empty())
-                {
-                    return Err(AgentTurnLoopError::MissingAssistantReasoningContent);
+                if recover_missing_tool_call_reasoning(&mut response, self.reasoning.mode()) {
+                    append_turn_event(
+                        run_log,
+                        event_sink,
+                        "provider.reasoningRecovered",
+                        Some(input.turn_id.clone()),
+                        json!({
+                            "iteration": iteration,
+                            "reason": "missing_tool_call_reasoning_content",
+                            "toolCallCount": response.tool_calls.len(),
+                        }),
+                    )?;
                 }
 
                 if let Some(content) = response
@@ -374,6 +423,7 @@ where
                 run_log,
                 event_sink,
             )?;
+            provider_transient_retries_remaining = self.config.provider_transient_retries;
         }
     }
 
@@ -391,18 +441,45 @@ where
         let cancellation_token = request.cancellation_token.clone();
         cancellation_token.check()?;
         let started = Instant::now();
-        let mut stream = self
-            .provider
-            .complete_stream(request)
-            .await
-            .map_err(|error| provider_error_or_canceled(error, &cancellation_token))?;
+        let mut stream = match self.provider.complete_stream(request).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                return match provider_error_or_canceled(error, &cancellation_token) {
+                    AgentTurnLoopError::Provider(source) if source.is_transient() => {
+                        Err(AgentTurnLoopError::ProviderStreamInterrupted {
+                            source,
+                            partial_content: String::new(),
+                            partial_reasoning_chars: 0,
+                        })
+                    }
+                    error => Err(error),
+                };
+            }
+        };
         cancellation_token.check()?;
         let mut response = None;
         let mut emitted_content_delta = false;
+        let mut partial_content = String::new();
+        let mut partial_reasoning_chars = 0usize;
 
         while let Some(event) = stream.next().await {
             cancellation_token.check()?;
-            match event.map_err(|error| provider_error_or_canceled(error, &cancellation_token))? {
+            let event = match event {
+                Ok(event) => event,
+                Err(error) => {
+                    return match provider_error_or_canceled(error, &cancellation_token) {
+                        AgentTurnLoopError::Provider(source) if source.is_transient() => {
+                            Err(AgentTurnLoopError::ProviderStreamInterrupted {
+                                source,
+                                partial_content,
+                                partial_reasoning_chars,
+                            })
+                        }
+                        error => Err(error),
+                    };
+                }
+            };
+            match event {
                 TurnProviderEvent::AssistantDelta(delta) => {
                     if response.is_some() {
                         return Err(AgentTurnLoopError::ProviderEventAfterCompletion);
@@ -414,6 +491,7 @@ where
                         .filter(|content| !content.is_empty())
                     {
                         emitted_content_delta = true;
+                        partial_content.push_str(content);
                         append_turn_event(
                             run_log,
                             event_sink,
@@ -425,6 +503,14 @@ where
                                 "stream": true,
                             }),
                         )?;
+                    }
+
+                    if let Some(reasoning_content) = delta
+                        .reasoning_content
+                        .as_deref()
+                        .filter(|reasoning_content| !reasoning_content.is_empty())
+                    {
+                        partial_reasoning_chars += reasoning_content.chars().count();
                     }
                 }
                 TurnProviderEvent::Completed(completed) => {
@@ -761,7 +847,15 @@ where
             }
             ToolName::ApplyPatch => {
                 let args: ApplyPatchArgs = parse_tool_arguments(tool_call, &executable_arguments)?;
-                let approval_hunks = patch_approval_hunks(&args.unified_diff)?;
+                let approval_hunks = match patch_approval_hunks(&args.unified_diff) {
+                    Ok(hunks) => hunks,
+                    Err(error) if is_recoverable_apply_patch_error(&error) => {
+                        return self.execute_failed_apply_patch_tool_call(
+                            tool_call, context, error, run_log, event_sink,
+                        );
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 let approval_scope = self.ensure_approval(
                     definition,
                     &risk_assessment,
@@ -779,7 +873,17 @@ where
                 )?;
                 let args = match approval_scope {
                     ApprovalScope::All => args,
-                    ApprovalScope::Hunks { hunk_ids } => filter_apply_patch_hunks(args, &hunk_ids)?,
+                    ApprovalScope::Hunks { hunk_ids } => {
+                        match filter_apply_patch_hunks(args, &hunk_ids) {
+                            Ok(args) => args,
+                            Err(error) if is_recoverable_apply_patch_error(&error) => {
+                                return self.execute_failed_apply_patch_tool_call(
+                                    tool_call, context, error, run_log, event_sink,
+                                );
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
                 };
                 self.execute_without_approval(
                     tool_call,
@@ -876,6 +980,10 @@ where
                 tool_call_id: tool_call.id.clone(),
                 name: tool_name.to_owned(),
             }),
+            ToolName::ModelTurnBudget => Err(AgentTurnLoopError::UnsupportedTool {
+                tool_call_id: tool_call.id.clone(),
+                name: tool_name.to_owned(),
+            }),
         }
     }
 
@@ -924,6 +1032,30 @@ where
         )?;
 
         Ok(executed)
+    }
+
+    fn execute_failed_apply_patch_tool_call<L>(
+        &self,
+        tool_call: &ChatToolCall,
+        context: ToolCallContext<'_>,
+        error: ToolExecutionError,
+        run_log: &mut L,
+        event_sink: &mut (impl TurnEventSink + ?Sized),
+    ) -> Result<ExecutedToolCall, AgentTurnLoopError>
+    where
+        L: RunLogWriter + ?Sized,
+    {
+        self.execute_without_approval(
+            tool_call,
+            context,
+            error,
+            run_log,
+            event_sink,
+            |_tools, error, _cancellation_token| {
+                let result = failed_apply_patch_result(&error);
+                tool_record(result.status, result.summary.clone(), Vec::new(), &result)
+            },
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1248,6 +1380,85 @@ fn push_tool_call_length_retry_messages(
     messages.push(ChatMessage::user(TOOL_CALL_LENGTH_RETRY_INSTRUCTION));
 }
 
+fn push_provider_stream_retry_messages(
+    messages: &mut Vec<ChatMessage>,
+    partial_content: &str,
+    partial_reasoning_chars: usize,
+) {
+    if let Some(content) = provider_stream_retry_partial_content(partial_content) {
+        messages.push(ChatMessage::assistant(content));
+    }
+    let instruction = if partial_reasoning_chars == 0 {
+        PROVIDER_STREAM_RETRY_INSTRUCTION.to_owned()
+    } else {
+        format!("{PROVIDER_STREAM_RETRY_INSTRUCTION} {PROVIDER_STREAM_RETRY_REASONING_NOTICE}")
+    };
+    messages.push(ChatMessage::user(instruction));
+}
+
+fn provider_stream_retry_partial_content(partial_content: &str) -> Option<String> {
+    let partial_content = partial_content.trim();
+    if partial_content.is_empty() {
+        return None;
+    }
+
+    let char_count = partial_content.chars().count();
+    if char_count <= PROVIDER_STREAM_RETRY_PARTIAL_CONTENT_MAX_CHARS {
+        return Some(partial_content.to_owned());
+    }
+
+    let suffix = partial_content
+        .chars()
+        .rev()
+        .take(PROVIDER_STREAM_RETRY_PARTIAL_CONTENT_MAX_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    Some(format!(
+        "[earlier interrupted assistant text omitted]\n{suffix}"
+    ))
+}
+
+fn recover_missing_tool_call_reasoning(
+    response: &mut TurnProviderResponse,
+    mode: ReasoningContentMode,
+) -> bool {
+    if response.tool_calls.is_empty() || mode != ReasoningContentMode::ThinkingEnabled {
+        return false;
+    }
+
+    if response
+        .reasoning_content
+        .as_deref()
+        .is_some_and(|reasoning| !reasoning.trim().is_empty())
+    {
+        return false;
+    }
+
+    response.reasoning_content = Some(recovered_tool_call_reasoning_content(&response.tool_calls));
+    true
+}
+
+fn recovered_tool_call_reasoning_content(tool_calls: &[ChatToolCall]) -> String {
+    let tool_names = tool_calls
+        .iter()
+        .filter_map(|tool_call| {
+            let name = tool_call.function.name.trim();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect::<BTreeSet<_>>();
+
+    if tool_names.is_empty() {
+        return "Tool call selected.".to_owned();
+    }
+
+    format!(
+        "Tool call selected: {}.",
+        tool_names.into_iter().collect::<Vec<_>>().join(", ")
+    )
+}
+
 fn turn_provider_finish_reason_label(reason: TurnProviderFinishReason) -> &'static str {
     match reason {
         TurnProviderFinishReason::Stop => "stop",
@@ -1345,6 +1556,7 @@ fn attachment_dedup_signature(key: &str) -> String {
 pub struct AgentTurnLoopConfig {
     pub max_input_tokens: u64,
     pub max_model_turns: usize,
+    pub provider_transient_retries: usize,
     pub reasoning_mode: ReasoningContentMode,
     pub max_attachments: usize,
     pub max_attachment_bytes: u64,
@@ -1355,6 +1567,7 @@ impl Default for AgentTurnLoopConfig {
         Self {
             max_input_tokens: 1_000_000,
             max_model_turns: DEFAULT_MAX_MODEL_TURNS,
+            provider_transient_retries: DEFAULT_PROVIDER_TRANSIENT_RETRIES,
             reasoning_mode: ReasoningContentMode::ThinkingEnabled,
             max_attachments: DEFAULT_MAX_ATTACHMENTS,
             max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
@@ -1741,13 +1954,26 @@ pub trait TurnProvider {
 #[error("{message}")]
 pub struct TurnProviderError {
     message: String,
+    transient: bool,
 }
 
 impl TurnProviderError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            transient: false,
         }
+    }
+
+    pub fn transient(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            transient: true,
+        }
+    }
+
+    pub const fn is_transient(&self) -> bool {
+        self.transient
     }
 }
 
@@ -1846,6 +2072,12 @@ pub enum AgentTurnLoopError {
     Reasoning(#[from] ReasoningContentError),
     #[error("provider failed: {0}")]
     Provider(#[from] TurnProviderError),
+    #[error("provider response stream interrupted: {source}")]
+    ProviderStreamInterrupted {
+        source: TurnProviderError,
+        partial_content: String,
+        partial_reasoning_chars: usize,
+    },
     #[error("provider stream ended without a completed response")]
     ProviderStreamEndedWithoutCompletion,
     #[error("provider stream emitted more than one completed response")]
@@ -1932,7 +2164,7 @@ impl AgentTurnLoopError {
             Self::InvalidConfig { .. } => "E_INVALID_CONFIG",
             Self::ContextBuild(_) => "E_CONTEXT_BUILD_FAILED",
             Self::Reasoning(_) => "E_REASONING_CONTENT",
-            Self::Provider(_) => "E_PROVIDER_ERROR",
+            Self::Provider(_) | Self::ProviderStreamInterrupted { .. } => "E_PROVIDER_ERROR",
             Self::ProviderStreamEndedWithoutCompletion => "E_PROVIDER_STREAM_INCOMPLETE",
             Self::ProviderCompletedMultipleTimes => "E_PROVIDER_STREAM_INVALID",
             Self::ProviderEventAfterCompletion => "E_PROVIDER_STREAM_INVALID",
@@ -2951,6 +3183,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_loop_recovers_missing_tool_call_reasoning_when_thinking_is_enabled() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "hello from README\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_recovered_reasoning")
+            .expect("run should be created");
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                None,
+                vec![ChatToolCall::function(
+                    "call_1",
+                    "read_file",
+                    r#"{"path":"README.md"}"#,
+                )],
+            ),
+            TurnProviderResponse::final_text("README says hello."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(
+                AgentTurnInput::new("turn_1", "Read README and summarize it")
+                    .with_mode(AgentRunMode::Ask),
+                &mut run,
+            )
+            .await
+            .expect("missing tool-call reasoning should be recovered");
+
+        assert_eq!(outcome.final_message, "README says hello.");
+        assert_eq!(outcome.iterations, 2);
+        assert_eq!(outcome.tool_results.len(), 1);
+        assert_eq!(
+            loop_runner.provider.requests[1].messages[1]
+                .reasoning_content
+                .as_deref(),
+            Some("Tool call selected: read_file.")
+        );
+
+        let events = store
+            .load_run("run_turn_recovered_reasoning")
+            .expect("events should load");
+        assert!(!events.iter().any(|event| event.event_type == "run.failed"));
+        let recovered = events
+            .iter()
+            .find(|event| event.event_type == "provider.reasoningRecovered")
+            .expect("reasoning recovery should be logged");
+        assert_eq!(
+            recovered.payload["reason"],
+            "missing_tool_call_reasoning_content"
+        );
+        assert_eq!(recovered.payload["toolCallCount"], 1);
+    }
+
+    #[tokio::test]
     async fn turn_loop_injects_final_response_summary_contract() {
         let workspace = TestWorkspace::new("turn-loop");
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
@@ -3095,6 +3384,64 @@ mod tests {
         }));
         assert!(!events.iter().any(|event| {
             event.event_type == "run.failed" && event.payload["code"] == json!("E_MAX_MODEL_TURNS")
+        }));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_resets_provider_transient_retry_budget_after_model_turn_continuation() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_budget_retry_reset")
+            .expect("run should be created");
+        let length_response = TurnProviderResponse {
+            content: Some("Partial work before continuation".to_owned()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            completion: TurnProviderCompletion::fixture(TurnProviderFinishReason::Length),
+        };
+        let provider = EventScriptedProvider::new_result_streams(vec![
+            vec![Err(TurnProviderError::transient("first connection reset"))],
+            vec![Ok(TurnProviderEvent::Completed(length_response))],
+            vec![Err(TurnProviderError::transient("second connection reset"))],
+            vec![Ok(TurnProviderEvent::Completed(
+                TurnProviderResponse::final_text("Completed after retry reset."),
+            ))],
+        ]);
+        let config = AgentTurnLoopConfig {
+            max_model_turns: 2,
+            provider_transient_retries: 1,
+            ..AgentTurnLoopConfig::default()
+        };
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
+                .expect("turn loop should initialize")
+                .with_config(config);
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Finish the task"), &mut run)
+            .await
+            .expect("continuation should reset transient retry quota");
+
+        assert_eq!(outcome.final_message, "Completed after retry reset.");
+        assert_eq!(outcome.iterations, 4);
+        assert_eq!(loop_runner.provider.requests.len(), 4);
+        let events = store
+            .load_run("run_turn_budget_retry_reset")
+            .expect("events should load");
+        let retries = events
+            .iter()
+            .filter(|event| event.event_type == "provider.retrying")
+            .collect::<Vec<_>>();
+        assert_eq!(retries.len(), 2);
+        assert!(retries.iter().all(|event| {
+            event.payload["reason"] == json!("transient_stream_error")
+                && event.payload["retriesRemaining"] == json!(0)
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "tool.approvalResolved"
+                && event.payload["toolName"] == MODEL_TURN_BUDGET_TOOL_NAME
+                && event.payload["decision"] == "approved"
         }));
     }
 
@@ -3956,6 +4303,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_loop_reports_invalid_patch_preview_as_failed_tool_result_and_continues() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "old\nsecond\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_invalid_patch_preview")
+            .expect("run should be created");
+        let patch = concat!(
+            "--- a/README.md\n",
+            "+++ b/README.md\n",
+            "@@ -1,2 +1,2 @@\n",
+            "-old\n",
+            "+new\n",
+            "\n",
+            " second\n",
+        );
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should edit the README.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_1",
+                    "apply_patch",
+                    json!({
+                        "unifiedDiff": patch,
+                        "expectedFiles": ["README.md"],
+                    })
+                    .to_string(),
+                )],
+            ),
+            TurnProviderResponse::final_text("Invalid patch was reported; I can retry."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
+            .await
+            .expect("invalid patch preview should be returned to the provider");
+
+        assert_eq!(workspace.read("README.md"), "old\nsecond\n");
+        assert!(outcome.changed_files.is_empty());
+        assert_eq!(
+            outcome.final_message,
+            "Invalid patch was reported; I can retry."
+        );
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+        let tool_result = loop_runner.provider.requests[1].messages[2]
+            .content
+            .as_deref()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+            .expect("failed apply_patch result should be sent to the provider");
+        assert_eq!(tool_result["status"], "failed");
+        assert_eq!(tool_result["errorCode"], "E_INVALID_PATCH");
+        assert!(
+            tool_result["summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("invalid patch line"))
+        );
+
+        let events = store
+            .load_run("run_turn_invalid_patch_preview")
+            .expect("events should load");
+        assert!(!events.iter().any(|event| event.event_type == "run.failed"));
+        let completed = events
+            .iter()
+            .find(|event| event.event_type == "tool.completed")
+            .expect("tool.completed should record failed apply_patch preview");
+        assert_eq!(completed.payload["status"], "failed");
+        assert_eq!(completed.payload["result"]["errorCode"], "E_INVALID_PATCH");
+        assert_eq!(completed.payload["result"]["reversePatch"], "");
+    }
+
+    #[tokio::test]
     async fn turn_loop_applies_patch_from_run_scoped_payload_ref() {
         let workspace = TestWorkspace::new("turn-loop");
         workspace.write("README.md", "old\n");
@@ -4267,6 +4688,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_loop_retries_transient_provider_stream_interruption() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_provider_retry")
+            .expect("run should be created");
+        let provider = EventScriptedProvider::new_result_streams(vec![
+            vec![
+                Ok(TurnProviderEvent::AssistantDelta(
+                    TurnProviderDelta::reasoning_content("private"),
+                )),
+                Ok(TurnProviderEvent::AssistantDelta(
+                    TurnProviderDelta::content("partial "),
+                )),
+                Err(TurnProviderError::transient("connection reset by peer")),
+            ],
+            vec![Ok(TurnProviderEvent::Completed(
+                TurnProviderResponse::final_text("complete"),
+            ))],
+        ]);
+        let config = AgentTurnLoopConfig {
+            provider_transient_retries: 1,
+            ..AgentTurnLoopConfig::default()
+        };
+        let mut loop_runner = AgentTurnLoop::new(workspace.path(), provider)
+            .expect("turn loop should initialize")
+            .with_config(config);
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Say hello"), &mut run)
+            .await
+            .expect("transient provider interruption should be retried");
+
+        assert_eq!(outcome.final_message, "complete");
+        assert_eq!(outcome.iterations, 2);
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+        assert!(
+            loop_runner.provider.requests[1]
+                .messages
+                .iter()
+                .any(|message| {
+                    message.content.as_deref().is_some_and(|content| {
+                        content.contains(super::PROVIDER_STREAM_RETRY_INSTRUCTION)
+                    })
+                })
+        );
+        assert!(
+            loop_runner.provider.requests[1]
+                .messages
+                .iter()
+                .any(|message| message.content.as_deref() == Some("partial"))
+        );
+
+        let events = store
+            .load_run("run_turn_provider_retry")
+            .expect("events should load");
+        let retries = events
+            .iter()
+            .filter(|event| event.event_type == "provider.retrying")
+            .collect::<Vec<_>>();
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].payload["reason"], "transient_stream_error");
+        assert_eq!(retries[0].payload["partialContentChars"], 8);
+        assert_eq!(retries[0].payload["partialReasoningChars"], 7);
+        assert_eq!(retries[0].payload["retriesRemaining"], 0);
+    }
+
+    #[tokio::test]
     async fn turn_loop_cancels_provider_stream_when_token_is_signaled() {
         let workspace = TestWorkspace::new("turn-loop");
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
@@ -4400,24 +4889,39 @@ mod tests {
     }
 
     struct EventScriptedProvider {
-        streams: VecDeque<Vec<TurnProviderEvent>>,
+        streams: VecDeque<Vec<Result<TurnProviderEvent, TurnProviderError>>>,
+        requests: Vec<TurnProviderRequest>,
     }
 
     impl EventScriptedProvider {
         fn new(streams: Vec<Vec<TurnProviderEvent>>) -> Self {
             Self {
+                streams: streams
+                    .into_iter()
+                    .map(|events| events.into_iter().map(Ok).collect())
+                    .collect(),
+                requests: Vec::new(),
+            }
+        }
+
+        fn new_result_streams(
+            streams: Vec<Vec<Result<TurnProviderEvent, TurnProviderError>>>,
+        ) -> Self {
+            Self {
                 streams: streams.into(),
+                requests: Vec::new(),
             }
         }
     }
 
     impl TurnProvider for EventScriptedProvider {
-        fn complete_stream(&mut self, _request: TurnProviderRequest) -> TurnProviderFuture<'_> {
+        fn complete_stream(&mut self, request: TurnProviderRequest) -> TurnProviderFuture<'_> {
             Box::pin(async move {
+                self.requests.push(request);
                 let events = self.streams.pop_front().ok_or_else(|| {
                     TurnProviderError::new("event scripted provider has no stream")
                 })?;
-                let stream: TurnProviderStream = Box::pin(stream::iter(events.into_iter().map(Ok)));
+                let stream: TurnProviderStream = Box::pin(stream::iter(events));
                 Ok(stream)
             })
         }

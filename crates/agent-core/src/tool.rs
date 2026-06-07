@@ -13,6 +13,7 @@ pub enum ToolName {
     GitDiff,
     LspDiagnostics,
     PlanUpdate,
+    ModelTurnBudget,
 }
 
 impl ToolName {
@@ -27,6 +28,7 @@ impl ToolName {
             Self::GitDiff => "git_diff",
             Self::LspDiagnostics => "lsp_diagnostics",
             Self::PlanUpdate => "plan_update",
+            Self::ModelTurnBudget => "model_turn_budget",
         }
     }
 }
@@ -255,6 +257,12 @@ const PLAN_UPDATE_ARGUMENT_SCHEMA: &str = r#"{
   }
 }"#;
 
+const MODEL_TURN_BUDGET_ARGUMENT_SCHEMA: &str = r#"{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}"#;
+
 pub const BUILTIN_TOOLS: &[ToolDefinition] = &[
     ToolDefinition::new(
         ToolName::WorkspaceManifest,
@@ -335,6 +343,15 @@ pub const BUILTIN_TOOLS: &[ToolDefinition] = &[
         ApprovalRequirement::None,
         ToolImplementationStatus::SchemaOnly,
         PLAN_UPDATE_ARGUMENT_SCHEMA,
+        STATUS_RESULT_SCHEMA,
+    ),
+    ToolDefinition::new(
+        ToolName::ModelTurnBudget,
+        "Approve continuing an agent turn after the provider-turn budget window is exhausted.",
+        RiskLevel::Exec,
+        ApprovalRequirement::Required,
+        ToolImplementationStatus::SchemaOnly,
+        MODEL_TURN_BUDGET_ARGUMENT_SCHEMA,
         STATUS_RESULT_SCHEMA,
     ),
 ];

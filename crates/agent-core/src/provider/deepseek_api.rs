@@ -80,6 +80,16 @@ impl DeepSeekApiError {
 
         Self::Http { details, source }
     }
+
+    pub fn is_transient_transport_error(&self) -> bool {
+        match self {
+            Self::Http { source, .. } => {
+                retryable_send_error(source) || source.is_body() || source.is_decode()
+            }
+            Self::IncompleteStreamEvent { .. } => true,
+            _ => false,
+        }
+    }
 }
 
 pub type ChatCompletionStream =

@@ -2,6 +2,10 @@ import type { AgentEventEnvelope } from "@prole-coder/protocol" with {
   "resolution-mode": "import",
 };
 
+const TIMELINE_DISPLAY_TEXT_LIMIT = 1200;
+const TIMELINE_COMPACT_JSON_LIMIT = 800;
+const TIMELINE_TRUNCATED_NOTICE = "\n[truncated for sidebar; see Output or run logs for full text]";
+
 export type ChatTimelineKind =
   | "assistant"
   | "approval"
@@ -237,6 +241,21 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         ]),
         defaultCollapsed: true,
       };
+    case "provider.retrying":
+      return {
+        ...base,
+        kind: "provider",
+        tone: "warning",
+        title: "Provider retrying",
+        body: joinParts([
+          label("Iteration", valueText(payload, "iteration")),
+          label("Reason", displayTextField(payload, "reason")),
+          label("Retries remaining", valueText(payload, "retriesRemaining")),
+          label("Partial content", suffix(valueText(payload, "partialContentChars"), " chars")),
+          displayTextField(payload, "message"),
+        ]),
+        defaultCollapsed: true,
+      };
     case "tool.requested":
       return {
         ...base,
@@ -244,9 +263,9 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         tone: "neutral",
         title: `Tool requested: ${toolName(payload)}`,
         body: joinParts([
-          label("Risk", textField(payload, "risk")),
-          label("Reasons", arrayText(payload, "riskReasons")),
-          label("Args", valueText(payload, "argumentsPreview")),
+          label("Risk", displayTextField(payload, "risk")),
+          label("Reasons", displayArrayText(payload, "riskReasons")),
+          label("Args", displayValueText(payload, "argumentsPreview")),
         ]),
         defaultCollapsed: true,
       };
@@ -257,12 +276,12 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         tone: "warning",
         title: `Approval required: ${textField(payload, "toolName") ?? "tool"}`,
         body: joinParts([
-          textField(payload, "title"),
-          textField(payload, "detail"),
-          label("Risk", textField(payload, "risk")),
-          label("Reasons", arrayText(payload, "riskReasons")),
-          label("Command", textField(payload, "command")),
-          label("Paths", arrayText(payload, "paths")),
+          displayTextField(payload, "title"),
+          displayTextField(payload, "detail"),
+          label("Risk", displayTextField(payload, "risk")),
+          label("Reasons", displayArrayText(payload, "riskReasons")),
+          label("Command", displayTextField(payload, "command")),
+          label("Paths", displayArrayText(payload, "paths")),
         ]),
         defaultCollapsed: true,
       };
@@ -273,7 +292,10 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "approval",
         tone: approvalTone(decision),
         title: `Approval ${decision}`,
-        body: joinParts([label("Tool", textField(payload, "toolName")), label("Reason", textField(payload, "reason"))]),
+        body: joinParts([
+          label("Tool", displayTextField(payload, "toolName")),
+          label("Reason", displayTextField(payload, "reason")),
+        ]),
         defaultCollapsed: true,
       };
     }
@@ -295,8 +317,8 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         title: `Tool completed: ${toolName(payload)}`,
         body: joinParts([
           label("Status", status),
-          textField(payload, "summary"),
-          label("Files", nestedValueText(payload, "result", "files")),
+          displayTextField(payload, "summary"),
+          label("Files", displayNestedValueText(payload, "result", "files")),
         ]),
         defaultCollapsed: true,
       };
@@ -316,9 +338,9 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         tone: "danger",
         title: "Run failed",
         body: joinParts([
-          label("Code", textField(payload, "code")),
-          textField(payload, "message"),
-          label("Diagnostic file", textField(payload, "diagnosticFile")),
+          label("Code", displayTextField(payload, "code")),
+          displayTextField(payload, "message"),
+          label("Diagnostic file", displayTextField(payload, "diagnosticFile")),
         ]),
       };
     case "run.canceled":
@@ -327,7 +349,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "terminal",
         tone: "warning",
         title: "Run canceled",
-        body: joinParts([label("Code", textField(payload, "code")), textField(payload, "reason")]),
+        body: joinParts([label("Code", displayTextField(payload, "code")), displayTextField(payload, "reason")]),
       };
     default:
       return {
@@ -448,12 +470,28 @@ function valueText(payload: Record<string, unknown> | undefined, key: string): s
   return stringifyValue(payload[key]);
 }
 
+function displayTextField(payload: Record<string, unknown> | undefined, key: string): string | undefined {
+  return truncate(textField(payload, key), TIMELINE_DISPLAY_TEXT_LIMIT);
+}
+
+function displayValueText(payload: Record<string, unknown> | undefined, key: string): string | undefined {
+  return truncate(valueText(payload, key), TIMELINE_DISPLAY_TEXT_LIMIT);
+}
+
 function nestedValueText(
   payload: Record<string, unknown> | undefined,
   outer: string,
   inner: string,
 ): string | undefined {
   return valueText(record(payload?.[outer]), inner);
+}
+
+function displayNestedValueText(
+  payload: Record<string, unknown> | undefined,
+  outer: string,
+  inner: string,
+): string | undefined {
+  return truncate(nestedValueText(payload, outer, inner), TIMELINE_DISPLAY_TEXT_LIMIT);
 }
 
 function arrayCount(payload: Record<string, unknown> | undefined, key: string): string | undefined {
@@ -464,6 +502,10 @@ function arrayCount(payload: Record<string, unknown> | undefined, key: string): 
 function arrayText(payload: Record<string, unknown> | undefined, key: string): string | undefined {
   const value = payload?.[key];
   return Array.isArray(value) ? value.map((entry) => String(entry)).join(", ") : undefined;
+}
+
+function displayArrayText(payload: Record<string, unknown> | undefined, key: string): string | undefined {
+  return truncate(arrayText(payload, key), TIMELINE_DISPLAY_TEXT_LIMIT);
 }
 
 function stringifyValue(value: unknown): string | undefined {
@@ -484,7 +526,7 @@ function stringifyValue(value: unknown): string | undefined {
 
 function compactJson(value: unknown): string {
   try {
-    return truncate(JSON.stringify(value), 800);
+    return truncate(JSON.stringify(value), TIMELINE_COMPACT_JSON_LIMIT) ?? "";
   } catch {
     return String(value);
   }
@@ -503,6 +545,11 @@ function joinParts(parts: Array<string | undefined>): string | undefined {
   return present.length > 0 ? present.join("\n") : undefined;
 }
 
-function truncate(value: string, maxLength: number): string {
-  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}...`;
+function truncate(value: string | undefined, maxLength: number): string | undefined {
+  if (value === undefined || value.length <= maxLength) {
+    return value;
+  }
+
+  const sliceLength = Math.max(0, maxLength - TIMELINE_TRUNCATED_NOTICE.length);
+  return `${value.slice(0, sliceLength)}${TIMELINE_TRUNCATED_NOTICE}`;
 }

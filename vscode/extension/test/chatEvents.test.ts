@@ -167,6 +167,26 @@ test("chat timeline renders tool lifecycle and terminal events", () => {
   assert.equal(snapshot.latestStatus, "Completed");
 });
 
+test("chat timeline renders provider retry events as collapsed work log items", () => {
+  const item = createTimelineItem(
+    agentEvent(1, "provider.retrying", {
+      iteration: 4,
+      reason: "transient_stream_error",
+      retriesRemaining: 1,
+      partialContentChars: 128,
+      message: "connection reset",
+    }),
+  );
+
+  assert.equal(item.kind, "provider");
+  assert.equal(item.tone, "warning");
+  assert.equal(item.title, "Provider retrying");
+  assert.equal(item.defaultCollapsed, true);
+  assert.ok(item.body?.includes("Retries remaining: 1"));
+  assert.ok(item.body?.includes("Partial content: 128 chars"));
+  assert.equal(isWorkLogItem(item, true), true);
+});
+
 test("chat timeline renders approval and failure events with warning or danger tones", () => {
   const approval = createTimelineItem(
     agentEvent(1, "tool.approvalRequired", {
@@ -194,6 +214,23 @@ test("chat timeline renders approval and failure events with warning or danger t
   assert.equal(failure.tone, "danger");
   assert.ok(failure.body?.includes("invalid tool call"));
   assert.ok(failure.body?.includes("Diagnostic file:"));
+});
+
+test("chat timeline truncates long approval commands for sidebar rendering", () => {
+  const command = `Set-Content -Path script.py -Value '${"print(1)\\n".repeat(400)}'`;
+  const item = createTimelineItem(
+    agentEvent(1, "tool.approvalRequired", {
+      toolName: "shell",
+      risk: "exec",
+      title: "Run shell command",
+      command,
+    }),
+  );
+
+  assert.ok(item.body);
+  assert.ok(item.body.length < command.length);
+  assert.ok(item.body.includes("[truncated for sidebar"));
+  assert.equal(item.body.includes("print(1)\\n".repeat(300)), false);
 });
 
 test("chat timeline trims old items while preserving event count", () => {

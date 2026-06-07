@@ -18,6 +18,10 @@ test("generated chat webview inline script parses as JavaScript", () => {
   const moduleObject: { exports: Record<string, unknown> } = { exports: {} };
   const baseRequire = createRequire(chatViewPath);
   const source = `${readFileSync(chatViewPath, "utf8")}\nexports.__renderChatViewHtml = renderChatViewHtml;`;
+  assert.match(
+    source,
+    /if \(postSubmission\) \{\s*this\.postSubmission\(\);\s*\}\s*if \(postSnapshot\) \{\s*this\.postSnapshot\(\);/s,
+  );
 
   runInNewContext(
     source,
@@ -72,9 +76,24 @@ test("generated chat webview inline script parses as JavaScript", () => {
 
   assert.match(html, /aria-label="Send message"/);
   assert.match(html, /message-edit/);
+  assert.match(html, /\.composer-row\s*\{[^}]*flex-wrap: nowrap/s);
+  assert.match(html, /\.send,\s*\n\s*\.cancel\s*\{[^}]*width: 28px/s);
+  assert.match(html, /\.send-icon\[hidden\]\s*\{[^}]*display: none !important/s);
+  assert.match(html, /\.mode\[hidden\]\s*\{[^}]*display: none !important/s);
+  assert.match(html, /\.approval-card\s*\{[^}]*max-height: min\(70vh, 32rem\)/s);
+  assert.match(html, /\.approval-section\s*\{/);
+  assert.match(html, /\.approval-command \.approval-section-body\s*\{/);
+  assert.match(html, /class="send-icon send-icon-stop"[^>]*hidden/);
 
   const script = extractInlineScript(html);
   assert.doesNotThrow(() => new Script(script, { filename: "prole-chat-webview-inline.js" }));
+  assert.match(script, /function setSendIconVisible\(/);
+  assert.match(script, /toggleAttribute\("hidden"/);
+  assert.match(script, /modeInput\.hidden = busy === true/);
+  assert.match(script, /function renderApprovalSection\(/);
+  assert.match(script, /section\.classList\.add\("approval-section", className\)/);
+  assert.match(script, /const wasBusy = currentSubmission && currentSubmission\.busy === true/);
+  assert.match(script, /item\.kind === "assistant" && currentSubmission && currentSubmission\.busy === true/);
 });
 
 function extractInlineScript(html: string): string {
