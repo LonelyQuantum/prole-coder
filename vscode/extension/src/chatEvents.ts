@@ -33,6 +33,8 @@ export interface ChatTimelineItem {
   readonly body?: string | undefined;
   readonly detail?: string | undefined;
   readonly defaultCollapsed?: boolean;
+  readonly workGroupId?: string;
+  readonly workGroupTitle?: string;
 }
 
 export interface ChatTimelineSnapshot {
@@ -200,6 +202,14 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         title: "You",
         body: textField(payload, "userTask") ?? textField(payload, "prompt") ?? compactJson(event.payload),
       };
+    case "turn.steered":
+      return {
+        ...base,
+        kind: "user",
+        tone: "neutral",
+        title: "You",
+        body: textField(payload, "message") ?? compactJson(event.payload),
+      };
     case "context.built":
       return {
         ...base,
@@ -220,6 +230,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "provider",
         tone: "running",
         title: "Provider request",
+        ...providerWorkGroup(event, payload),
         body: joinParts([
           label("Iteration", valueText(payload, "iteration")),
           label("Messages", valueText(payload, "messageCount")),
@@ -233,6 +244,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "provider",
         tone: "neutral",
         title: "Provider completed",
+        ...providerWorkGroup(event, payload),
         body: joinParts([
           label("Model", textField(payload, "model")),
           label("Finish", textField(payload, "finishReason")),
@@ -247,6 +259,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "provider",
         tone: "warning",
         title: "Provider retrying",
+        ...providerWorkGroup(event, payload),
         body: joinParts([
           label("Iteration", valueText(payload, "iteration")),
           label("Reason", displayTextField(payload, "reason")),
@@ -262,6 +275,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "tool",
         tone: "neutral",
         title: `Tool requested: ${toolName(payload)}`,
+        ...toolWorkGroup(event, payload),
         body: joinParts([
           label("Risk", displayTextField(payload, "risk")),
           label("Reasons", displayArrayText(payload, "riskReasons")),
@@ -275,6 +289,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "approval",
         tone: "warning",
         title: `Approval required: ${textField(payload, "toolName") ?? "tool"}`,
+        ...toolWorkGroup(event, payload),
         body: joinParts([
           displayTextField(payload, "title"),
           displayTextField(payload, "detail"),
@@ -292,6 +307,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "approval",
         tone: approvalTone(decision),
         title: `Approval ${decision}`,
+        ...toolWorkGroup(event, payload),
         body: joinParts([
           label("Tool", displayTextField(payload, "toolName")),
           label("Reason", displayTextField(payload, "reason")),
@@ -305,6 +321,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "tool",
         tone: "running",
         title: `Tool started: ${toolName(payload)}`,
+        ...toolWorkGroup(event, payload),
         body: label("Call", textField(payload, "toolCallId")),
         defaultCollapsed: true,
       };
@@ -315,6 +332,7 @@ export function createTimelineItem(event: AgentEventEnvelope): ChatTimelineItem 
         kind: "tool",
         tone: status === "ok" || status === "success" ? "success" : "warning",
         title: `Tool completed: ${toolName(payload)}`,
+        ...toolWorkGroup(event, payload),
         body: joinParts([
           label("Status", status),
           displayTextField(payload, "summary"),
@@ -449,6 +467,28 @@ function approvalTone(decision: string): ChatTimelineTone {
 
 function toolName(payload: Record<string, unknown> | undefined): string {
   return textField(payload, "name") ?? textField(payload, "toolName") ?? "tool";
+}
+
+function providerWorkGroup(
+  event: AgentEventEnvelope,
+  payload: Record<string, unknown> | undefined,
+): Pick<ChatTimelineItem, "workGroupId" | "workGroupTitle"> {
+  const iteration = valueText(payload, "iteration") ?? "unknown";
+  return {
+    workGroupId: `${event.runId}:${event.turnId ?? "run"}:provider:${iteration}`,
+    workGroupTitle: `Provider iteration ${iteration}`,
+  };
+}
+
+function toolWorkGroup(
+  event: AgentEventEnvelope,
+  payload: Record<string, unknown> | undefined,
+): Pick<ChatTimelineItem, "workGroupId" | "workGroupTitle"> {
+  const toolCallId = textField(payload, "toolCallId") ?? textField(payload, "approvalId") ?? String(event.seq);
+  return {
+    workGroupId: `${event.runId}:${event.turnId ?? "run"}:tool:${toolCallId}`,
+    workGroupTitle: `Tool: ${toolName(payload)}`,
+  };
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

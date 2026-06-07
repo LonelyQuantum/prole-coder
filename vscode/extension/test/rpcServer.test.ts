@@ -15,6 +15,7 @@ import {
   RPC_REJECT_METHOD,
   RPC_RESUME_METHOD,
   RPC_SEND_TURN_METHOD,
+  RPC_STEER_METHOD,
   RpcRequestError,
   RpcServerManager,
   type RpcChildProcess,
@@ -558,6 +559,42 @@ test("RPC server manager sends typed cancel requests", async () => {
     runId: "run_1",
     state: "canceled",
     reason: "user canceled",
+  });
+});
+
+test("RPC server manager sends typed steer requests", async () => {
+  const factory = new FakeProcessFactory();
+  const manager = rpcManagerWithFactory(factory);
+  const readyPromise = manager.start();
+  const child = factory.lastChild();
+  child.stdout.pushJson(initializeResponse(child.initializeRequest().id));
+  await readyPromise;
+
+  const steerPromise = manager.steer({
+    runId: "run_1",
+    message: "focus on the failing test",
+  });
+  await flushMicrotasks();
+  const steerRequest = child.requestAt(1);
+  assert.equal(steerRequest.method, RPC_STEER_METHOD);
+  assert.deepEqual(steerRequest.params, {
+    runId: "run_1",
+    message: "focus on the failing test",
+  });
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    id: steerRequest.id,
+    result: {
+      runId: "run_1",
+      steerId: "steer_1",
+      accepted: true,
+    },
+  });
+
+  assert.deepEqual(await steerPromise, {
+    runId: "run_1",
+    steerId: "steer_1",
+    accepted: true,
   });
 });
 

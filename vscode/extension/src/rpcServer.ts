@@ -19,6 +19,8 @@ import type {
   SendTurnParams,
   SendTurnResult,
   ServerCapabilities,
+  SteerParams,
+  SteerResult,
 } from "@prole-coder/protocol" with {
   "resolution-mode": "import",
 };
@@ -34,6 +36,7 @@ export const RPC_DELETE_RUN_METHOD = "agent.deleteRun";
 export const RPC_APPROVE_METHOD = "agent.approve";
 export const RPC_REJECT_METHOD = "agent.reject";
 export const RPC_CANCEL_METHOD = "agent.cancel";
+export const RPC_STEER_METHOD = "agent.steer";
 export const RPC_PREVIEW_FIM_METHOD = "agent.previewFim";
 export const DEFAULT_RPC_COMMAND = "prole";
 export const DEFAULT_RPC_ARGS = ["rpc"] as const;
@@ -367,6 +370,10 @@ export class RpcServerManager implements DisposableLike {
 
   cancel(params: CancelParams): Promise<CancelResult> {
     return this.sendRequest<CancelResult>(RPC_CANCEL_METHOD, params);
+  }
+
+  steer(params: SteerParams): Promise<SteerResult> {
+    return this.sendRequest<SteerResult>(RPC_STEER_METHOD, params);
   }
 
   previewFim(params: FimPreviewParams): Promise<FimPreviewResult> {

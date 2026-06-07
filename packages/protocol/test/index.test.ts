@@ -10,6 +10,7 @@ import {
   agentApproveMethod,
   agentRejectMethod,
   agentCancelMethod,
+  agentSteerMethod,
   agentListRunsMethod,
   agentDeleteRunMethod,
   agentEventBatchMethod,
@@ -36,6 +37,8 @@ import {
   type RpcRecoverableAction,
   type RejectParams,
   type RejectResult,
+  type SteerParams,
+  type SteerResult,
   type ServerCapabilities,
   type ToolCompletedPayload,
   type ToolApprovalRequiredPayload,
@@ -135,6 +138,7 @@ test("JSON-RPC method constants match protocol document", () => {
   assert.equal(agentApproveMethod, "agent.approve");
   assert.equal(agentRejectMethod, "agent.reject");
   assert.equal(agentCancelMethod, "agent.cancel");
+  assert.equal(agentSteerMethod, "agent.steer");
   assert.equal(agentListRunsMethod, "agent.listRuns");
   assert.equal(agentDeleteRunMethod, "agent.deleteRun");
   assert.equal(agentPreviewFimMethod, "agent.previewFim");
@@ -294,6 +298,15 @@ test("approval request and decision params use stable protocol fields", () => {
     state: "canceled",
     reason: cancel.reason,
   } satisfies CancelResult;
+  const steer = {
+    runId: "run_1",
+    message: "Focus on the failing tests before continuing.",
+  } satisfies SteerParams;
+  const steerResult = {
+    runId: steer.runId,
+    steerId: "steer_1",
+    accepted: true,
+  } satisfies SteerResult;
   const fimPreview = {
     prefix: "fn main() {",
     suffix: "}",
@@ -323,6 +336,7 @@ test("approval request and decision params use stable protocol fields", () => {
   assert.equal(approveResult.state, "approved");
   assert.equal(reject.reason, rejectResult.reason);
   assert.equal(cancelResult.state, "canceled");
+  assert.equal(steerResult.accepted, true);
   assert.equal(fimPreview.languageId, "rust");
   assert.equal(fimPreviewResult.finishReason, "stop");
   assert.equal(expiredPayload.decision, "expired");

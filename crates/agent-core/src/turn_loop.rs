@@ -1,8 +1,9 @@
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashSet, VecDeque},
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::{Arc, Mutex},
     time::Instant,
 };
 
@@ -69,6 +70,7 @@ const PROVIDER_STREAM_RETRY_INSTRUCTION: &str = concat!(
     "The previous provider response stream was interrupted by a transient connection error before ProleCoder received a completed response. ",
     "Continue the same task from where you left off. Do not repeat completed tool results, and only call tools that are still needed."
 );
+const STEER_INSTRUCTION_PREFIX: &str = "User steering update during this run:\n";
 #[cfg(windows)]
 const TOOL_USAGE_INSTRUCTION: &str = concat!(
     "Tool usage rules: all workspace paths must be workspace-relative unless a tool explicitly says otherwise. ",
@@ -245,6 +247,7 @@ where
             let budget_start = next_iteration;
             let budget_end = budget_start + self.config.max_model_turns - 1;
             for iteration in budget_start..=budget_end {
+                drain_steer_messages(&input, run_log, event_sink, &mut messages)?;
                 let prepared = self.reasoning.prepare_messages(&messages)?;
                 append_turn_event(
                     run_log,
@@ -1584,6 +1587,7 @@ pub struct AgentTurnInput {
     pub context_items: Vec<ContextItem>,
     pub attachments: Vec<TurnAttachment>,
     pub supersedes: Option<TurnSupersedes>,
+    pub steer_queue: Option<TurnSteerQueue>,
     pub cancellation_token: CancellationToken,
 }
 
@@ -1596,6 +1600,7 @@ impl AgentTurnInput {
             context_items: Vec::new(),
             attachments: Vec::new(),
             supersedes: None,
+            steer_queue: None,
             cancellation_token: CancellationToken::new(),
         }
     }
@@ -1625,10 +1630,56 @@ impl AgentTurnInput {
         self
     }
 
+    pub fn with_steer_queue(mut self, steer_queue: TurnSteerQueue) -> Self {
+        self.steer_queue = Some(steer_queue);
+        self
+    }
+
     pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
         self.cancellation_token = cancellation_token;
         self
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TurnSteerQueue {
+    inner: Arc<Mutex<VecDeque<TurnSteerMessage>>>,
+}
+
+impl TurnSteerQueue {
+    pub fn push(&self, steer_id: impl Into<String>, message: impl Into<String>) {
+        let mut queue = self
+            .inner
+            .lock()
+            .expect("turn steer queue lock should not be poisoned");
+        queue.push_back(TurnSteerMessage {
+            steer_id: steer_id.into(),
+            message: message.into(),
+        });
+    }
+
+    fn drain(&self) -> Vec<TurnSteerMessage> {
+        let mut queue = self
+            .inner
+            .lock()
+            .expect("turn steer queue lock should not be poisoned");
+        queue.drain(..).collect()
+    }
+}
+
+impl PartialEq for TurnSteerQueue {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for TurnSteerQueue {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnSteerMessage {
+    pub steer_id: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2490,6 +2541,35 @@ fn reasoning_state_payload(state: ReasoningContentState) -> Value {
     }
 }
 
+fn drain_steer_messages(
+    input: &AgentTurnInput,
+    run_log: &mut (impl RunLogWriter + ?Sized),
+    event_sink: &mut (impl TurnEventSink + ?Sized),
+    messages: &mut Vec<ChatMessage>,
+) -> Result<(), AgentTurnLoopError> {
+    let Some(steer_queue) = &input.steer_queue else {
+        return Ok(());
+    };
+
+    for steer in steer_queue.drain() {
+        append_turn_event(
+            run_log,
+            event_sink,
+            "turn.steered",
+            Some(input.turn_id.clone()),
+            json!({
+                "steerId": steer.steer_id,
+                "message": steer.message,
+            }),
+        )?;
+        messages.push(ChatMessage::user(format!(
+            "{STEER_INSTRUCTION_PREFIX}{}",
+            steer.message
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ToolRiskAssessment {
     risk: RiskLevel,
@@ -2501,6 +2581,15 @@ fn tool_risk_assessment(definition: &ToolDefinition, arguments: &Value) -> ToolR
     if definition.name == ToolName::Shell
         && let Some(command) = arguments.get("command").and_then(Value::as_str)
     {
+        let cwd = arguments.get("cwd").and_then(Value::as_str);
+        if is_auto_approved_read_only_shell(command, cwd) {
+            return ToolRiskAssessment {
+                risk: RiskLevel::Read,
+                risk_reasons: vec!["read-only shell allowlist".to_owned()],
+                approval_override: Some(ApprovalRequirement::None),
+            };
+        }
+
         let classification = classify_shell_command(command);
         return ToolRiskAssessment {
             risk: classification.risk,
@@ -2552,6 +2641,150 @@ fn is_workspace_policy_patch_file(path: &str) -> bool {
         .any(|policy_file| file_name.eq_ignore_ascii_case(policy_file))
 }
 
+fn is_auto_approved_read_only_shell(command: &str, cwd: Option<&str>) -> bool {
+    if !is_safe_workspace_relative_token(cwd.unwrap_or(".")) {
+        return false;
+    }
+
+    let Some(tokens) = split_simple_read_only_shell_tokens(command) else {
+        return false;
+    };
+    let Some(program) = tokens.first().map(String::as_str) else {
+        return false;
+    };
+
+    match program.to_ascii_lowercase().as_str() {
+        "rg" => {
+            read_only_shell_args_are_workspace_scoped(&tokens[1..])
+                && tokens[1..]
+                    .iter()
+                    .all(|token| is_read_only_rg_argument(token))
+        }
+        "get-content" | "gc" | "cat" | "type" | "select-string" | "get-childitem" | "gci"
+        | "dir" | "test-path" => read_only_shell_args_are_workspace_scoped(&tokens[1..]),
+        "git" => is_auto_approved_read_only_git(&tokens[1..]),
+        _ => false,
+    }
+}
+
+fn is_auto_approved_read_only_git(args: &[String]) -> bool {
+    let Some(subcommand) = args.first().map(String::as_str) else {
+        return false;
+    };
+    if !matches!(subcommand, "diff" | "status" | "log" | "show") {
+        return false;
+    }
+
+    args[1..].iter().all(|token| {
+        !matches!(token.as_str(), "--output" | "--ext-diff" | "--no-index")
+            && !token.starts_with("--output=")
+            && read_only_shell_token_is_workspace_scoped(token)
+    })
+}
+
+fn is_read_only_rg_argument(token: &str) -> bool {
+    if matches!(token, "--pre" | "--replace" | "--passthru") {
+        return false;
+    }
+    if token.starts_with("--pre=") || token.starts_with("--replace=") {
+        return false;
+    }
+    if token.starts_with("--") {
+        return true;
+    }
+
+    !token.starts_with('-') || token.len() <= 1 || !token[1..].contains('r')
+}
+
+fn read_only_shell_args_are_workspace_scoped(args: &[String]) -> bool {
+    args.iter()
+        .all(|token| read_only_shell_token_is_workspace_scoped(token))
+}
+
+fn read_only_shell_token_is_workspace_scoped(token: &str) -> bool {
+    if token.starts_with('-') {
+        if let Some((_, value)) = token.split_once('=') {
+            return is_safe_workspace_relative_token(value);
+        }
+        return true;
+    }
+    is_safe_workspace_relative_token(token)
+}
+
+fn is_safe_workspace_relative_token(token: &str) -> bool {
+    let trimmed = token.trim();
+    if trimmed.is_empty() || trimmed == "." {
+        return true;
+    }
+
+    if trimmed.starts_with('/') || trimmed.starts_with('\\') || trimmed.starts_with('~') {
+        return false;
+    }
+    if trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':' {
+        return false;
+    }
+
+    !trimmed
+        .split(['/', '\\'])
+        .any(|component| component == "..")
+        && !is_sensitive_workspace_shell_token(trimmed)
+}
+
+fn is_sensitive_workspace_shell_token(token: &str) -> bool {
+    let token = token.trim_start_matches(['!', '+']);
+    token.split(['/', '\\']).any(|component| {
+        let component = component.to_ascii_lowercase();
+        matches!(
+            component.as_str(),
+            ".git" | ".secrets" | ".secret" | ".agents" | ".codex" | ".prole-coder"
+        ) || component == ".env"
+            || component.starts_with(".env.")
+    })
+}
+
+fn split_simple_read_only_shell_tokens(command: &str) -> Option<Vec<String>> {
+    if command.trim().is_empty()
+        || command.contains('$')
+        || command
+            .chars()
+            .any(|character| matches!(character, '|' | '&' | ';' | '<' | '>' | '`' | '\n' | '\r'))
+    {
+        return None;
+    }
+
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    for character in command.chars() {
+        if let Some(quote_character) = quote {
+            if character == quote_character {
+                quote = None;
+            } else {
+                current.push(character);
+            }
+            continue;
+        }
+
+        match character {
+            '\'' | '"' => quote = Some(character),
+            ' ' | '\t' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(character),
+        }
+    }
+
+    if quote.is_some() {
+        return None;
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Some(tokens)
+}
+
 fn effective_approval_requirement(
     static_approval: ApprovalRequirement,
     risk: RiskLevel,
@@ -2568,6 +2801,7 @@ fn effective_approval_requirement(
     };
 
     match approval_override {
+        Some(ApprovalRequirement::None) => ApprovalRequirement::None,
         Some(override_approval) => max_approval_requirement(base_approval, override_approval),
         None => base_approval,
     }
@@ -2977,11 +3211,13 @@ mod tests {
 
     use super::{
         AgentRunMode, AgentTurnInput, AgentTurnLoop, AgentTurnLoopConfig, AgentTurnLoopError,
-        AutoApprovePolicy, CancellationToken, MODEL_TURN_BUDGET_TOOL_NAME, TextRange,
-        TurnAttachment, TurnEventSink, TurnEventSinkError, TurnProvider, TurnProviderCompletion,
-        TurnProviderDelta, TurnProviderError, TurnProviderEvent, TurnProviderFinishReason,
-        TurnProviderFuture, TurnProviderRequest, TurnProviderResponse, TurnProviderStream,
-        TurnProviderStreamingSummary, TurnProviderUsage, turn_provider_response_stream,
+        ApprovalRequirement, AutoApprovePolicy, CancellationToken, MODEL_TURN_BUDGET_TOOL_NAME,
+        RiskLevel, TextRange, ToolName, TurnAttachment, TurnEventSink, TurnEventSinkError,
+        TurnProvider, TurnProviderCompletion, TurnProviderDelta, TurnProviderError,
+        TurnProviderEvent, TurnProviderFinishReason, TurnProviderFuture, TurnProviderRequest,
+        TurnProviderResponse, TurnProviderStream, TurnProviderStreamingSummary, TurnProviderUsage,
+        TurnSteerQueue, effective_approval_requirement, find_builtin_tool,
+        is_auto_approved_read_only_shell, tool_risk_assessment, turn_provider_response_stream,
     };
 
     #[test]
@@ -3764,6 +4000,62 @@ mod tests {
                 .any(|event| event.event_type == "tool.started")
         );
         assert!(events.iter().any(|event| event.event_type == "run.failed"));
+    }
+
+    #[test]
+    fn read_only_shell_allowlist_disables_shell_approval() {
+        let shell =
+            find_builtin_tool(ToolName::Shell.as_str()).expect("shell tool must be registered");
+        for command in [
+            "rg --files src",
+            "Get-Content README.md",
+            "git diff -- src/lib.rs",
+            "git status --short",
+            "git log --oneline",
+            "git show HEAD -- README.md",
+        ] {
+            let assessment = tool_risk_assessment(
+                shell,
+                &json!({
+                    "command": command,
+                    "cwd": ".",
+                }),
+            );
+            assert_eq!(assessment.risk, RiskLevel::Read, "command: {command}");
+            assert_eq!(
+                effective_approval_requirement(
+                    shell.approval,
+                    assessment.risk,
+                    assessment.approval_override
+                ),
+                ApprovalRequirement::None,
+                "command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_shell_allowlist_rejects_ambiguous_or_outside_commands() {
+        for command in [
+            "rg foo | tee out.txt",
+            "Get-Content ..\\secret.txt",
+            "Get-Content C:\\secret.txt",
+            "git diff --output patch.txt",
+            "git diff --no-index a b",
+            "rg --replace x foo",
+            "rg -r replacement pattern",
+            "rg -rn pattern",
+            "rg -rU pattern",
+            "Get-Content .env",
+            "Get-Content .secrets\\deepseek-api-key",
+            "rg --files .git",
+        ] {
+            assert!(
+                !is_auto_approved_read_only_shell(command, Some(".")),
+                "command should not be allowlisted: {command}"
+            );
+        }
+        assert!(!is_auto_approved_read_only_shell("rg --files", Some("..")));
     }
 
     #[tokio::test]
@@ -4693,6 +4985,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_loop_injects_queued_steer_before_next_provider_request() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "hello\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_steer")
+            .expect("run should be created");
+        let steer_queue = TurnSteerQueue::default();
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I will read first.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_read",
+                    "read_file",
+                    r#"{"path":"README.md"}"#,
+                )],
+            ),
+            TurnProviderResponse::final_text("Used steer."),
+        ]);
+        let mut sink = SteerOnEventSink {
+            steer_queue: steer_queue.clone(),
+            inserted: false,
+        };
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        loop_runner
+            .run_turn_with_event_sink(
+                AgentTurnInput::new("turn_1", "Read README").with_steer_queue(steer_queue),
+                &mut run,
+                &mut sink,
+            )
+            .await
+            .expect("turn should complete with steer");
+
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+        assert!(
+            loop_runner.provider.requests[1]
+                .messages
+                .iter()
+                .any(|message| {
+                    message
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| content.contains("Please focus on tests"))
+                }),
+            "second provider request should include queued steer"
+        );
+        let events = store
+            .load_run("run_turn_steer")
+            .expect("events should load");
+        assert!(events.iter().any(|event| {
+            event.event_type == "turn.steered"
+                && event.payload["message"] == json!("Please focus on tests")
+        }));
+    }
+
+    #[tokio::test]
     async fn turn_loop_retries_transient_provider_stream_interruption() {
         let workspace = TestWorkspace::new("turn-loop");
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
@@ -4940,6 +5291,21 @@ mod tests {
     impl TurnEventSink for RecordingEventSink {
         fn on_event(&mut self, event: &RunLogEvent) -> Result<(), TurnEventSinkError> {
             self.events.push(event.clone());
+            Ok(())
+        }
+    }
+
+    struct SteerOnEventSink {
+        steer_queue: TurnSteerQueue,
+        inserted: bool,
+    }
+
+    impl TurnEventSink for SteerOnEventSink {
+        fn on_event(&mut self, event: &RunLogEvent) -> Result<(), TurnEventSinkError> {
+            if event.event_type == "tool.completed" && !self.inserted {
+                self.inserted = true;
+                self.steer_queue.push("steer_test", "Please focus on tests");
+            }
             Ok(())
         }
     }

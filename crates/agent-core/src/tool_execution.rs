@@ -1807,6 +1807,18 @@ mod tests {
     use crate::hashing::sha256_hex;
     use crate::run_log::{REDACTED_VALUE, RUN_LOG_MAX_STRING_BYTES};
     use crate::test_helpers::TestWorkspace;
+    use std::path::Path;
+
+    fn wait_for_test_marker(path: &Path, timeout: std::time::Duration) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        path.exists()
+    }
 
     #[test]
     fn sha256_hex_matches_known_vectors() {
@@ -2252,27 +2264,38 @@ mod tests {
         let tools = WorkspaceToolExecutor::new(workspace.path()).expect("workspace should open");
         let cancellation_token = CancellationToken::new();
         let cancel_from_thread = cancellation_token.clone();
+        let ready_marker = workspace.path().join("tree-ready.txt");
+        let ready_marker_for_thread = ready_marker.clone();
         let cancel_thread = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert!(
+                wait_for_test_marker(&ready_marker_for_thread, std::time::Duration::from_secs(10)),
+                "descendant process did not report ready before cancellation"
+            );
             cancel_from_thread.cancel("stop process tree");
         });
 
         #[cfg(windows)]
-        let command = r#"cmd /C "ping -n 4 127.0.0.1 > nul && echo alive>tree-marker.txt""#;
+        let command = concat!(
+            "$child = Start-Process -FilePath powershell ",
+            "-ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 4; Set-Content -LiteralPath tree-marker.txt -Value alive' ",
+            "-WorkingDirectory . -PassThru; ",
+            "Set-Content -LiteralPath tree-ready.txt -Value ready; ",
+            "Wait-Process -Id $child.Id"
+        );
         #[cfg(not(windows))]
-        let command = "(sleep 3; printf alive > tree-marker.txt) & wait";
+        let command =
+            "(printf ready > tree-ready.txt; sleep 3; printf alive > tree-marker.txt) & wait";
 
-        let error = tools
-            .shell_with_cancellation(
-                ShellArgs {
-                    command: command.to_owned(),
-                    cwd: None,
-                    timeout_ms: Some(10_000),
-                },
-                &cancellation_token,
-            )
-            .expect_err("shell process tree should be canceled");
+        let result = tools.shell_with_cancellation(
+            ShellArgs {
+                command: command.to_owned(),
+                cwd: None,
+                timeout_ms: Some(10_000),
+            },
+            &cancellation_token,
+        );
         cancel_thread.join().expect("cancel thread should join");
+        let error = result.expect_err("shell process tree should be canceled");
 
         assert!(matches!(
             error,

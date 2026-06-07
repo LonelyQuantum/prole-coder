@@ -12,6 +12,8 @@ import type {
   ResumeResult,
   SendTurnParams,
   SendTurnResult,
+  SteerParams,
+  SteerResult,
 } from "@prole-coder/protocol" with {
   "resolution-mode": "import",
 };
@@ -77,13 +79,21 @@ export interface ChatCancelClient {
   cancel(params: CancelParams): Promise<CancelResult>;
 }
 
+export interface ChatSteerClient {
+  steer(params: SteerParams): Promise<SteerResult>;
+}
+
 export interface ChatRunHistoryClient {
   listRuns(params?: ListRunsParams): Promise<ListRunsResult>;
   resume(params: ResumeParams): Promise<ResumeResult>;
   deleteRun(params: DeleteRunParams): Promise<DeleteRunResult>;
 }
 
-export type ChatRpcClient = ChatRpcEventSource & ChatTurnSender & ChatCancelClient & ChatRunHistoryClient;
+export type ChatRpcClient = ChatRpcEventSource &
+  ChatTurnSender &
+  ChatCancelClient &
+  ChatSteerClient &
+  ChatRunHistoryClient;
 
 interface SnapshotWebviewMessage {
   readonly type: "snapshot";
@@ -110,12 +120,19 @@ interface ApprovalWebviewMessage {
   readonly approval?: ChatApprovalSnapshot;
 }
 
+interface SteerResultWebviewMessage {
+  readonly type: "steerResult";
+  readonly ok: boolean;
+  readonly message: string;
+}
+
 type ExtensionToWebviewMessage =
   | SnapshotWebviewMessage
   | SubmissionWebviewMessage
   | RunsWebviewMessage
   | ContextWebviewMessage
   | ApprovalWebviewMessage
+  | SteerResultWebviewMessage
   | TestProbeWebviewMessage;
 
 interface TestProbeWebviewMessage {
@@ -214,6 +231,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   private submissionPostQueued = false;
   private contextPostQueued = false;
   private cancelActiveTurnRequested = false;
+  private readonly conversationApprovalGrants = new Map<string, Set<string>>();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -348,6 +366,15 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   }
 
   requestApproval(request: ApprovalPromptRequest): Promise<ApprovalPromptDecision> {
+    const grantKey = conversationApprovalGrantKey(request);
+    if (grantKey !== undefined && this.hasConversationApprovalGrant(request.runId, grantKey)) {
+      return Promise.resolve({
+        kind: "approve",
+        approvalId: request.approvalId,
+        persist: "never",
+      });
+    }
+
     this.rejectPendingApproval("superseded by a newer approval request");
     void this.openChatView();
 
@@ -393,7 +420,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     const approvalDecision =
       this.pendingApproval === undefined
         ? undefined
-        : approvalDecisionFromWebviewMessage(message, this.pendingApproval.request);
+        : this.approvalDecisionFromWebviewMessage(message, this.pendingApproval.request);
     if (approvalDecision !== undefined) {
       this.resolvePendingApproval(approvalDecision);
       return;
@@ -418,6 +445,12 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     }
     if (isCancelTurnMessage(message)) {
       await this.cancelActiveTurn();
+      return;
+    }
+
+    const steerMessage = steerTurnMessageFromWebviewMessage(message);
+    if (steerMessage !== undefined) {
+      await this.steerActiveTurn(steerMessage);
       return;
     }
 
@@ -850,6 +883,54 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     });
   }
 
+  private async steerActiveTurn(params: SteerParams): Promise<void> {
+    if (this.rpcClient === undefined) {
+      this.setSubmission({
+        ...this.submission,
+        message: "Open a trusted workspace before steering a turn.",
+        error: "No trusted workspace is available.",
+      });
+      this.postSteerResult(false, params.message);
+      return;
+    }
+
+    if (!this.submission.busy || this.submission.runId !== params.runId) {
+      this.setSubmission({
+        ...this.submission,
+        message: "No active turn is available for steering.",
+      });
+      this.postSteerResult(false, params.message);
+      return;
+    }
+
+    try {
+      await this.rpcClient.steer(params);
+      this.setSubmission({
+        ...this.submission,
+        message: "Steer sent.",
+      });
+      this.postSteerResult(true, params.message);
+    } catch (error) {
+      const messageText = `Failed to steer turn: ${errorMessage(error)}`;
+      const redacted = this.redact(messageText);
+      this.logger?.error(redacted);
+      this.setSubmission({
+        ...this.submission,
+        message: redacted,
+        error: redacted,
+      });
+      this.postSteerResult(false, params.message);
+    }
+  }
+
+  private postSteerResult(ok: boolean, message: string): void {
+    this.postToWebview({
+      type: "steerResult",
+      ok,
+      message,
+    });
+  }
+
   private collectDiagnosticAttachments(): NonNullable<SendTurnParams["attachments"]> {
     if (this.workspaceRoot === undefined) {
       return [];
@@ -903,6 +984,51 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     this.pendingApproval = undefined;
     this.postApproval();
     pending.resolve(decision);
+  }
+
+  private approvalDecisionFromWebviewMessage(
+    message: unknown,
+    request: ApprovalPromptRequest,
+  ): ApprovalPromptDecision | undefined {
+    if (isConversationApprovalMessage(message, request)) {
+      const grantKey = conversationApprovalGrantKey(request);
+      if (grantKey !== undefined) {
+        this.rememberConversationApprovalGrant(request.runId, grantKey);
+      }
+      return {
+        kind: "approve",
+        approvalId: request.approvalId,
+        persist: "never",
+      };
+    }
+
+    return approvalDecisionFromWebviewMessage(message, request);
+  }
+
+  private hasConversationApprovalGrant(runId: string | undefined, grantKey: string): boolean {
+    if (runId === undefined || runId.length === 0) {
+      return false;
+    }
+    return this.conversationApprovalGrants.get(runId)?.has(grantKey) === true;
+  }
+
+  private rememberConversationApprovalGrant(runId: string | undefined, grantKey: string): void {
+    if (runId === undefined || runId.length === 0) {
+      return;
+    }
+    let grants = this.conversationApprovalGrants.get(runId);
+    if (grants === undefined) {
+      grants = new Set<string>();
+      this.conversationApprovalGrants.set(runId, grants);
+    }
+    grants.add(grantKey);
+    while (this.conversationApprovalGrants.size > 20) {
+      const oldest = this.conversationApprovalGrants.keys().next().value;
+      if (oldest === undefined) {
+        return;
+      }
+      this.conversationApprovalGrants.delete(oldest);
+    }
   }
 
   private rejectPendingApproval(reason: string): void {
@@ -1532,15 +1658,24 @@ function renderChatViewHtml(
 
     .message-edit {
       flex: 0 0 auto;
-      min-width: 42px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 24px;
+      min-width: 24px;
       height: 24px;
-      padding: 0 7px;
+      padding: 0;
       color: var(--vscode-button-secondaryForeground);
       background: var(--vscode-button-secondaryBackground);
       border: 0;
       border-radius: 4px;
-      font: 11px var(--vscode-font-family);
-      font-weight: 600;
+    }
+
+    .message-edit-icon {
+      width: 15px;
+      height: 15px;
+      flex: 0 0 15px;
+      pointer-events: none;
     }
 
     .message-edit:hover:enabled {
@@ -1719,6 +1854,41 @@ function renderChatViewHtml(
       gap: 0;
     }
 
+    .work-log-group {
+      border-top: 1px solid var(--vscode-editorWidget-border);
+      padding: 6px 0;
+    }
+
+    .work-log-group:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .work-log-group-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--vscode-foreground);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .work-log-group-count {
+      color: var(--vscode-descriptionForeground);
+      font-weight: 400;
+      white-space: nowrap;
+    }
+
+    .work-log-group-body {
+      display: grid;
+      gap: 0;
+      margin-top: 4px;
+      padding-left: 10px;
+      border-left: 1px solid var(--vscode-editorWidget-border);
+    }
+
     .work-log-row {
       display: grid;
       gap: 3px;
@@ -1818,6 +1988,7 @@ function renderChatViewHtml(
       line-height: 1.2;
     }
 
+    /* Long shell commands intentionally wrap vertically; the approval card owns scrolling. */
     .approval-section-body {
       color: var(--vscode-foreground);
       font-size: 12px;
@@ -1861,6 +2032,7 @@ function renderChatViewHtml(
     .approval-actions {
       display: flex;
       justify-content: flex-end;
+      flex-wrap: wrap;
       gap: 6px;
     }
 
@@ -2212,6 +2384,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     let pendingRunDeleteId = "";
     let editingMessageId = "";
     let editingMessageTurnId = "";
+    let pendingSteerMessage = "";
     const supersededUserItemIds = new Set(restoredWebviewState.supersededUserItemIds);
     const resolvedApprovalIds = new Set();
     let contextSourceTab = "included";
@@ -2245,6 +2418,9 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       if (message && message.type === "approval") {
         renderApproval(message.approval);
       }
+      if (message && message.type === "steerResult") {
+        handleSteerResult(message);
+      }
     }));
 
     showRunsButton.addEventListener("click", safeWebviewEventHandler("show runs click", () => {
@@ -2274,6 +2450,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     composer.addEventListener("submit", safeWebviewEventHandler("composer submit", (event) => {
       event.preventDefault();
       if (currentSubmission && currentSubmission.busy === true) {
+        submitSteerMessage();
         return;
       }
       submitComposerMessage();
@@ -2294,6 +2471,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
           return;
         }
         if (currentSubmission && currentSubmission.busy === true) {
+          submitSteerMessage();
           return;
         }
         submitComposerMessage();
@@ -2351,6 +2529,46 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
         message,
         ...(supersedes === undefined ? {} : { supersedes }),
       });
+    }
+
+    function submitSteerMessage() {
+      const runId = currentSubmission && typeof currentSubmission.runId === "string" ? currentSubmission.runId : "";
+      const message = promptInput.value.trim();
+      if (runId.length === 0 || message.length === 0) {
+        return;
+      }
+      pendingSteerMessage = message;
+      currentSubmission = {
+        ...(currentSubmission && typeof currentSubmission === "object" ? currentSubmission : {}),
+        busy: true,
+        status: "running",
+        message: "Sending steer...",
+      };
+      renderSubmission(currentSubmission);
+      vscodeApi.postMessage({
+        type: "steerTurn",
+        runId,
+        message,
+      });
+    }
+
+    function handleSteerResult(result) {
+      const message = result && typeof result.message === "string" ? result.message.trim() : "";
+      if (message.length === 0) {
+        return;
+      }
+
+      if (result && result.ok === true) {
+        if (promptInput.value.trim() === message) {
+          promptInput.value = "";
+        }
+      } else if (promptInput.value.trim().length === 0) {
+        promptInput.value = message;
+      }
+
+      if (pendingSteerMessage === message) {
+        pendingSteerMessage = "";
+      }
     }
 
     function requestCancelCurrentTurn() {
@@ -2958,6 +3176,21 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
         renderApproval(undefined);
       });
 
+      const conversationApproveButton = document.createElement("button");
+      conversationApproveButton.type = "button";
+      conversationApproveButton.className = "approval-action approve conversation";
+      conversationApproveButton.textContent = "Approve for conversation";
+      conversationApproveButton.addEventListener("click", () => {
+        markApprovalResolved(approval.approvalId);
+        vscodeApi.postMessage({
+          type: "approvalDecision",
+          approvalId: approval.approvalId,
+          decision: "approve",
+          persist: "conversation",
+        });
+        renderApproval(undefined);
+      });
+
       const updateApproveState = () => {
         approveButton.disabled = hunkInputs.length > 0 && selectedHunkIds(hunkInputs).length === 0;
       };
@@ -2967,8 +3200,24 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       updateApproveState();
 
       actions.append(rejectButton, approveButton);
+      if (canApproveForConversation(approval, hunkInputs)) {
+        actions.append(conversationApproveButton);
+      }
       card.append(actions);
       return card;
+    }
+
+    function canApproveForConversation(approval, hunkInputs) {
+      return (
+        approval &&
+        approval.toolName === "shell" &&
+        approval.persistable === true &&
+        typeof approval.runId === "string" &&
+        approval.runId.length > 0 &&
+        typeof approval.command === "string" &&
+        approval.command.length > 0 &&
+        hunkInputs.length === 0
+      );
     }
 
     function renderApprovalSection(label, body, className) {
@@ -3055,7 +3304,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       if (actionButton) {
         submissionRoot.append(actionButton);
       }
-      if (status === "running") {
+      if (status === "running" && wasBusy !== true) {
         promptInput.value = "";
       }
       syncConversationChrome();
@@ -3097,7 +3346,10 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     }
 
     function setComposerBusy(busy, cancelable, runId, canceling) {
-      promptInput.disabled = busy;
+      promptInput.disabled = false;
+      promptInput.placeholder = busy ? "Steer the current turn..." : "Ask ProleCoder";
+      promptInput.title = busy ? "Steer the current turn without starting a new turn" : "";
+      promptInput.setAttribute("aria-label", busy ? "Steer current turn" : "Chat message");
       modeInput.disabled = busy;
       modeInput.hidden = true;
       sendButton.disabled = busy && canceling === true;
@@ -3236,8 +3488,8 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       if (hiddenCount > 0) {
         body.append(renderWorkLogNotice(hiddenCount));
       }
-      for (const item of displayedItems) {
-        body.append(renderWorkLogRow(item));
+      for (const group of workLogGroups(displayedItems)) {
+        body.append(renderWorkLogGroup(group));
       }
       details.append(body);
       return details;
@@ -3285,6 +3537,61 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       }
 
       return row;
+    }
+
+    function workLogGroups(items) {
+      const groups = [];
+      const byId = new Map();
+      for (const item of items) {
+        const groupId =
+          item && typeof item.workGroupId === "string" && item.workGroupId.length > 0
+            ? item.workGroupId
+            : "event:" + item.id;
+        let group = byId.get(groupId);
+        if (group === undefined) {
+          group = {
+            id: groupId,
+            title:
+              item && typeof item.workGroupTitle === "string" && item.workGroupTitle.length > 0
+                ? item.workGroupTitle
+                : item.title,
+            items: [],
+          };
+          byId.set(groupId, group);
+          groups.push(group);
+        }
+        group.items.push(item);
+      }
+      return groups;
+    }
+
+    function renderWorkLogGroup(group) {
+      if (!group || !Array.isArray(group.items) || group.items.length <= 1) {
+        return renderWorkLogRow(group && Array.isArray(group.items) ? group.items[0] : {});
+      }
+
+      const details = document.createElement("details");
+      details.className = "work-log-group";
+      details.open = false;
+
+      const summary = document.createElement("summary");
+      summary.className = "work-log-group-summary";
+      const title = document.createElement("span");
+      title.className = "work-log-group-title";
+      title.textContent = typeof group.title === "string" && group.title.length > 0 ? group.title : "Work group";
+      const count = document.createElement("span");
+      count.className = "work-log-group-count";
+      count.textContent = group.items.length + " events";
+      summary.append(title, count);
+      details.append(summary);
+
+      const body = document.createElement("div");
+      body.className = "work-log-group-body";
+      for (const item of group.items) {
+        body.append(renderWorkLogRow(item));
+      }
+      details.append(body);
+      return details;
     }
 
     function workLogTitle(items) {
@@ -3429,14 +3736,36 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       const button = document.createElement("button");
       button.type = "button";
       button.className = "message-edit";
-      button.textContent = "Edit";
       button.title = "Edit and resend message";
       button.setAttribute("aria-label", "Edit and resend message");
+      button.append(renderPenIcon());
       button.disabled = currentSubmission && currentSubmission.busy === true;
       button.addEventListener("click", () => {
         editComposerMessage(item, message);
       });
       return button;
+    }
+
+    function renderPenIcon() {
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("class", "message-edit-icon");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("aria-hidden", "true");
+      svg.setAttribute("focusable", "false");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", "M4 20h4.5L19 9.5 14.5 5 4 15.5V20Z");
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", "currentColor");
+      path.setAttribute("stroke-width", "1.8");
+      path.setAttribute("stroke-linejoin", "round");
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      line.setAttribute("d", "m13.5 6 4.5 4.5M4 20h16");
+      line.setAttribute("fill", "none");
+      line.setAttribute("stroke", "currentColor");
+      line.setAttribute("stroke-width", "1.8");
+      line.setAttribute("stroke-linecap", "round");
+      svg.append(path, line);
+      return svg;
     }
 
     function editComposerMessage(item, message) {
@@ -3567,6 +3896,9 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
         workLogTitle: workLogSummary ? workLogSummary.textContent || "" : "",
         workLogTypes: textContents(".work-log-row-meta span:last-child"),
         promptValue: promptInput.value,
+        promptPlaceholder: promptInput.getAttribute("placeholder") || "",
+        promptTitle: promptInput.title || "",
+        promptAriaLabel: promptInput.getAttribute("aria-label") || "",
         sendLabel: sendButton.getAttribute("aria-label") || "",
         sendTitle: sendButton.title || "",
         sendIsStop: sendButton.classList.contains("stop"),
@@ -3577,6 +3909,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
         modeHidden: modeInput.hidden === true,
         cancelDisabled: cancelButton.disabled,
         messageEditButtons: textContents(".message-edit"),
+        messageEditLabels: textAttributes(".message-edit", "aria-label"),
         messageEditDisabled: Array.from(document.querySelectorAll(".message-edit")).map((element) => element.disabled === true),
         supersededUserItemIds: Array.from(supersededUserItemIds),
         providerActions: Array.from(document.querySelectorAll(".provider-action")).map((element) => element.getAttribute("aria-label") || ""),
@@ -3714,6 +4047,46 @@ function cancelRunIdFromMessage(message: unknown): string | undefined {
 
 function isCancelTurnMessage(message: unknown): message is Record<string, unknown> {
   return isRecord(message) && message["type"] === "cancelTurn";
+}
+
+function steerTurnMessageFromWebviewMessage(message: unknown): SteerParams | undefined {
+  if (!isRecord(message) || message["type"] !== "steerTurn") {
+    return undefined;
+  }
+
+  const runId = message["runId"];
+  const steerMessage = message["message"];
+  if (
+    typeof runId !== "string" ||
+    runId.length === 0 ||
+    typeof steerMessage !== "string" ||
+    steerMessage.trim().length === 0
+  ) {
+    return undefined;
+  }
+
+  return {
+    runId,
+    message: steerMessage.trim(),
+  };
+}
+
+function isConversationApprovalMessage(message: unknown, request: ApprovalPromptRequest): boolean {
+  return (
+    isRecord(message) &&
+    message["type"] === "approvalDecision" &&
+    message["approvalId"] === request.approvalId &&
+    message["decision"] === "approve" &&
+    message["persist"] === "conversation"
+  );
+}
+
+function conversationApprovalGrantKey(request: ApprovalPromptRequest): string | undefined {
+  if (request.toolName !== "shell" || request.command === undefined || request.command.trim().length === 0) {
+    return undefined;
+  }
+  const cwd = request.cwd === undefined || request.cwd.trim().length === 0 ? "." : request.cwd.trim();
+  return `${cwd}\n${request.command.trim()}`;
 }
 
 function isConfigureDeepSeekApiKeyMessage(message: unknown): boolean {

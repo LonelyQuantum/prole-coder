@@ -23,7 +23,7 @@ use prole_coder_agent_core::{
         ApprovalDecision, ApprovalPolicy, ApprovalPolicyError, TextRange as CoreTextRange,
         TurnApprovalRequest, TurnAttachment as CoreTurnAttachment,
         TurnAttachmentKind as CoreTurnAttachmentKind, TurnEventSink, TurnEventSinkError,
-        TurnProvider, TurnSupersedes as CoreTurnSupersedes,
+        TurnProvider, TurnSteerQueue, TurnSupersedes as CoreTurnSupersedes,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,7 @@ pub const SEND_TURN_METHOD: RpcMethod = RpcMethod::new("sendTurn");
 pub const APPROVE_METHOD: RpcMethod = RpcMethod::new("approve");
 pub const REJECT_METHOD: RpcMethod = RpcMethod::new("reject");
 pub const CANCEL_METHOD: RpcMethod = RpcMethod::new("cancel");
+pub const STEER_METHOD: RpcMethod = RpcMethod::new("steer");
 pub const RESUME_METHOD: RpcMethod = RpcMethod::new("resume");
 pub const LIST_RUNS_METHOD: RpcMethod = RpcMethod::new("listRuns");
 pub const DELETE_RUN_METHOD: RpcMethod = RpcMethod::new("deleteRun");
@@ -594,6 +595,21 @@ pub struct CancelResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SteerParams {
+    pub run_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SteerResult {
+    pub run_id: String,
+    pub steer_id: String,
+    pub accepted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FimPreviewParams {
     pub prefix: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -700,6 +716,11 @@ pub trait AgentRpcRequestHandler {
         &mut self,
         params: CancelParams,
     ) -> Result<AgentRpcHandlerOutput<CancelResult>, AgentRpcHandlerError>;
+
+    fn steer(
+        &mut self,
+        params: SteerParams,
+    ) -> Result<AgentRpcHandlerOutput<SteerResult>, AgentRpcHandlerError>;
 
     fn resume(
         &mut self,
@@ -1006,6 +1027,47 @@ where
         .with_events(events))
     }
 
+    fn steer(
+        &mut self,
+        params: SteerParams,
+    ) -> Result<AgentRpcHandlerOutput<SteerResult>, AgentRpcHandlerError> {
+        self.drain_ready_active_run_events()?;
+        let active_run = self.active_run.as_ref().ok_or_else(|| {
+            AgentRpcHandlerError::new(
+                RPC_RUN_NOT_FOUND,
+                format!(
+                    "run `{}` is not active in the current RPC handler",
+                    params.run_id
+                ),
+            )
+        })?;
+        if active_run.run_id != params.run_id {
+            return Err(AgentRpcHandlerError::new(
+                RPC_RUN_NOT_FOUND,
+                format!(
+                    "run `{}` is not active in the current RPC handler",
+                    params.run_id
+                ),
+            ));
+        }
+        if params.message.trim().is_empty() {
+            return Err(AgentRpcHandlerError::new(
+                JSON_RPC_INVALID_PARAMS,
+                "steer.message must not be empty",
+            ));
+        }
+
+        let steer_id = generate_id("steer")?;
+        active_run
+            .steer_queue
+            .push(steer_id.clone(), params.message);
+        Ok(AgentRpcHandlerOutput::new(SteerResult {
+            run_id: params.run_id,
+            steer_id,
+            accepted: true,
+        }))
+    }
+
     fn resume(
         &mut self,
         params: ResumeParams,
@@ -1274,6 +1336,7 @@ struct RpcWorkspace {
 struct ActiveRpcRun {
     run_id: String,
     cancellation_token: CancellationToken,
+    steer_queue: TurnSteerQueue,
     approval_queue: RpcApprovalQueue,
     run_log: SerializedRunLog,
     events: mpsc::Receiver<RunLogEvent>,
@@ -1961,7 +2024,10 @@ where
     } = spawn;
     let buffer_internal_events = live_events.is_none();
     let cancellation_token = CancellationToken::new();
-    let worker_input = input.with_cancellation_token(cancellation_token.clone());
+    let steer_queue = TurnSteerQueue::default();
+    let worker_input = input
+        .with_steer_queue(steer_queue.clone())
+        .with_cancellation_token(cancellation_token.clone());
     let run_log = SerializedRunLog::new(run_log);
     let worker_run_log = run_log.clone();
     let worker_approval_queue = approval_queue.clone();
@@ -1987,6 +2053,7 @@ where
     Ok(ActiveRpcRun {
         run_id,
         cancellation_token,
+        steer_queue,
         approval_queue,
         run_log,
         events: events_rx,
@@ -2409,6 +2476,9 @@ where
             method if method == CANCEL_METHOD.qualified_name() => {
                 self.handle_cancel(id, message.params, writer)
             }
+            method if method == STEER_METHOD.qualified_name() => {
+                self.handle_steer(id, message.params, writer)
+            }
             method if method == RESUME_METHOD.qualified_name() => {
                 self.handle_resume(id, message.params, writer)
             }
@@ -2563,6 +2633,30 @@ where
             };
 
         match self.handler.cancel(params) {
+            Ok(output) => {
+                write_json_line(writer, &JsonRpcResponse::new(id, output.result))?;
+                emit_run_log_events(writer, &output.events)
+            }
+            Err(error) => write_error(writer, id, error.into_error_object()),
+        }
+    }
+
+    fn handle_steer<W>(
+        &mut self,
+        id: Value,
+        params: Option<Value>,
+        writer: &mut W,
+    ) -> Result<(), AgentRpcError>
+    where
+        W: Write,
+    {
+        let params =
+            match parse_params::<SteerParams>(params, STEER_METHOD.qualified_name().as_str()) {
+                Ok(params) => params,
+                Err(error) => return write_error(writer, id, error),
+            };
+
+        match self.handler.steer(params) {
             Ok(output) => {
                 write_json_line(writer, &JsonRpcResponse::new(id, output.result))?;
                 emit_run_log_events(writer, &output.events)
@@ -3071,10 +3165,10 @@ mod tests {
         RPC_RUN_NOT_FOUND, RPC_TOOL_EXECUTION_FAILED, RPC_UNSUPPORTED_PROTOCOL,
         RPC_WORKSPACE_UNTRUSTED, RejectParams, RejectResult, ResumeParams, ResumeResult,
         RpcApprovalPersistence, RpcApprovalQueue, RpcApprovalState, RpcApprovedHunks, RpcRunState,
-        RpcRunSummary, RpcRunSummaryStatus, RpcWorkspace, SEND_TURN_METHOD, SendTurnParams,
-        SendTurnResult, StdioEventBridge, emit_live_run_log_events, format_unix_millis,
-        run_log_event_to_notification, run_log_events_to_batch_notification,
-        run_stdio_request_loop, spawn_active_run,
+        RpcRunSummary, RpcRunSummaryStatus, RpcWorkspace, SEND_TURN_METHOD, STEER_METHOD,
+        SendTurnParams, SendTurnResult, StdioEventBridge, SteerParams, SteerResult,
+        emit_live_run_log_events, format_unix_millis, run_log_event_to_notification,
+        run_log_events_to_batch_notification, run_stdio_request_loop, spawn_active_run,
     };
 
     #[test]
@@ -3084,6 +3178,7 @@ mod tests {
         assert_eq!(APPROVE_METHOD.qualified_name(), "agent.approve");
         assert_eq!(REJECT_METHOD.qualified_name(), "agent.reject");
         assert_eq!(CANCEL_METHOD.qualified_name(), "agent.cancel");
+        assert_eq!(STEER_METHOD.qualified_name(), "agent.steer");
         assert_eq!(RESUME_METHOD.qualified_name(), "agent.resume");
         assert_eq!(LIST_RUNS_METHOD.qualified_name(), "agent.listRuns");
         assert_eq!(DELETE_RUN_METHOD.qualified_name(), "agent.deleteRun");
@@ -5200,6 +5295,7 @@ mod tests {
         approvals: Vec<ApproveParams>,
         rejections: Vec<RejectParams>,
         cancellations: Vec<CancelParams>,
+        steers: Vec<SteerParams>,
         resumes: Vec<ResumeParams>,
         list_runs: Vec<ListRunsParams>,
         delete_runs: Vec<DeleteRunParams>,
@@ -5272,6 +5368,18 @@ mod tests {
                 run_id: params.run_id,
                 state: RpcRunState::Canceled,
                 reason: params.reason,
+            }))
+        }
+
+        fn steer(
+            &mut self,
+            params: SteerParams,
+        ) -> Result<AgentRpcHandlerOutput<SteerResult>, AgentRpcHandlerError> {
+            self.steers.push(params.clone());
+            Ok(AgentRpcHandlerOutput::new(SteerResult {
+                run_id: params.run_id,
+                steer_id: "steer_rpc".to_owned(),
+                accepted: true,
             }))
         }
 

@@ -176,6 +176,7 @@ export function approvalPromptRequestFromEvent(
 
   return {
     approvalId: event.payload.approvalId,
+    runId: event.runId,
     toolCallId: event.payload.toolCallId,
     toolName: event.payload.toolName,
     risk: event.payload.risk,

@@ -8,6 +8,7 @@ export const agentResumeMethod = "agent.resume" as const;
 export const agentApproveMethod = "agent.approve" as const;
 export const agentRejectMethod = "agent.reject" as const;
 export const agentCancelMethod = "agent.cancel" as const;
+export const agentSteerMethod = "agent.steer" as const;
 export const agentListRunsMethod = "agent.listRuns" as const;
 export const agentDeleteRunMethod = "agent.deleteRun" as const;
 export const agentPreviewFimMethod = "agent.previewFim" as const;
@@ -594,6 +595,17 @@ export interface CancelResult {
   readonly runId: string;
   readonly state: "canceled";
   readonly reason?: string;
+}
+
+export interface SteerParams {
+  readonly runId: string;
+  readonly message: string;
+}
+
+export interface SteerResult {
+  readonly runId: string;
+  readonly steerId: string;
+  readonly accepted: true;
 }
 
 export interface FimPreviewParams {

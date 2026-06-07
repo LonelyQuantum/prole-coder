@@ -1,6 +1,6 @@
 # Agent RPC Server
 
-状态：`0.1.0` Phase 1 基础 stdio 事件桥接、`TurnEventSink` 实时输出桥接、双向 request loop、真实 Turn Loop handler、RPC pending approval 等待队列、审批超时、pending run 取消语义、EOF shutdown 取消、provider/tool 协作式取消信号和 Run Log 写入串行化已实现；Phase 3 已完成 reader/writer 全双工事件队列、`agent.sendTurn` 早返回和 writer failure 断连取消；Phase 4 已完成初始化 capability data contract、事件 payload fixture 和实时 `agent.eventBatch` wire 层批量发送。
+状态：`0.1.0` Phase 1 基础 stdio 事件桥接、`TurnEventSink` 实时输出桥接、双向 request loop、真实 Turn Loop handler、RPC pending approval 等待队列、审批超时、pending run 取消语义、EOF shutdown 取消、provider/tool 协作式取消信号和 Run Log 写入串行化已实现；Phase 3 已完成 reader/writer 全双工事件队列、`agent.sendTurn` 早返回和 writer failure 断连取消；Phase 4 已完成初始化 capability data contract、事件 payload fixture 和实时 `agent.eventBatch` wire 层批量发送；Phase 5 已接入 active run `agent.steer`。
 
 Agent RPC Server 是 CLI、TUI、VS Code 插件和 Rust Agent Core 之间的协议边界。它不重新实现工具执行、上下文构建或 turn loop；它负责把前端 request 转换为 Core 调用，把 Core / Run Log 事件转换为 JSON-RPC notification。
 
@@ -27,13 +27,14 @@ Agent RPC Server 是 CLI、TUI、VS Code 插件和 Rust Agent Core 之间的协�
 - `AgentRpcRequestHandler`：RPC request loop 与真实 Core 执行逻辑之间的 handler trait，并提供 EOF shutdown hook。
 - `AgentTurnLoopRpcHandler<F>`：通过 provider factory 复用 Core `AgentTurnLoop` 的真实 handler。它会在 `agent.sendTurn` 时创建 run log、启动后台 Turn Loop worker，并在创建 run 后立即返回 accepted；live 事件通过有界队列交给 request loop 的单 writer 持续输出。
 - `RpcApprovalQueue` / `RpcApprovalPolicy`：在 `tool.approvalRequired` 事件出现时登记 pending approval，并让后台 Turn Loop 在 `ApprovalPolicy::decide` 中等待 `agent.approve` / `agent.reject` / `agent.cancel` 或超时唤醒。
+- `TurnSteerQueue`：active run 持有的运行中指导队列。`agent.steer` 会把用户补充消息追加到队列，后台 Turn Loop 在下一次 provider request 前写入 `turn.steered` 并注入该消息。
 - `SerializedRunLog`：RPC active run 持有共享的同步 run log，worker append 和 `agent.resume` load 通过同一把锁串行化。
 - `CancellationToken`：RPC active run 持有一个可克隆 token，并注入 `AgentTurnInput`；`agent.cancel` 会设置 token，让 provider wrapper 和命令类工具协作式停止。
 - `AgentRpcServer<H>`：维护初始化状态，解析单行 JSON-RPC request，分发给 handler，并写回 response / error。
 - `agent.listRuns`：通过 Run Log summary metadata 返回本地 run 列表，不扫描完整事件日志。
 - `run_stdio_request_loop`：使用 reader thread 读取 newline-delimited JSON-RPC message，同时消费 live event queue；所有 response、error、replay event、live `agent.event` / `agent.eventBatch` notification 都经同一个 writer 串行输出。stdin EOF 或 writer failure 会取消 active run 并 flush 收尾事件。
 
-当前 request loop 已支持 `agent.initialize`、`agent.sendTurn`、`agent.approve`、`agent.reject`、`agent.cancel`、`agent.resume` 和 `agent.listRuns` 的基础分发。`AgentTurnLoopRpcHandler` 已实现真实 `agent.sendTurn`、基于 Run Log 的 `agent.resume`、基于 summary metadata 的 `agent.listRuns`、单 active run 的 pending approval 等待队列、pending approval 超时、取消、EOF shutdown 取消和 provider/tool 协作式停止。RPC crate 本身仍不直接绑定 DeepSeek provider 或 fixture provider；具体 provider 由外部 factory 注入，CLI 的 `rpc` 子命令当前提供 DeepSeek / fixture factory。
+当前 request loop 已支持 `agent.initialize`、`agent.sendTurn`、`agent.approve`、`agent.reject`、`agent.cancel`、`agent.steer`、`agent.resume`、`agent.listRuns` 和 `agent.deleteRun` 的基础分发。`AgentTurnLoopRpcHandler` 已实现真实 `agent.sendTurn`、基于 Run Log 的 `agent.resume`、基于 summary metadata 的 `agent.listRuns`、单 active run 的 pending approval 等待队列、pending approval 超时、运行中 steer、取消、EOF shutdown 取消和 provider/tool 协作式停止。RPC crate 本身仍不直接绑定 DeepSeek provider 或 fixture provider；具体 provider 由外部 factory 注入，CLI 的 `rpc` 子命令当前提供 DeepSeek / fixture factory。
 
 本机可通过以下命令启动 stdio RPC server：
 
@@ -43,7 +44,7 @@ prole rpc
 
 测试和前端开发时可使用 `prole rpc --provider fixture --fixture final` 获得不联网的确定性 provider。
 
-VS Code 插件当前已提供基础进程监管：插件激活后会按 `prole-coder.rpc.command` 和 `prole-coder.rpc.args` 启动该 stdio server，发送 `agent.initialize`，把 stdout 中的 `agent.event` / `agent.eventBatch` notification 转发给前端事件 handler，并在进程退出或启动失败时更新状态和提示用户。扩展侧 `RpcServerManager` 已提供 typed `sendTurn`、`approve`、`reject`、`listRuns` 和 `resume` helper；Sidebar Chat 会用 `agent.listRuns` 填充最近 run 列表，并用 `agent.resume` 回放历史事件。
+VS Code 插件当前已提供基础进程监管：插件激活后会按 `prole-coder.rpc.command` 和 `prole-coder.rpc.args` 启动该 stdio server，发送 `agent.initialize`，把 stdout 中的 `agent.event` / `agent.eventBatch` notification 转发给前端事件 handler，并在进程退出或启动失败时更新状态和提示用户。扩展侧 `RpcServerManager` 已提供 typed `sendTurn`、`approve`、`reject`、`cancel`、`steer`、`listRuns`、`resume` 和 `deleteRun` helper；Sidebar Chat 会用 `agent.listRuns` 填充最近 run 列表，并用 `agent.resume` 回放历史事件。
 
 ## 数据流
 
@@ -111,11 +112,11 @@ RPC 层不负责重新脱敏 payload。当前 Run Log 写入时已经调用基�
 
 `agent.sendTurn` 创建 run 后返回 accepted；后续 live events 由后台 worker 通过有界队列持续投递给 request loop。request loop 会把当前可立即取出的连续 live events 批量写为 `agent.eventBatch`，单个 live event 仍写为 `agent.event`。`agent.resume` 等 replay 型方法仍可随 response 返回一组历史 `RunLogEvent`，request loop 会先写 JSON-RPC response，再按顺序写 replay `agent.event` notification。这样保持“request 已被接受”和“事件开始抵达”的边界清晰，同时允许长 provider request 期间继续向前端推送事件，且不改变 Run Log `seq` 与 replay 语义。
 
-`AgentTurnLoopRpcHandler` 已不再用拒绝策略模拟审批。`agent.sendTurn` 会启动后台 Turn Loop worker，并立即返回 accepted；worker 通过 `TurnEventSink` 把 `tool.approvalRequired` 等事件写入 Run Log 后同步投递到 live queue。如果需要审批，worker 在内存队列中等待。随后 `agent.approve` / `agent.reject` 会解析对应 `approvalId`、唤醒 worker，并继续输出 `tool.approvalResolved`、工具执行和 run 结束事件。`agent.cancel` 会设置 active run 的 `CancellationToken`，同时取消尚未解析的 pending approval；等待审批时会写入 `tool.approvalResolved(decision="canceled")` 和 `run.canceled`，provider/tool 执行中取消会以 `E_RUN_CANCELED` 写入 `run.canceled`。request loop 读到 EOF 或写 stdout 失败时会触发断连取消；默认 300 秒审批超时会写入 `tool.approvalResolved(decision="expired")` 和 `run.canceled`。
+`AgentTurnLoopRpcHandler` 已不再用拒绝策略模拟审批。`agent.sendTurn` 会启动后台 Turn Loop worker，并立即返回 accepted；worker 通过 `TurnEventSink` 把 `tool.approvalRequired` 等事件写入 Run Log 后同步投递到 live queue。如果需要审批，worker 在内存队列中等待。随后 `agent.approve` / `agent.reject` 会解析对应 `approvalId`、唤醒 worker，并继续输出 `tool.approvalResolved`、工具执行和 run 结束事件。`agent.steer` 会校验 active `runId` 并把非空消息追加到该 run 的 steer queue；下一次 provider request 前，worker 会写入 `turn.steered` 并把 steer 文本注入消息历史。`agent.cancel` 会设置 active run 的 `CancellationToken`，同时取消尚未解析的 pending approval；等待审批时会写入 `tool.approvalResolved(decision="canceled")` 和 `run.canceled`，provider/tool 执行中取消会以 `E_RUN_CANCELED` 写入 `run.canceled`。request loop 读到 EOF 或写 stdout 失败时会触发断连取消；默认 300 秒审批超时会写入 `tool.approvalResolved(decision="expired")` 和 `run.canceled`。
 
 同一个 active run 的 Run Log 由 `SerializedRunLog` 保护：后台 Turn Loop worker 是唯一实际追加者，`agent.resume` 如果读取的是当前 active run，会通过同一个同步句柄 load，而不是直接绕过锁读取磁盘文件。这样能保证前端 replay 看到的 `seq` 总是来自完整事件边界。
 
-这意味着当前 RPC server 已具备真实审批等待、取消、超时、EOF / writer failure 断连取消、协作式 provider/tool 停止语义、命令子进程树清理，以及 `agent.sendTurn` 早返回后的后台 live event streaming/batching。后续增强重点转向多 active run 和更强 sandbox。
+这意味着当前 RPC server 已具备真实审批等待、运行中 steer、取消、超时、EOF / writer failure 断连取消、协作式 provider/tool 停止语义、命令子进程树清理，以及 `agent.sendTurn` 早返回后的后台 live event streaming/batching。后续增强重点转向多 active run 和更强 sandbox。
 
 ## Request Loop 规则
 

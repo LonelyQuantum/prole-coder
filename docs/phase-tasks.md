@@ -1,6 +1,6 @@
 # 详细任务索引
 
-状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-15 已完成；P5-16 真实试用 UX backlog 仍未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
+状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-16 已完成；P5-17 Codex-like 交互细化与真实试用 UX backlog 仍未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
 
 本文档是详细设计文档里的任务账本。README 保留高层开发计划；这里把各模块文档中出现的“已实现、尚未实现、后续增强、下一步”收敛为可勾选任务，避免后续工作只散落在说明文字里。
 
@@ -113,7 +113,7 @@
 
 ## Phase 5：VS Code Codex-like UX 与开发工作流
 
-状态：进行中。P5-1 到 P5-15 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收、Output Channel、API key/model 配置、错误恢复、只读 Git context、GitLens-like commit / PR 文案生成工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误码与恢复动作、真实试用回归修复包，以及第二批真实试用 UX 收敛；P5-16 真实试用 UX backlog 持续收敛仍未完成。G4 自动 commit / push / create PR 留作后续增强。
+状态：进行中。P5-1 到 P5-16 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收、Output Channel、API key/model 配置、错误恢复、只读 Git context、GitLens-like commit / PR 文案生成工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误码与恢复动作、真实试用回归修复包、第二批真实试用 UX 收敛，以及模型回合预算 continuation approval、Provider Key/Model 图标按钮、Chat run mode 自动推断和 PowerShell 验证命令规则收敛；P5-17 Codex-like 交互细化与真实试用 UX backlog 持续收敛仍未完成。G4 自动 commit / push / create PR 留作后续增强。
 
 | 状态 | 任务 | 来源 | 说明 |
 | --- | --- | --- | --- |
@@ -150,7 +150,12 @@
 | [x] | P5-16b：Provider Key/Model 图标按钮同排展示 | `vscode/extension/src/chatView.ts`、`vscode/extension/test/electron/index.ts` | 已完成：Sidebar composer 的 DeepSeek API key 与 model 入口改为同排的紧凑图标按钮，钥匙、大脑和发送/停止按钮均使用跟随 VS Code 主题色的黑白灰 SVG 图标，并保留 title / aria-label 供 tooltip、键盘和辅助功能使用；Electron probe 改为断言可访问标签而不是旧可见文字。 |
 | [x] | P5-16c：自动推断 Chat run mode 并隐藏模式下拉框 | `vscode/extension/src/chatView.ts`、`vscode/extension/src/chatInput.ts`、`docs/vscode-extension.md` | 已完成：Sidebar composer 默认隐藏 `edit` / `ask` / `plan` / `review` 下拉框，普通发送不再提交隐藏 select 的默认值；`chatInput` 在协议边界根据用户文本自动推断 run mode，问答走 `ask`，实现/修复走 `edit`，计划讨论走 `plan`，代码审查走 `review`，并支持 `/ask`、`plan:` 等轻量显式前缀覆盖推断且发送前剥离前缀。验收：TS 单测覆盖推断、前缀剥离、无效 mode 拒绝和 webview HTML 隐藏 selector；extension-host probe 覆盖运行中/完成后 mode selector 均保持隐藏。 |
 | [x] | P5-16d：PowerShell 验证命令规则与假失败收敛 | `docs/turn-loop.md`、`docs/tool-system.md`、`crates/agent-core/src/turn_loop.rs` | 已完成：根据真实试用中 `cargo test 2>&1` 在 Windows PowerShell 5.1 下把 CLIXML/progress 噪声带入 stderr、导致“stdout 全绿但工具状态 failed”的现象，补强 provider 工具使用契约：Windows 下模型不应为测试/验证命令手动追加 `2>&1`，应让 shell 工具分别捕获 stdout/stderr；Turn Loop prompt/context 测试覆盖该规则，Output/run log 继续保留真实 stderr。 |
-| [ ] | P5-16z：真实试用 UX backlog 持续收敛 | `README.md`、`docs/testing.md`、`docs/vscode-extension.md` | 未完成：继续根据真实 VS Code 插件试用收集 Runs、Key/Model/Settings、审批、Chat、Output 日志、上下文压缩、Markdown 兼容性和大工具参数稳定性问题；新增可执行项时优先拆成新的 P5-16 子任务或后续 Phase 任务，不能把新需求继续堆进本行。 |
+| [x] | P5-17a：Sidebar 消息编辑图标细化 | `vscode/extension/src/chatView.ts`、`vscode/extension/test/electron/index.ts` | 已完成：把用户消息 Edit 文本按钮改为跟随 VS Code 主题色的简笔画笔图标按钮，保留 aria-label/title 供键盘、tooltip 和自动化测试使用；Electron probe 改为断言可访问标签。 |
+| [x] | P5-17b：Work log 按指令调用分组 | `vscode/extension/src/chatEvents.ts`、`vscode/extension/src/chatView.ts` | 已完成：默认仍只显示用户/assistant 消息，过程事件在 Work log 内按 provider iteration、tool call、approval 等工作边界分组折叠，避免中间思考和工具生命周期混成一长串；完整细节继续写入 Output 和 run log。 |
+| [x] | P5-17c：本对话命令审批复用 | `vscode/extension/src/chatView.ts`、`vscode/extension/src/approvalFlow.ts` | 已完成：Sidebar 审批卡支持“Approve for conversation”，按 runId + cwd + command 记忆 shell 审批，后续同 run 的同命令自动发送一次性 approve；该复用不跨 run、不写入持久批准存储。 |
+| [x] | P5-17d：只读 shell 命令白名单免审批 | `crates/agent-core/src/turn_loop.rs`、`docs/tool-system.md` | 已完成：对当前 workspace 内严格只读的 `rg`、`Get-Content` / `gc` / `cat` / `type`、`Select-String`、`Get-ChildItem` / `gci` / `dir`、`Test-Path` 和 `git diff/status/log/show` 建立保守白名单，风险评估可把这些 shell 调用降为 `read` 并免审批；包含管道、重定向、变量展开、子命令、写文件参数、绝对/父级路径、`.env` / `.secrets` / `.git` 等敏感 workspace 路径的情况仍需审批。 |
+| [x] | P5-17e：运行中 steer 指导入口 | `packages/protocol`、`crates/agent-rpc`、`crates/agent-core`、`vscode/extension/src/chatView.ts` | 已完成：新增 `agent.steer`，允许 Sidebar 在 turn 运行中通过输入框发送补充指导；Turn Loop 在下一次 provider 请求前注入 steer 消息并记录 `turn.steered` 事件，停止仍由方块按钮触发 cancel。 |
+| [ ] | P5-17z：真实试用 UX backlog 持续收敛 | `README.md`、`docs/testing.md`、`docs/vscode-extension.md` | 未完成：继续根据真实 VS Code 插件试用收集 Runs、Key/Model/Settings、审批、Chat、Output 日志、上下文压缩、Markdown 兼容性和大工具参数稳定性问题；新增可执行项时优先拆成新的 P5-17 子任务或后续 Phase 任务，不能把新需求继续堆进本行。 |
 
 ## Phase 6：TUI 与生态扩展
 

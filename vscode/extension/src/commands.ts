@@ -93,6 +93,7 @@ export type ApprovalPersistence = "never" | "session" | "workspace";
 
 export interface ApprovalPromptRequest {
   readonly approvalId: string;
+  readonly runId?: string;
   readonly toolCallId: string;
   readonly toolName: string;
   readonly risk: string;

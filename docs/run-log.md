@@ -61,6 +61,7 @@ Run Log 本身负责 append/load 串行化，并允许 Turn Loop 在同一 run �
 
 - `run.started`：记录 `startedAtUnixMs`、`mode` 和运行状态。
 - `turn.started`：使用已脱敏的 `userTask` 更新 `title`；如果 payload 带 `supersedes`，表示该新 turn 是编辑重发并覆盖某个历史用户消息的展示语义，Run Log 仍保留旧 turn 原始输入用于审计。
+- `turn.steered`：记录 active run 运行中追加的用户指导，便于前端回放和本地故障复盘。
 - `run.completed`：状态变为 `completed`，记录完成时间、最终摘要、变更文件和验证状态。
 - `run.failed`：状态变为 `failed`，记录失败消息。
 - `run.canceled`：状态变为 `canceled`，记录取消原因。

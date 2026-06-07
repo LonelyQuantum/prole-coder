@@ -348,7 +348,7 @@ async function exerciseChatKeyboardSubmit(): Promise<void> {
   assert.equal(editable.sendIsStop, false);
   assert.deepEqual(editable.sendVisibleIcons, ["submit"]);
   assert.equal(editable.modeHidden, true);
-  assert.ok(editable.messageEditButtons.includes("Edit"));
+  assert.ok(editable.messageEditLabels.includes("Edit and resend message"));
   assert.ok(editable.messageEditDisabled.every((disabled) => disabled === false));
 
   const editProbe = await chatProbe({ type: "click", selector: ".item.user .message-edit" });
@@ -583,6 +583,7 @@ interface WebviewProbeSnapshot {
   readonly modeHidden: boolean;
   readonly cancelDisabled: boolean;
   readonly messageEditButtons: readonly string[];
+  readonly messageEditLabels: readonly string[];
   readonly messageEditDisabled: readonly boolean[];
   readonly supersededUserItemIds: readonly string[];
   readonly providerActions: readonly string[];

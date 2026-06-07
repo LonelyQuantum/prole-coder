@@ -257,6 +257,7 @@ test("approvalPromptRequestFromEvent maps protocol payloads to modal requests", 
 
   assert.deepEqual(request, {
     approvalId: "approval_1",
+    runId: "run_1",
     toolCallId: "tool_call_1",
     toolName: "shell",
     risk: "exec",

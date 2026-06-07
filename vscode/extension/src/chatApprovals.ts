@@ -10,6 +10,7 @@ const APPROVAL_TRUNCATED_NOTICE = "\n[truncated for sidebar; see Output or run l
 
 export interface ChatApprovalSnapshot {
   readonly approvalId: string;
+  readonly runId?: string;
   readonly toolCallId: string;
   readonly toolName: string;
   readonly risk: string;
@@ -31,6 +32,7 @@ export function chatApprovalSnapshotFromRequest(
 ): ChatApprovalSnapshot {
   return {
     approvalId: request.approvalId,
+    ...(request.runId === undefined ? {} : { runId: request.runId }),
     toolCallId: request.toolCallId,
     toolName: request.toolName,
     risk: request.risk,

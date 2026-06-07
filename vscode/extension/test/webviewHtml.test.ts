@@ -82,6 +82,7 @@ test("generated chat webview inline script parses as JavaScript", () => {
   assert.match(html, /\.mode\[hidden\]\s*\{[^}]*display: none !important/s);
   assert.match(html, /\.approval-card\s*\{[^}]*max-height: min\(70vh, 32rem\)/s);
   assert.match(html, /\.approval-section\s*\{/);
+  assert.match(html, /Long shell commands intentionally wrap vertically/);
   assert.match(html, /\.approval-command \.approval-section-body\s*\{/);
   assert.match(html, /<select id="mode" class="mode" aria-label="Run mode" hidden><\/select>/);
   assert.match(html, /class="send-icon send-icon-stop"[^>]*hidden/);
@@ -93,6 +94,13 @@ test("generated chat webview inline script parses as JavaScript", () => {
   assert.match(script, /modeInput\.hidden = true/);
   assert.match(script, /function renderApprovalSection\(/);
   assert.match(script, /section\.classList\.add\("approval-section", className\)/);
+  assert.match(script, /message\.type === "steerResult"/);
+  assert.match(script, /function handleSteerResult\(/);
+  assert.match(
+    script,
+    /promptInput\.placeholder = busy \? "Steer the current turn\.\.\." : "Ask ProleCoder"/,
+  );
+  assert.match(script, /promptInput\.setAttribute\("aria-label", busy \? "Steer current turn" : "Chat message"\)/);
   assert.match(script, /const wasBusy = currentSubmission && currentSubmission\.busy === true/);
   assert.match(script, /item\.kind === "assistant" && currentSubmission && currentSubmission\.busy === true/);
 });
