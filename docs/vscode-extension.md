@@ -50,7 +50,7 @@ VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server
 - 同一 run/turn 的连续 `assistant.delta` 会合并为一条 assistant 消息，避免流式输出刷屏。
 - 提供 prompt 输入、mode 选择和运行中停止入口；通过 Webview `submitTurn` 消息调用 typed `RpcServerManager.sendTurn()`，发送时把 Problems 快照转换为 diagnostic attachments，并按协议 attachment 上限优先保留 error；如果当前已 resume/发送过 run，会复用该 `runId` 继续同一会话并由后端递增 `turn_N`；accepted 后等待同一 run 的 terminal event 收口输入状态，运行中点击方块停止按钮会调用 typed `RpcServerManager.cancel()`。
 - Sidebar 右上角提供齿轮 Settings 入口；composer 常驻 API Key / Model 快捷入口。Enter 和回车符号发送按钮走同一提交路径，Shift+Enter 保留换行；发送后会先在当前对话中显示本地 pending 用户消息，等待真实 run event 覆盖；用户消息可通过 Edit 回填到 composer，修改后在同一会话继续发送，Sidebar 会在 `agent.sendTurn.supersedes` 中传递被覆盖消息的 `messageId` / `turnId`，后端把它写入新 `turn.started.payload.supersedes`，因此 webview reload 和 `agent.resume` 后仍能稳定隐藏旧用户消息并让自动上下文跳过旧输入。VS Code webview state 仅作为即时本地缓存。
-- P5-16 后续 UX 收敛会把 composer 的 `edit` / `ask` / `plan` / `review` mode 下拉框改为默认隐藏，并根据用户文本自动推断 run mode；保留高级/调试入口用于强制指定 mode，RPC `agent.sendTurn.mode` 协议保持不变。
+- P5-16 已把 composer 的 `edit` / `ask` / `plan` / `review` mode 下拉框改为默认隐藏；普通 Sidebar 发送不再提交隐藏 selector 的默认值，而是在 `chatInput` 协议边界根据用户文本自动推断 run mode：问答走 `ask`，实现/修复走 `edit`，计划讨论走 `plan`，代码审查走 `review`。用户仍可用 `/ask`、`/plan`、`/review`、`/edit` 或 `ask:` / `plan:` / `review:` / `edit:` 这类轻量前缀强制 mode，前缀会在发送给 agent 前剥离；RPC `agent.sendTurn.mode` 协议保持不变。
 - Run List 支持 `agent.listRuns` / `agent.resume` / `agent.deleteRun`，可回放历史 run、继续多轮会话，也可删除 inactive run。
 - 失败状态会在 Sidebar Chat 中显示短消息，并把 sendTurn、Run List refresh/resume/delete/cancel、原生 `@prole` Chat Participant 和 RPC 启动/运行 warning 的完整错误写入 VS Code `Output > ProleCoder`；Sidebar Chat 还会把完整 `agent.event` payload 写入 Output 便于 debug。
 

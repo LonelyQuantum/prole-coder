@@ -193,7 +193,7 @@ pub struct ToolDefinition {
 - `cwd`：workspace-relative 工作目录，省略时使用 workspace root。
 - `timeoutMs`：超时时间。
 
-模型不应在 `command` 中 `cd` 到猜测的绝对路径；需要切换目录时使用 `cwd`，且 `cwd` 必须是 workspace-relative。Windows 上执行器使用 Windows PowerShell 5.1，并在启动脚本中把 PowerShell 层 stdout/stderr 设置为 UTF-8；模型不应使用 POSIX-only 路径或 PowerShell 7-only 的 `&&` / `||` 操作符。
+模型不应在 `command` 中 `cd` 到猜测的绝对路径；需要切换目录时使用 `cwd`，且 `cwd` 必须是 workspace-relative。Windows 上执行器使用 Windows PowerShell 5.1，并在启动脚本中把 PowerShell 层 stdout/stderr 设置为 UTF-8；模型不应使用 POSIX-only 路径或 PowerShell 7-only 的 `&&` / `||` 操作符。测试和验证命令不需要也不应手动追加 `2>&1`，因为 shell 工具已经分别捕获 stdout/stderr；在 PowerShell 5.1 中合并流可能把 CLIXML/progress 记录带入 stderr，使本来通过的验证看起来失败。
 
 结果：
 

@@ -48,7 +48,7 @@ AgentTurnInput
 ```
 
 工具结果写入 run log 或进入下一轮 prompt 前会通过 `redacted_tool_result_value` 转成已脱敏 JSON。原始工具结果仍由工具执行层返回，便于即时诊断和后续 UI 展示，但 Turn Loop 的持久化与模型回传路径使用脱敏结果。
-Turn Loop 默认会向 provider 注入工具使用契约，要求所有工具路径保持 workspace-relative，并要求 `shell` 使用 `cwd` 参数切换工作目录，避免模型生成猜测的绝对路径或当前平台不支持的 shell 语法。Windows 构建中该契约会明确 shell 运行在 Windows PowerShell 5.1 下，不应使用 POSIX-only 路径或 PowerShell 7-only 的 `&&` / `||`。
+Turn Loop 默认会向 provider 注入工具使用契约，要求所有工具路径保持 workspace-relative，并要求 `shell` 使用 `cwd` 参数切换工作目录，避免模型生成猜测的绝对路径或当前平台不支持的 shell 语法。Windows 构建中该契约会明确 shell 运行在 Windows PowerShell 5.1 下，不应使用 POSIX-only 路径或 PowerShell 7-only 的 `&&` / `||`；测试和验证命令也不应手动追加 `2>&1` 这类合并输出流的重定向，因为 shell 工具已经分别捕获 stdout/stderr，PowerShell stream merging 可能把 CLIXML/progress 噪声带进 stderr 并造成假失败。
 
 ## Run Log 事件
 

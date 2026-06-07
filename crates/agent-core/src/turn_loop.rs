@@ -74,7 +74,8 @@ const TOOL_USAGE_INSTRUCTION: &str = concat!(
     "Tool usage rules: all workspace paths must be workspace-relative unless a tool explicitly says otherwise. ",
     "Do not invent absolute paths such as /home/user/project, and do not use cd to move into guessed directories. ",
     "For the shell tool, put the target directory in the cwd argument, usually \".\" or a workspace-relative subdirectory, and keep command to the command itself. ",
-    "Shell commands run under Windows PowerShell 5.1, so do not use POSIX-only paths or PowerShell 7-only operators such as && and ||. Use separate tool calls or Windows PowerShell-compatible syntax."
+    "Shell commands run under Windows PowerShell 5.1, so do not use POSIX-only paths or PowerShell 7-only operators such as && and ||. Use separate tool calls or Windows PowerShell-compatible syntax. ",
+    "For test and verification commands, do not append redirections such as 2>&1; the shell tool captures stdout and stderr separately, and PowerShell stream merging can emit CLIXML/progress noise that looks like a failed verification."
 );
 #[cfg(not(windows))]
 const TOOL_USAGE_INSTRUCTION: &str = concat!(
@@ -3266,7 +3267,11 @@ mod tests {
         assert!(prompt.contains("cwd argument"));
         assert!(prompt.contains("do not use cd"));
         #[cfg(windows)]
-        assert!(prompt.contains("Windows PowerShell 5.1"));
+        {
+            assert!(prompt.contains("Windows PowerShell 5.1"));
+            assert!(prompt.contains("do not append redirections such as 2>&1"));
+            assert!(prompt.contains("captures stdout and stderr separately"));
+        }
         #[cfg(not(windows))]
         assert!(prompt.contains("POSIX sh"));
     }

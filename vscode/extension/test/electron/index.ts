@@ -347,7 +347,7 @@ async function exerciseChatKeyboardSubmit(): Promise<void> {
   assert.equal(editable.sendTitle, SEND_LABEL);
   assert.equal(editable.sendIsStop, false);
   assert.deepEqual(editable.sendVisibleIcons, ["submit"]);
-  assert.equal(editable.modeHidden, false);
+  assert.equal(editable.modeHidden, true);
   assert.ok(editable.messageEditButtons.includes("Edit"));
   assert.ok(editable.messageEditDisabled.every((disabled) => disabled === false));
 

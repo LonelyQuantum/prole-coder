@@ -83,13 +83,14 @@ test("generated chat webview inline script parses as JavaScript", () => {
   assert.match(html, /\.approval-card\s*\{[^}]*max-height: min\(70vh, 32rem\)/s);
   assert.match(html, /\.approval-section\s*\{/);
   assert.match(html, /\.approval-command \.approval-section-body\s*\{/);
+  assert.match(html, /<select id="mode" class="mode" aria-label="Run mode" hidden><\/select>/);
   assert.match(html, /class="send-icon send-icon-stop"[^>]*hidden/);
 
   const script = extractInlineScript(html);
   assert.doesNotThrow(() => new Script(script, { filename: "prole-chat-webview-inline.js" }));
   assert.match(script, /function setSendIconVisible\(/);
   assert.match(script, /toggleAttribute\("hidden"/);
-  assert.match(script, /modeInput\.hidden = busy === true/);
+  assert.match(script, /modeInput\.hidden = true/);
   assert.match(script, /function renderApprovalSection\(/);
   assert.match(script, /section\.classList\.add\("approval-section", className\)/);
   assert.match(script, /const wasBusy = currentSubmission && currentSubmission\.busy === true/);

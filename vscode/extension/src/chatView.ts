@@ -2127,7 +2127,7 @@ function renderChatViewHtml(
     <form id="composer" class="composer">
       <textarea id="prompt" class="prompt" rows="3" placeholder="Ask ProleCoder" aria-label="Chat message"></textarea>
       <div class="composer-row">
-        <select id="mode" class="mode" aria-label="Run mode"></select>
+        <select id="mode" class="mode" aria-label="Run mode" hidden></select>
         <div class="provider-actions" aria-label="Provider controls">
           <button id="api-key" class="provider-action" type="button" title="Configure DeepSeek API key" aria-label="Configure DeepSeek API key">
             <svg class="provider-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -2349,7 +2349,6 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       vscodeApi.postMessage({
         type: "submitTurn",
         message,
-        mode: modeInput.value,
         ...(supersedes === undefined ? {} : { supersedes }),
       });
     }
@@ -3100,7 +3099,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     function setComposerBusy(busy, cancelable, runId, canceling) {
       promptInput.disabled = busy;
       modeInput.disabled = busy;
-      modeInput.hidden = busy === true;
+      modeInput.hidden = true;
       sendButton.disabled = busy && canceling === true;
       setSendIconVisible(sendSubmitIcon, busy !== true);
       setSendIconVisible(sendStopIcon, busy === true);

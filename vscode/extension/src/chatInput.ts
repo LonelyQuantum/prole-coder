@@ -33,15 +33,25 @@ export function parseChatTurnSubmission(value: unknown): ChatTurnSubmissionParse
     return { ok: false, error: "Invalid chat submission." };
   }
 
-  const message = typeof value["message"] === "string" ? value["message"].trim() : "";
+  let message = typeof value["message"] === "string" ? value["message"].trim() : "";
   if (message.length === 0) {
     return { ok: false, error: "Enter a message before sending." };
   }
 
-  const mode = value["mode"];
-  if (!isRpcRunMode(mode)) {
+  const prefixedMode = parseExplicitModePrefix(message);
+  if (prefixedMode !== undefined) {
+    message = prefixedMode.message;
+    if (message.length === 0) {
+      return { ok: false, error: "Enter a message after the run mode prefix." };
+    }
+  }
+
+  const rawMode = value["mode"];
+  if (rawMode !== undefined && !isRpcRunMode(rawMode)) {
     return { ok: false, error: "Choose a valid run mode." };
   }
+  const explicitMode = isRpcRunMode(rawMode) ? rawMode : undefined;
+  const mode = prefixedMode?.mode ?? explicitMode ?? inferChatRunMode(message);
 
   const supersedes = parseTurnSupersedes(value["supersedes"]);
   if (supersedes === false) {
@@ -72,6 +82,76 @@ export function sendTurnParams(
 
 export function isRpcRunMode(value: unknown): value is RpcRunMode {
   return typeof value === "string" && Object.prototype.hasOwnProperty.call(CHAT_RUN_MODE_LOOKUP, value);
+}
+
+export function inferChatRunMode(message: string): RpcRunMode {
+  const text = message.trim();
+  if (text.length === 0) {
+    return DEFAULT_CHAT_MODE;
+  }
+
+  if (matchesAny(text, REVIEW_PATTERNS)) {
+    return "review";
+  }
+  if (matchesAny(text, PLAN_PATTERNS)) {
+    return "plan";
+  }
+  if (isQuestionLike(text) || matchesAny(text, ASK_PATTERNS)) {
+    return "ask";
+  }
+  if (matchesAny(text, EDIT_PATTERNS)) {
+    return "edit";
+  }
+
+  return DEFAULT_CHAT_MODE;
+}
+
+const EXPLICIT_SLASH_MODE_PREFIX = /^\/(ask|plan|review|edit)(?:\s+|$)/i;
+const EXPLICIT_LABEL_MODE_PREFIX = /^(ask|plan|review|edit)\s*:\s*/i;
+
+const REVIEW_PATTERNS = [
+  /\b(code\s+review|review|audit|inspect)\b/i,
+  /代码审查|审查|评审/,
+];
+const PLAN_PATTERNS = [
+  /\b(plan|proposal|design|roadmap|architecture|discuss|brainstorm)\b/i,
+  /计划|方案|设计|讨论|规划|路线图|架构/,
+];
+const EDIT_PATTERNS = [
+  /\b(fix|repair|implement|add|update|change|modify|refactor|delete|remove|create|write|complete|restore|reset|generate)\b/i,
+  /修复|改动|修改|实现|开发|补齐|添加|删除|移除|创建|生成|还原|复原|完成|整理|更新|标记/,
+];
+const ASK_PATTERNS = [
+  /\b(what|why|how|where|when|explain|summari[sz]e|show|tell)\b/i,
+  /是什么|为什么|怎么|如何|是否|能不能|可以吗|有没有|介绍|解释|总结|查看|检查一下/,
+];
+
+function parseExplicitModePrefix(message: string): { readonly mode: RpcRunMode; readonly message: string } | undefined {
+  const slash = message.match(EXPLICIT_SLASH_MODE_PREFIX);
+  if (slash !== null && isRpcRunMode(slash[1])) {
+    return {
+      mode: slash[1],
+      message: message.slice(slash[0].length).trim(),
+    };
+  }
+
+  const label = message.match(EXPLICIT_LABEL_MODE_PREFIX);
+  if (label !== null && isRpcRunMode(label[1])) {
+    return {
+      mode: label[1],
+      message: message.slice(label[0].length).trim(),
+    };
+  }
+
+  return undefined;
+}
+
+function matchesAny(message: string, patterns: readonly RegExp[]): boolean {
+  return patterns.some((pattern) => pattern.test(message));
+}
+
+function isQuestionLike(message: string): boolean {
+  return /[?？]\s*$/.test(message);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
