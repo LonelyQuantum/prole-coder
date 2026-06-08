@@ -113,6 +113,12 @@ test("generated chat webview inline script parses as JavaScript", () => {
   assert.match(script, /function sendConfirmedSteerMessage\(/);
   assert.match(script, /function pendingSteerTimelineItem\(/);
   assert.match(script, /title: "You \(queued\)"/);
+  assert.match(script, /eventsRoot\.addEventListener\("scroll"/);
+  assert.match(script, /type: "loadEarlierTimeline"/);
+  assert.match(script, /message\.type === "timelineHistory"/);
+  assert.match(script, /historyLoadRequested = message\.inFlight === true/);
+  assert.doesNotMatch(script, /setTimeout\(\(\) => \{\s*historyLoadRequested = false;/);
+  assert.doesNotMatch(script, /function render\(snapshot\) \{\s*historyLoadRequested = false;/);
   assert.match(script, /function itemChildren\(/);
   assert.match(script, /childRoot\.append\(renderItemSafely\(child\)\)/);
   assert.match(script, /clearPendingSteerIfDelivered\(message\.snapshot\);\s*render\(message\.snapshot\);/);

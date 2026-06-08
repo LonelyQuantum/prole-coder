@@ -10,6 +10,8 @@ import type {
   DeleteRunResult,
   FimPreviewParams,
   FimPreviewResult,
+  LoadRunEventsParams,
+  LoadRunEventsResult,
   ListRunsParams,
   ListRunsResult,
   RejectParams,
@@ -31,6 +33,7 @@ export const RPC_EVENT_METHOD = "agent.event";
 export const RPC_EVENT_BATCH_METHOD = "agent.eventBatch";
 export const RPC_SEND_TURN_METHOD = "agent.sendTurn";
 export const RPC_RESUME_METHOD = "agent.resume";
+export const RPC_LOAD_RUN_EVENTS_METHOD = "agent.loadRunEvents";
 export const RPC_LIST_RUNS_METHOD = "agent.listRuns";
 export const RPC_DELETE_RUN_METHOD = "agent.deleteRun";
 export const RPC_APPROVE_METHOD = "agent.approve";
@@ -350,6 +353,10 @@ export class RpcServerManager implements DisposableLike {
 
   resume(params: ResumeParams): Promise<ResumeResult> {
     return this.sendRequest<ResumeResult>(RPC_RESUME_METHOD, params);
+  }
+
+  loadRunEvents(params: LoadRunEventsParams): Promise<LoadRunEventsResult> {
+    return this.sendRequest<LoadRunEventsResult>(RPC_LOAD_RUN_EVENTS_METHOD, params);
   }
 
   listRuns(params: ListRunsParams = {}): Promise<ListRunsResult> {

@@ -64,6 +64,8 @@ export interface ChatTimelineSnapshot {
   readonly supersededItemIds?: readonly string[];
   readonly latestRunId?: string;
   readonly latestStatus?: string;
+  readonly oldestLoadedSeq?: number;
+  readonly hiddenProcessItemCount?: number;
 }
 
 export interface ChatEventTimelineOptions {
@@ -71,20 +73,69 @@ export interface ChatEventTimelineOptions {
 }
 
 export class ChatEventTimeline {
-  private readonly maxItems: number;
+  private maxItems: number;
+  private readonly eventsBySeq = new Map<string, AgentEventEnvelope>();
   private readonly items: ChatTimelineItem[] = [];
   private readonly assistantItemsByTurn = new Map<string, string>();
   private readonly supersededItemIds = new Set<string>();
   private eventCount = 0;
   private latestRunId: string | undefined;
   private latestStatus: string | undefined;
+  private hiddenProcessItemCount = 0;
 
   constructor(options: ChatEventTimelineOptions = {}) {
     this.maxItems = options.maxItems ?? DEFAULT_TIMELINE_PROCESS_ITEM_LIMIT;
   }
 
   append(event: AgentEventEnvelope): ChatTimelineSnapshot {
-    this.eventCount += 1;
+    const key = eventMapKey(event);
+    if (this.eventsBySeq.has(key)) {
+      return this.snapshot();
+    }
+    this.eventsBySeq.set(key, event);
+    this.eventCount = this.eventsBySeq.size;
+    this.appendEventItem(event);
+
+    return this.snapshot();
+  }
+
+  prepend(events: readonly AgentEventEnvelope[]): ChatTimelineSnapshot {
+    let added = 0;
+    for (const event of events) {
+      const key = eventMapKey(event);
+      if (this.eventsBySeq.has(key)) {
+        continue;
+      }
+      this.eventsBySeq.set(key, event);
+      added += 1;
+    }
+    if (added > 0) {
+      this.maxItems += added;
+      this.rebuildFromLoadedEvents();
+    }
+
+    return this.snapshot();
+  }
+
+  revealHiddenProcessItems(count = 200): ChatTimelineSnapshot {
+    if (this.hiddenProcessItemCount > 0) {
+      this.maxItems += Math.min(count, this.hiddenProcessItemCount);
+      this.rebuildFromLoadedEvents();
+    }
+
+    return this.snapshot();
+  }
+
+  hasHiddenProcessItems(): boolean {
+    return this.hiddenProcessItemCount > 0;
+  }
+
+  oldestLoadedSeq(): number | undefined {
+    const seqs = Array.from(this.eventsBySeq.values()).map((event) => event.seq);
+    return seqs.length === 0 ? undefined : Math.min(...seqs);
+  }
+
+  private appendEventItem(event: AgentEventEnvelope, trim = true): void {
     this.latestRunId = event.runId;
     const supersededItemId = supersededItemIdFromEvent(event);
     if (supersededItemId !== undefined) {
@@ -92,7 +143,7 @@ export class ChatEventTimeline {
     }
 
     if (event.type === "assistant.delta") {
-      this.appendAssistantDelta(event);
+      this.appendAssistantDelta(event, trim);
     } else {
       const item = createTimelineItem(event);
       this.items.push(item);
@@ -100,24 +151,27 @@ export class ChatEventTimeline {
       if (breaksAssistantSegment(event.type)) {
         this.assistantItemsByTurn.delete(assistantKey(event));
       }
-      this.trimItems();
+      if (trim) {
+        this.trimItems();
+      }
     }
-
-    return this.snapshot();
   }
 
   clear(): ChatTimelineSnapshot {
+    this.eventsBySeq.clear();
     this.items.length = 0;
     this.assistantItemsByTurn.clear();
     this.supersededItemIds.clear();
     this.eventCount = 0;
     this.latestRunId = undefined;
     this.latestStatus = undefined;
+    this.hiddenProcessItemCount = 0;
     return this.snapshot();
   }
 
   snapshot(): ChatTimelineSnapshot {
     const items = this.items.map((item) => ({ ...item }));
+    const oldestLoadedSeq = this.oldestLoadedSeq();
     const presentation = presentTimelineItems(items, this.supersededItemIds);
     return {
       eventCount: this.eventCount,
@@ -129,10 +183,30 @@ export class ChatEventTimeline {
         : { supersededItemIds: Array.from(this.supersededItemIds) }),
       ...(this.latestRunId === undefined ? {} : { latestRunId: this.latestRunId }),
       ...(this.latestStatus === undefined ? {} : { latestStatus: this.latestStatus }),
+      ...(oldestLoadedSeq === undefined ? {} : { oldestLoadedSeq }),
+      ...(this.hiddenProcessItemCount === 0
+        ? {}
+        : { hiddenProcessItemCount: this.hiddenProcessItemCount }),
     };
   }
 
-  private appendAssistantDelta(event: AgentEventEnvelope): void {
+  private rebuildFromLoadedEvents(): void {
+    const events = Array.from(this.eventsBySeq.values()).sort((left, right) => left.seq - right.seq);
+    this.items.length = 0;
+    this.assistantItemsByTurn.clear();
+    this.supersededItemIds.clear();
+    this.eventCount = events.length;
+    this.latestRunId = undefined;
+    this.latestStatus = undefined;
+    this.hiddenProcessItemCount = 0;
+
+    for (const event of events) {
+      this.appendEventItem(event, false);
+    }
+    this.trimItems();
+  }
+
+  private appendAssistantDelta(event: AgentEventEnvelope, trim = true): void {
     const key = assistantKey(event);
     const existingId = this.assistantItemsByTurn.get(key);
     const payload = record(event.payload);
@@ -162,7 +236,9 @@ export class ChatEventTimeline {
     this.items.push(item);
     this.assistantItemsByTurn.set(key, item.id);
     this.latestStatus = "Assistant streaming";
-    this.trimItems();
+    if (trim) {
+      this.trimItems();
+    }
   }
 
   private trimItems(): void {
@@ -177,6 +253,7 @@ export class ChatEventTimeline {
       return;
     }
 
+    this.hiddenProcessItemCount = discardableCount - this.maxItems;
     for (let index = 0; index < this.items.length && discardableCount > this.maxItems;) {
       const item = this.items[index];
       if (item !== undefined && isDiscardableTimelineItem(item)) {
@@ -490,6 +567,10 @@ function isDiscardableTimelineItem(item: ChatTimelineItem): boolean {
 
 function assistantKey(event: AgentEventEnvelope): string {
   return `${event.runId}:${event.turnId ?? ""}`;
+}
+
+function eventMapKey(event: AgentEventEnvelope): string {
+  return `${event.runId}:${event.seq}`;
 }
 
 function breaksAssistantSegment(type: string): boolean {

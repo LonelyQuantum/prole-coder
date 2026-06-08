@@ -10,6 +10,7 @@ import {
   RPC_EVENT_BATCH_METHOD,
   RPC_INITIALIZE_METHOD,
   RPC_LIST_RUNS_METHOD,
+  RPC_LOAD_RUN_EVENTS_METHOD,
   RPC_PREVIEW_FIM_METHOD,
   RPC_PROTOCOL_VERSION,
   RPC_REJECT_METHOD,
@@ -391,9 +392,34 @@ test("RPC server manager sends typed run list, resume, and delete requests", asy
     replayStarted: true,
   });
 
+  const eventsPromise = manager.loadRunEvents({ runId: "run_1", beforeSeq: 3, limit: 2 });
+  await flushMicrotasks();
+  const eventsRequest = child.requestAt(3);
+  assert.equal(eventsRequest.method, RPC_LOAD_RUN_EVENTS_METHOD);
+  assert.deepEqual(eventsRequest.params, { runId: "run_1", beforeSeq: 3, limit: 2 });
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    id: eventsRequest.id,
+    result: {
+      runId: "run_1",
+      events: [agentEvent({ seq: 1, type: "run.started" })],
+      firstSeq: 1,
+      lastSeq: 1,
+      hasMoreBefore: false,
+    },
+  });
+
+  assert.deepEqual(await eventsPromise, {
+    runId: "run_1",
+    events: [agentEvent({ seq: 1, type: "run.started" })],
+    firstSeq: 1,
+    lastSeq: 1,
+    hasMoreBefore: false,
+  });
+
   const deletePromise = manager.deleteRun({ runId: "run_1" });
   await flushMicrotasks();
-  const deleteRequest = child.requestAt(3);
+  const deleteRequest = child.requestAt(4);
   assert.equal(deleteRequest.method, RPC_DELETE_RUN_METHOD);
   assert.deepEqual(deleteRequest.params, { runId: "run_1" });
   child.stdout.pushJson({
@@ -989,13 +1015,17 @@ function agentEventNotification(options: { readonly seq?: number; readonly type?
   return {
     jsonrpc: "2.0",
     method: "agent.event",
-    params: {
-      seq: options.seq ?? 1,
-      time: "1970-01-01T00:00:00.000Z",
-      type: options.type ?? "run.started",
-      runId: "run_1",
-      payload: { mode: "ask" },
-    },
+    params: agentEvent(options),
+  };
+}
+
+function agentEvent(options: { readonly seq?: number; readonly type?: string } = {}): unknown {
+  return {
+    seq: options.seq ?? 1,
+    time: "1970-01-01T00:00:00.000Z",
+    type: options.type ?? "run.started",
+    runId: "run_1",
+    payload: { mode: "ask" },
   };
 }
 

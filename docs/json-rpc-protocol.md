@@ -45,7 +45,7 @@ Agent Core
 }
 ```
 
-实时高频事件可以使用 `agent.eventBatch` notification 批量发送；Run Log 本身仍以单个 `seq` 事件作为事实来源，`agent.resume` replay 仍按 `agent.event` 重放。
+实时高频事件可以使用 `agent.eventBatch` notification 批量发送；Run Log 本身仍以单个 `seq` 事件作为事实来源，`agent.resume` replay 仍按 `agent.event` 重放；只读历史分页使用 `agent.loadRunEvents` 在 response 中返回 event envelope，不重新发送 live notification。
 ```json
 {
   "jsonrpc": "2.0",
@@ -437,6 +437,33 @@ interface ResumeResult {
 - 如果提供 `replayFromSeq`，server 从该 seq 重新发送事件。
 - 如果本地 run log 不存在，返回 `E_RUN_NOT_FOUND`。
 - 当前 Rust request loop 已能解析 `agent.resume` 并分发给 handler；`AgentTurnLoopRpcHandler` 已能从 Run Log 按 `replayFromSeq` 重放事件。
+
+### `agent.loadRunEvents`
+
+从当前 workspace 的 run log 读取一页历史事件。该方法用于前端向上滚动加载更早 timeline，不会把返回事件作为 `agent.event` / `agent.eventBatch` notification 重新发送，也不会触发历史审批副作用。
+
+```ts
+interface LoadRunEventsParams {
+  runId: string;
+  beforeSeq?: number;
+  limit?: number;
+}
+
+interface LoadRunEventsResult {
+  runId: string;
+  events: AgentEventEnvelope[];
+  firstSeq?: number;
+  lastSeq?: number;
+  hasMoreBefore: boolean;
+}
+```
+
+规则：
+
+- `beforeSeq` 是 exclusive 上界；省略时从 run log 末尾取最近一页。
+- `limit` 由 server 限制在 1 到 500 之间，默认 200。
+- 返回的 `events` 保持升序，使用与 live/replay 相同的 `AgentEventEnvelope` shape。
+- 如果本地 run log 不存在，返回 `E_RUN_NOT_FOUND`。
 
 ### `agent.listRuns`
 

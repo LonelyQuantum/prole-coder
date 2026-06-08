@@ -6,6 +6,8 @@ import type {
   CancelResult,
   DeleteRunParams,
   DeleteRunResult,
+  LoadRunEventsParams,
+  LoadRunEventsResult,
   ListRunsParams,
   ListRunsResult,
   ResumeParams,
@@ -86,6 +88,7 @@ export interface ChatSteerClient {
 export interface ChatRunHistoryClient {
   listRuns(params?: ListRunsParams): Promise<ListRunsResult>;
   resume(params: ResumeParams): Promise<ResumeResult>;
+  loadRunEvents(params: LoadRunEventsParams): Promise<LoadRunEventsResult>;
   deleteRun(params: DeleteRunParams): Promise<DeleteRunResult>;
 }
 
@@ -127,12 +130,18 @@ interface SteerResultWebviewMessage {
   readonly steerId?: string;
 }
 
+interface TimelineHistoryWebviewMessage {
+  readonly type: "timelineHistory";
+  readonly inFlight: boolean;
+}
+
 type ExtensionToWebviewMessage =
   | SnapshotWebviewMessage
   | SubmissionWebviewMessage
   | RunsWebviewMessage
   | ContextWebviewMessage
   | ApprovalWebviewMessage
+  | TimelineHistoryWebviewMessage
   | SteerResultWebviewMessage
   | TestProbeWebviewMessage;
 
@@ -232,6 +241,7 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
   private submissionPostQueued = false;
   private contextPostQueued = false;
   private cancelActiveTurnRequested = false;
+  private historyLoadInFlight = false;
   private readonly conversationApprovalGrants = new Map<string, Set<string>>();
 
   constructor(
@@ -415,6 +425,11 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
 
     if (isShowRunsMessage(message)) {
       this.showRuns();
+      return;
+    }
+
+    if (isLoadEarlierTimelineMessage(message)) {
+      await this.loadEarlierTimeline();
       return;
     }
 
@@ -666,6 +681,13 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
     this.postToWebview(message);
   }
 
+  private postTimelineHistory(inFlight: boolean): void {
+    this.postToWebview({
+      type: "timelineHistory",
+      inFlight,
+    });
+  }
+
   private postToWebview(message: ExtensionToWebviewMessage): void {
     if (this.view === undefined || !this.webviewReady) {
       return;
@@ -763,6 +785,56 @@ export class ProleChatViewProvider implements vscode.WebviewViewProvider, Dispos
       const redacted = this.redact(messageText);
       this.logger?.error(redacted);
       this.setRunList(failedRunList(redacted, this.runList));
+    }
+  }
+
+  private async loadEarlierTimeline(): Promise<void> {
+    if (this.historyLoadInFlight) {
+      return;
+    }
+
+    const runId = this.activeConversationRunId ?? this.timeline.snapshot().latestRunId;
+    if (runId === undefined) {
+      this.postTimelineHistory(false);
+      return;
+    }
+
+    if (this.timeline.hasHiddenProcessItems()) {
+      this.timeline.revealHiddenProcessItems();
+      this.postSnapshot();
+      this.postTimelineHistory(false);
+      return;
+    }
+
+    if (this.rpcClient === undefined) {
+      this.postTimelineHistory(false);
+      return;
+    }
+
+    const beforeSeq = this.timeline.oldestLoadedSeq();
+    if (beforeSeq === undefined || beforeSeq <= 1) {
+      this.postTimelineHistory(false);
+      return;
+    }
+
+    this.historyLoadInFlight = true;
+    this.postTimelineHistory(true);
+    try {
+      const result = await this.rpcClient.loadRunEvents({
+        runId,
+        beforeSeq,
+        limit: 200,
+      });
+      if (result.events.length > 0) {
+        this.timeline.prepend(result.events);
+        this.activeConversationRunId = result.runId;
+        this.postSnapshot();
+      }
+    } catch (error) {
+      this.logger?.warn(this.redact(`Failed to load earlier run events: ${errorMessage(error)}`));
+    } finally {
+      this.historyLoadInFlight = false;
+      this.postTimelineHistory(false);
     }
   }
 
@@ -2466,6 +2538,7 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
     let pendingSteerId = "";
     let pendingSteerAccepted = false;
     let pendingSteerConfirmation = "";
+    let historyLoadRequested = false;
     const supersededUserItemIds = new Set(restoredWebviewState.supersededUserItemIds);
     const resolvedApprovalIds = new Set();
     let contextSourceTab = "included";
@@ -2497,6 +2570,9 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       if (message && message.type === "context") {
         renderContext(message.context);
       }
+      if (message && message.type === "timelineHistory") {
+        historyLoadRequested = message.inFlight === true;
+      }
       if (message && message.type === "approval") {
         renderApproval(message.approval);
       }
@@ -2511,6 +2587,14 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
 
     refreshRunsButton.addEventListener("click", safeWebviewEventHandler("refresh runs click", () => {
       vscodeApi.postMessage({ type: "refreshRuns" });
+    }));
+
+    eventsRoot.addEventListener("scroll", safeWebviewEventHandler("events scroll", () => {
+      if (eventsRoot.scrollTop > 24 || historyLoadRequested === true) {
+        return;
+      }
+      historyLoadRequested = true;
+      vscodeApi.postMessage({ type: "loadEarlierTimeline" });
     }));
 
     apiKeyButton.addEventListener("click", safeWebviewEventHandler("api key click", () => {
@@ -4421,6 +4505,10 @@ function isOpenSettingsMessage(message: unknown): boolean {
 
 function isShowRunsMessage(message: unknown): boolean {
   return isRecord(message) && message["type"] === "showRuns";
+}
+
+function isLoadEarlierTimelineMessage(message: unknown): boolean {
+  return isRecord(message) && message["type"] === "loadEarlierTimeline";
 }
 
 function testProbeResultFromMessage(message: unknown): TestProbeResultWebviewMessage | undefined {

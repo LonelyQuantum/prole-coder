@@ -385,6 +385,42 @@ test("chat timeline trims old process items while preserving persistent messages
     snapshot.items.map((item) => isPersistentTimelineItem(item)),
     [true, true, false, true],
   );
+  assert.equal(snapshot.hiddenProcessItemCount, 1);
+  assert.equal(snapshot.oldestLoadedSeq, 1);
+});
+
+test("chat timeline can reveal hidden process items from loaded run events", () => {
+  const timeline = new ChatEventTimeline({ maxItems: 1 });
+
+  timeline.append(agentEvent(1, "run.started", { mode: "ask" }));
+  timeline.append(agentEvent(2, "turn.started", { userTask: "hello" }));
+  timeline.append(agentEvent(3, "assistant.delta", { text: "working" }));
+  timeline.append(agentEvent(4, "context.built", { inputTokens: 123 }));
+  timeline.append(agentEvent(5, "run.completed", { summary: "done" }));
+  const snapshot = timeline.revealHiddenProcessItems();
+
+  assert.deepEqual(
+    snapshot.items.map((item) => item.seq),
+    [1, 2, 3, 4, 5],
+  );
+  assert.equal(snapshot.hiddenProcessItemCount, undefined);
+});
+
+test("chat timeline prepends older run log events before current items", () => {
+  const timeline = new ChatEventTimeline({ maxItems: 10 });
+
+  timeline.append(agentEvent(3, "assistant.delta", { text: "later" }));
+  timeline.append(agentEvent(4, "run.completed", { summary: "done" }));
+  const snapshot = timeline.prepend([
+    agentEvent(1, "turn.started", { userTask: "hello" }),
+    agentEvent(2, "context.built", { inputTokens: 123 }),
+  ]);
+
+  assert.deepEqual(
+    snapshot.items.map((item) => item.seq),
+    [1, 2, 3, 4],
+  );
+  assert.equal(snapshot.oldestLoadedSeq, 1);
 });
 
 test("chat timeline keeps assistant segment boundaries after trimming process items", () => {

@@ -56,6 +56,7 @@ pub const REJECT_METHOD: RpcMethod = RpcMethod::new("reject");
 pub const CANCEL_METHOD: RpcMethod = RpcMethod::new("cancel");
 pub const STEER_METHOD: RpcMethod = RpcMethod::new("steer");
 pub const RESUME_METHOD: RpcMethod = RpcMethod::new("resume");
+pub const LOAD_RUN_EVENTS_METHOD: RpcMethod = RpcMethod::new("loadRunEvents");
 pub const LIST_RUNS_METHOD: RpcMethod = RpcMethod::new("listRuns");
 pub const DELETE_RUN_METHOD: RpcMethod = RpcMethod::new("deleteRun");
 pub const FIM_PREVIEW_METHOD: RpcMethod = RpcMethod::new("previewFim");
@@ -85,6 +86,8 @@ pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 const RPC_LOOP_QUEUE_BOUND: usize = 256;
 const RPC_LIVE_EVENT_QUEUE_BOUND: usize = 256;
 const RPC_LIVE_EVENT_BATCH_MAX: usize = 64;
+const DEFAULT_LOAD_RUN_EVENTS_LIMIT: usize = 200;
+const MAX_LOAD_RUN_EVENTS_LIMIT: usize = 500;
 const APPROVAL_PERSISTENCE_FILE: &str = "approvals.v1.json";
 const APPROVAL_PERSISTENCE_VERSION: u32 = 1;
 
@@ -455,6 +458,28 @@ pub struct ResumeResult {
     pub replay_started: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadRunEventsParams {
+    pub run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadRunEventsResult {
+    pub run_id: String,
+    pub events: Vec<AgentEventEnvelope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seq: Option<u64>,
+    pub has_more_before: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListRunsParams {
@@ -726,6 +751,11 @@ pub trait AgentRpcRequestHandler {
         &mut self,
         params: ResumeParams,
     ) -> Result<AgentRpcHandlerOutput<ResumeResult>, AgentRpcHandlerError>;
+
+    fn load_run_events(
+        &mut self,
+        params: LoadRunEventsParams,
+    ) -> Result<AgentRpcHandlerOutput<LoadRunEventsResult>, AgentRpcHandlerError>;
 
     fn list_runs(
         &mut self,
@@ -1106,6 +1136,56 @@ where
             replay_started: !replay_events.is_empty(),
         })
         .with_events(replay_events))
+    }
+
+    fn load_run_events(
+        &mut self,
+        params: LoadRunEventsParams,
+    ) -> Result<AgentRpcHandlerOutput<LoadRunEventsResult>, AgentRpcHandlerError> {
+        self.drain_ready_active_run_events()?;
+        let store = &self.workspace()?.store;
+        let run_id = params.run_id.clone();
+        let events = match self
+            .active_run
+            .as_ref()
+            .filter(|active_run| active_run.run_id == params.run_id)
+        {
+            Some(active_run) => active_run.run_log.load().map_err(map_run_log_error)?,
+            None => store
+                .load_run(params.run_id.clone())
+                .map_err(map_run_log_error)?,
+        };
+        let before_seq = params.before_seq.unwrap_or(u64::MAX);
+        let limit = params
+            .limit
+            .unwrap_or(DEFAULT_LOAD_RUN_EVENTS_LIMIT)
+            .clamp(1, MAX_LOAD_RUN_EVENTS_LIMIT);
+        let eligible_events = events
+            .iter()
+            .filter(|event| event.seq < before_seq)
+            .collect::<Vec<_>>();
+        let start = eligible_events.len().saturating_sub(limit);
+        let page = eligible_events[start..]
+            .iter()
+            .map(|event| {
+                run_log_event_to_envelope(event).map_err(|source| {
+                    AgentRpcHandlerError::new(
+                        RPC_INTERNAL_INVARIANT,
+                        format!("failed to serialize run event: {source}"),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let first_seq = page.first().map(|event| event.seq);
+        let last_seq = page.last().map(|event| event.seq);
+
+        Ok(AgentRpcHandlerOutput::new(LoadRunEventsResult {
+            run_id,
+            events: page,
+            first_seq,
+            last_seq,
+            has_more_before: start > 0,
+        }))
     }
 
     fn list_runs(
@@ -2482,6 +2562,9 @@ where
             method if method == RESUME_METHOD.qualified_name() => {
                 self.handle_resume(id, message.params, writer)
             }
+            method if method == LOAD_RUN_EVENTS_METHOD.qualified_name() => {
+                self.handle_load_run_events(id, message.params, writer)
+            }
             method if method == LIST_RUNS_METHOD.qualified_name() => {
                 self.handle_list_runs(id, message.params, writer)
             }
@@ -2711,6 +2794,29 @@ where
                 write_json_line(writer, &JsonRpcResponse::new(id, output.result))?;
                 emit_run_log_events(writer, &output.events)
             }
+            Err(error) => write_error(writer, id, error.into_error_object()),
+        }
+    }
+
+    fn handle_load_run_events<W>(
+        &mut self,
+        id: Value,
+        params: Option<Value>,
+        writer: &mut W,
+    ) -> Result<(), AgentRpcError>
+    where
+        W: Write,
+    {
+        let params = match parse_params::<LoadRunEventsParams>(
+            params,
+            LOAD_RUN_EVENTS_METHOD.qualified_name().as_str(),
+        ) {
+            Ok(params) => params,
+            Err(error) => return write_error(writer, id, error),
+        };
+
+        match self.handler.load_run_events(params) {
+            Ok(output) => write_json_line(writer, &JsonRpcResponse::new(id, output.result)),
             Err(error) => write_error(writer, id, error.into_error_object()),
         }
     }
@@ -3158,17 +3264,18 @@ mod tests {
         CancelResult, DELETE_RUN_METHOD, DeleteRunParams, DeleteRunResult, EVENT_BATCH_METHOD,
         EVENT_METHOD, FIM_PREVIEW_METHOD, FimPreviewParams, FimPreviewResult, INITIALIZE_METHOD,
         JSON_RPC_INTERNAL_ERROR, JSON_RPC_INVALID_PARAMS, JSON_RPC_INVALID_REQUEST,
-        JSON_RPC_METHOD_NOT_FOUND, JSON_RPC_PARSE_ERROR, LIST_RUNS_METHOD, ListRunsParams,
-        ListRunsResult, PROTOCOL_VERSION, REJECT_METHOD, RESUME_METHOD, RPC_APPROVAL_DENIED,
-        RPC_APPROVAL_NOT_FOUND, RPC_CONTEXT_BUDGET_EXCEEDED, RPC_INTERNAL_INVARIANT,
-        RPC_INVALID_TOOL_ARGUMENTS, RPC_PROVIDER_ERROR, RPC_RUN_ALREADY_ACTIVE, RPC_RUN_CANCELED,
-        RPC_RUN_NOT_FOUND, RPC_TOOL_EXECUTION_FAILED, RPC_UNSUPPORTED_PROTOCOL,
-        RPC_WORKSPACE_UNTRUSTED, RejectParams, RejectResult, ResumeParams, ResumeResult,
-        RpcApprovalPersistence, RpcApprovalQueue, RpcApprovalState, RpcApprovedHunks, RpcRunState,
-        RpcRunSummary, RpcRunSummaryStatus, RpcWorkspace, SEND_TURN_METHOD, STEER_METHOD,
-        SendTurnParams, SendTurnResult, StdioEventBridge, SteerParams, SteerResult,
-        emit_live_run_log_events, format_unix_millis, run_log_event_to_notification,
-        run_log_events_to_batch_notification, run_stdio_request_loop, spawn_active_run,
+        JSON_RPC_METHOD_NOT_FOUND, JSON_RPC_PARSE_ERROR, LIST_RUNS_METHOD, LOAD_RUN_EVENTS_METHOD,
+        ListRunsParams, ListRunsResult, LoadRunEventsParams, LoadRunEventsResult, PROTOCOL_VERSION,
+        REJECT_METHOD, RESUME_METHOD, RPC_APPROVAL_DENIED, RPC_APPROVAL_NOT_FOUND,
+        RPC_CONTEXT_BUDGET_EXCEEDED, RPC_INTERNAL_INVARIANT, RPC_INVALID_TOOL_ARGUMENTS,
+        RPC_PROVIDER_ERROR, RPC_RUN_ALREADY_ACTIVE, RPC_RUN_CANCELED, RPC_RUN_NOT_FOUND,
+        RPC_TOOL_EXECUTION_FAILED, RPC_UNSUPPORTED_PROTOCOL, RPC_WORKSPACE_UNTRUSTED, RejectParams,
+        RejectResult, ResumeParams, ResumeResult, RpcApprovalPersistence, RpcApprovalQueue,
+        RpcApprovalState, RpcApprovedHunks, RpcRunState, RpcRunSummary, RpcRunSummaryStatus,
+        RpcWorkspace, SEND_TURN_METHOD, STEER_METHOD, SendTurnParams, SendTurnResult,
+        StdioEventBridge, SteerParams, SteerResult, emit_live_run_log_events, format_unix_millis,
+        run_log_event_to_notification, run_log_events_to_batch_notification,
+        run_stdio_request_loop, spawn_active_run,
     };
 
     #[test]
@@ -3180,6 +3287,10 @@ mod tests {
         assert_eq!(CANCEL_METHOD.qualified_name(), "agent.cancel");
         assert_eq!(STEER_METHOD.qualified_name(), "agent.steer");
         assert_eq!(RESUME_METHOD.qualified_name(), "agent.resume");
+        assert_eq!(
+            LOAD_RUN_EVENTS_METHOD.qualified_name(),
+            "agent.loadRunEvents"
+        );
         assert_eq!(LIST_RUNS_METHOD.qualified_name(), "agent.listRuns");
         assert_eq!(DELETE_RUN_METHOD.qualified_name(), "agent.deleteRun");
         assert_eq!(FIM_PREVIEW_METHOD.qualified_name(), "agent.previewFim");
@@ -3681,6 +3792,84 @@ mod tests {
         assert_eq!(lines[1]["result"]["nextSeq"], 3);
         assert_eq!(lines[2]["method"], "agent.event");
         assert_eq!(lines[2]["params"]["seq"], 2);
+    }
+
+    #[test]
+    fn request_loop_loads_run_events_in_response_without_replay_notifications() {
+        let input = [
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init_1",
+                "method": "agent.initialize",
+                "params": initialize_params()
+            })
+            .to_string(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "load_1",
+                "method": "agent.loadRunEvents",
+                "params": {
+                    "runId": "run_rpc",
+                    "beforeSeq": 10,
+                    "limit": 2
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+        let mut output = Vec::new();
+
+        let handler =
+            run_stdio_request_loop(Cursor::new(input), &mut output, TestHandler::default())
+                .expect("request loop should complete");
+
+        assert_eq!(handler.load_run_events.len(), 1);
+        assert_eq!(handler.load_run_events[0].before_seq, Some(10));
+        assert_eq!(handler.load_run_events[0].limit, Some(2));
+        let lines = output_lines(output);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1]["id"], "load_1");
+        assert_eq!(lines[1]["result"]["events"][0]["seq"], 1);
+        assert_eq!(lines[1]["result"]["events"][1]["seq"], 2);
+        assert_eq!(lines[1]["result"]["hasMoreBefore"], false);
+    }
+
+    #[test]
+    fn turn_loop_rpc_handler_loads_run_event_pages_without_replay_output() {
+        let workspace = TestWorkspace::new("rpc");
+        let mut handler = AgentTurnLoopRpcHandler::new(final_provider_factory);
+        handler
+            .initialize(
+                serde_json::from_value(initialize_params_for(workspace.path_str()))
+                    .expect("initialize params should deserialize"),
+            )
+            .expect("handler should initialize");
+        handler
+            .send_turn(SendTurnParams {
+                run_id: Some("run_load_events_rpc".to_owned()),
+                message: "Say hello".to_owned(),
+                mode: super::RpcRunMode::Ask,
+                attachments: Vec::new(),
+                supersedes: None,
+            })
+            .expect("turn should complete");
+
+        let result = handler
+            .load_run_events(LoadRunEventsParams {
+                run_id: "run_load_events_rpc".to_owned(),
+                before_seq: Some(5),
+                limit: Some(2),
+            })
+            .expect("run events should load")
+            .result;
+
+        assert_eq!(result.run_id, "run_load_events_rpc");
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0].seq, 3);
+        assert_eq!(result.events[1].seq, 4);
+        assert_eq!(result.first_seq, Some(3));
+        assert_eq!(result.last_seq, Some(4));
+        assert_eq!(result.has_more_before, true);
     }
 
     #[test]
@@ -5297,6 +5486,7 @@ mod tests {
         cancellations: Vec<CancelParams>,
         steers: Vec<SteerParams>,
         resumes: Vec<ResumeParams>,
+        load_run_events: Vec<LoadRunEventsParams>,
         list_runs: Vec<ListRunsParams>,
         delete_runs: Vec<DeleteRunParams>,
         fim_previews: Vec<FimPreviewParams>,
@@ -5401,6 +5591,41 @@ mod tests {
                 Some("turn_rpc"),
                 json!({ "text": "hello", "stream": true }),
             )]))
+        }
+
+        fn load_run_events(
+            &mut self,
+            params: LoadRunEventsParams,
+        ) -> Result<AgentRpcHandlerOutput<LoadRunEventsResult>, AgentRpcHandlerError> {
+            let run_id = params.run_id.clone();
+            self.load_run_events.push(params);
+            let events = vec![
+                run_log_event(
+                    1,
+                    "turn.started",
+                    &run_id,
+                    Some("turn_rpc"),
+                    json!({ "userTask": "hello" }),
+                ),
+                run_log_event(
+                    2,
+                    "assistant.delta",
+                    &run_id,
+                    Some("turn_rpc"),
+                    json!({ "text": "hello" }),
+                ),
+            ];
+            Ok(AgentRpcHandlerOutput::new(LoadRunEventsResult {
+                run_id,
+                events: events
+                    .iter()
+                    .map(super::run_log_event_to_envelope)
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("fixture events should serialize"),
+                first_seq: Some(1),
+                last_seq: Some(2),
+                has_more_before: false,
+            }))
         }
 
         fn list_runs(

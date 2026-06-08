@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeSet, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
+    fs,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -20,6 +21,7 @@ use crate::{
         ContextBuildError, ContextBuilder, ContextBuilderConfig, ContextItem, ContextItemKind,
         ContextManifestOmitted, ContextManifestReport,
     },
+    hashing::sha256_hex,
     provider::deepseek_api::{ChatMessage, ChatToolCall},
     reasoning::{
         ReasoningContentError, ReasoningContentMode, ReasoningContentState,
@@ -51,6 +53,15 @@ const PROVIDER_STREAM_RETRY_REASONING_NOTICE: &str = concat!(
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_LINES: usize = 8;
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 const TOOL_ARGUMENT_DIAGNOSTIC_MAX_BYTES: usize = 128 * 1024;
+const WORKSPACE_DIFF_MAX_FILES: usize = 20_000;
+const WORKSPACE_DIFF_HASH_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const WORKSPACE_DIFF_EXCLUDED_DIRS: &[&str] = &[
+    ".git",
+    ".prole-coder",
+    "target",
+    "node_modules",
+    ".vscode-test",
+];
 const MAX_AUTO_APPROVED_PATCH_FILES: usize = 5;
 const WORKSPACE_POLICY_PATCH_FILES: &[&str] = &[".gitignore", ".prole-coderignore"];
 const READ_ONLY_VERSION_COMMANDS: &[&str] = &[
@@ -255,7 +266,6 @@ where
             Some(input.turn_id.clone()),
             turn_started_payload,
         )?;
-
         let context = self.build_context(&input)?;
         append_turn_event(
             run_log,
@@ -268,6 +278,8 @@ where
         let mut messages = vec![ChatMessage::user(context.content)];
         let mut tool_results = Vec::new();
         let mut changed_files = Vec::new();
+        let mut workspace_before = None;
+        let mut verification_status = VerificationStatus::Skipped;
         let mut last_shell_output_summary = None;
         let mut provider_transient_retries_remaining = self.config.provider_transient_retries;
         let mut provider_idle_timeout_retries_remaining =
@@ -445,6 +457,11 @@ where
                         )));
                     }
                     let final_message = response.content.unwrap_or_default();
+                    let final_changed_files = final_changed_files(
+                        changed_files,
+                        workspace_before.as_ref(),
+                        self.tools.root(),
+                    );
                     append_turn_event(
                         run_log,
                         event_sink,
@@ -452,8 +469,8 @@ where
                         Some(input.turn_id.clone()),
                         json!({
                             "summary": final_message,
-                            "changedFiles": changed_files.clone(),
-                            "verificationStatus": "skipped",
+                            "changedFiles": final_changed_files.clone(),
+                            "verificationStatus": verification_status.as_str(),
                         }),
                     )?;
 
@@ -461,7 +478,7 @@ where
                         final_message,
                         iterations: iteration,
                         tool_results,
-                        changed_files,
+                        changed_files: final_changed_files,
                     });
                 }
 
@@ -473,6 +490,11 @@ where
                 ));
 
                 for (tool_index, tool_call) in tool_calls.iter().enumerate() {
+                    if workspace_before.is_none()
+                        && should_capture_workspace_diff_baseline(tool_call.function.name.as_str())
+                    {
+                        workspace_before = workspace_file_snapshot(self.tools.root()).ok();
+                    }
                     let tool_context = ToolCallContext {
                         turn_id: &input.turn_id,
                         iteration,
@@ -483,6 +505,7 @@ where
                     let executed =
                         self.execute_tool_call(tool_call, tool_context, run_log, event_sink)?;
                     let follow_up_output_summary = executed.follow_up_output_summary.clone();
+                    verification_status = verification_status.combine(executed.verification_status);
                     changed_files.extend(executed.changed_files.iter().cloned());
                     messages.push(ChatMessage::tool_result(
                         tool_call.id.clone(),
@@ -1057,6 +1080,7 @@ where
                     run_log,
                     event_sink,
                 )?;
+                let command = args.command.clone();
                 self.execute_without_approval(
                     tool_call,
                     context,
@@ -1065,7 +1089,7 @@ where
                     event_sink,
                     |tools, args, cancellation_token| {
                         let result = tools.shell_with_cancellation(args, cancellation_token)?;
-                        shell_tool_record(result)
+                        shell_tool_record(&command, result)
                     },
                 )
             }
@@ -1213,6 +1237,7 @@ where
             message_content,
             log_result: result,
             changed_files: Vec::new(),
+            verification_status: None,
             follow_up_output_summary: None,
         };
 
@@ -1266,6 +1291,7 @@ where
             message_content,
             log_result: result,
             changed_files: Vec::new(),
+            verification_status: None,
             follow_up_output_summary: None,
         };
 
@@ -2510,7 +2536,33 @@ struct ExecutedToolCall {
     message_content: String,
     log_result: Value,
     changed_files: Vec<String>,
+    verification_status: Option<VerificationStatus>,
     follow_up_output_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerificationStatus {
+    Skipped,
+    Passed,
+    Failed,
+}
+
+impl VerificationStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Skipped => "skipped",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+        }
+    }
+
+    const fn combine(self, observed: Option<Self>) -> Self {
+        match (self, observed) {
+            (Self::Failed, _) | (_, Some(Self::Failed)) => Self::Failed,
+            (_, Some(Self::Passed)) => Self::Passed,
+            (status, _) => status,
+        }
+    }
 }
 
 struct CollectedProviderTurn {
@@ -2689,12 +2741,17 @@ fn tool_record<T: serde::Serialize>(
         message_content,
         log_result,
         changed_files,
+        verification_status: None,
         follow_up_output_summary: None,
     })
 }
 
-fn shell_tool_record(result: ShellResult) -> Result<ExecutedToolCall, AgentTurnLoopError> {
+fn shell_tool_record(
+    command: &str,
+    result: ShellResult,
+) -> Result<ExecutedToolCall, AgentTurnLoopError> {
     let output_summary = shell_approval_output_summary(&result);
+    let verification_status = verification_status_for_shell_command(command, result.status);
     let log_result = redacted_tool_result_value(&result)?;
     let message_content = serde_json::to_string(&log_result)?;
     Ok(ExecutedToolCall {
@@ -2703,8 +2760,90 @@ fn shell_tool_record(result: ShellResult) -> Result<ExecutedToolCall, AgentTurnL
         message_content,
         log_result,
         changed_files: Vec::new(),
+        verification_status,
         follow_up_output_summary: output_summary,
     })
+}
+
+fn verification_status_for_shell_command(
+    command: &str,
+    status: ToolStatus,
+) -> Option<VerificationStatus> {
+    if !is_verification_shell_command(command) {
+        return None;
+    }
+
+    Some(match status {
+        ToolStatus::Ok => VerificationStatus::Passed,
+        ToolStatus::Failed => VerificationStatus::Failed,
+    })
+}
+
+fn is_verification_shell_command(command: &str) -> bool {
+    let tokens = shell_command_tokens(command);
+    let Some(program) = tokens.first().map(String::as_str) else {
+        return false;
+    };
+
+    match program {
+        "cargo" => tokens
+            .iter()
+            .skip(1)
+            .any(|token| matches!(token.as_str(), "check" | "clippy" | "test")),
+        "npm" | "pnpm" | "yarn" | "bun" => is_javascript_verification_command(&tokens[1..]),
+        "node" => tokens.iter().skip(1).any(|token| token == "test"),
+        "py" | "python" | "python3" => tokens
+            .windows(2)
+            .any(|pair| pair[0] == "m" && matches!(pair[1].as_str(), "pytest" | "unittest")),
+        "pytest" => true,
+        "go" | "dotnet" => tokens.iter().skip(1).any(|token| token.as_str() == "test"),
+        "tsc" => true,
+        _ => false,
+    }
+}
+
+fn shell_command_tokens(command: &str) -> Vec<String> {
+    command
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric()
+                || character == '-'
+                || character == '_'
+                || character == '.'
+                || character == ':')
+        })
+        .filter(|token| !token.is_empty())
+        .map(|token| token.trim_start_matches('-').to_ascii_lowercase())
+        .collect()
+}
+
+fn is_javascript_verification_command(tokens: &[String]) -> bool {
+    for (index, token) in tokens.iter().enumerate() {
+        if token == "test" {
+            return true;
+        }
+        if token == "run"
+            && let Some(script) = tokens.get(index + 1)
+            && is_javascript_verification_script(script)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_javascript_verification_script(script: &str) -> bool {
+    matches!(
+        script,
+        "check" | "clippy" | "lint" | "test" | "tests" | "typecheck" | "type-check"
+    ) || script.starts_with("check:")
+        || script.starts_with("lint:")
+        || script.starts_with("test:")
+        || script.starts_with("typecheck:")
+        || script.starts_with("type-check:")
+}
+
+fn should_capture_workspace_diff_baseline(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case(ToolName::Shell.as_str())
 }
 
 fn shell_approval_output_summary(result: &ShellResult) -> Option<String> {
@@ -2760,6 +2899,156 @@ fn truncate_shell_output_summary(text: &str) -> String {
         end -= 1;
     }
     format!("{}{}", &text[..end], TRUNCATED_MARKER)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceFileSnapshot {
+    files: BTreeMap<String, WorkspaceFileFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceFileFingerprint {
+    len: u64,
+    modified_unix_ms: Option<u128>,
+    hash: Option<String>,
+}
+
+fn final_changed_files(
+    mut changed_files: Vec<String>,
+    workspace_before: Option<&WorkspaceFileSnapshot>,
+    workspace_root: &Path,
+) -> Vec<String> {
+    if let Some(before) = workspace_before
+        && let Ok(after) = workspace_file_snapshot(workspace_root)
+    {
+        changed_files.extend(workspace_snapshot_changed_files(before, &after));
+    }
+    sorted_unique_strings(changed_files)
+}
+
+fn workspace_file_snapshot(root: &Path) -> std::io::Result<WorkspaceFileSnapshot> {
+    let root = fs::canonicalize(root)?;
+    let mut files = BTreeMap::new();
+    let mut scanned_files = 0usize;
+    scan_workspace_dir(&root, &root, &mut files, &mut scanned_files)?;
+    Ok(WorkspaceFileSnapshot { files })
+}
+
+fn scan_workspace_dir(
+    root: &Path,
+    dir: &Path,
+    files: &mut BTreeMap<String, WorkspaceFileFingerprint>,
+    scanned_files: &mut usize,
+) -> std::io::Result<()> {
+    if *scanned_files >= WORKSPACE_DIFF_MAX_FILES {
+        return Ok(());
+    }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if dir == root => return Err(error),
+        Err(_) => return Ok(()),
+    };
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        if *scanned_files >= WORKSPACE_DIFF_MAX_FILES {
+            return Ok(());
+        }
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if is_workspace_diff_excluded_dir(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            scan_workspace_dir(root, &path, files, scanned_files)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let Some(relative_path) = workspace_relative_slash_path(root, &path) else {
+            continue;
+        };
+        let Some(fingerprint) = workspace_file_fingerprint(&path) else {
+            continue;
+        };
+        files.insert(relative_path, fingerprint);
+        *scanned_files += 1;
+    }
+
+    Ok(())
+}
+
+fn workspace_file_fingerprint(path: &Path) -> Option<WorkspaceFileFingerprint> {
+    let metadata = fs::metadata(path).ok()?;
+    let len = metadata.len();
+    let modified_unix_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis());
+    let hash = if len <= WORKSPACE_DIFF_HASH_MAX_BYTES {
+        fs::read(path).ok().map(|bytes| sha256_hex(&bytes))
+    } else {
+        None
+    };
+
+    Some(WorkspaceFileFingerprint {
+        len,
+        modified_unix_ms,
+        hash,
+    })
+}
+
+fn workspace_snapshot_changed_files(
+    before: &WorkspaceFileSnapshot,
+    after: &WorkspaceFileSnapshot,
+) -> Vec<String> {
+    let mut changed = Vec::new();
+    let paths = before
+        .files
+        .keys()
+        .chain(after.files.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for path in paths {
+        if before.files.get(&path) != after.files.get(&path) {
+            changed.push(path);
+        }
+    }
+    changed
+}
+
+fn sorted_unique_strings(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn workspace_relative_slash_path(root: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(root)
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .filter(|relative| !relative.is_empty())
+}
+
+fn is_workspace_diff_excluded_dir(file_name: &str) -> bool {
+    WORKSPACE_DIFF_EXCLUDED_DIRS
+        .iter()
+        .any(|excluded| file_name.eq_ignore_ascii_case(excluded))
 }
 
 fn reasoning_state_payload(state: ReasoningContentState) -> Value {
@@ -3647,7 +3936,8 @@ mod tests {
         TurnProviderRequest, TurnProviderResponse, TurnProviderStream,
         TurnProviderStreamingSummary, TurnProviderUsage, TurnSteerQueue,
         effective_approval_requirement, find_builtin_tool, is_auto_approved_read_only_shell,
-        tool_risk_assessment, turn_provider_response_stream, unknown_tool_risk,
+        is_verification_shell_command, tool_risk_assessment, turn_provider_response_stream,
+        unknown_tool_risk,
     };
 
     #[test]
@@ -4503,6 +4793,47 @@ mod tests {
         assert!(!is_auto_approved_read_only_shell("rg --files", Some("..")));
     }
 
+    #[test]
+    fn verification_shell_command_detection_accepts_common_test_markers() {
+        for command in [
+            "node --test",
+            "npm test",
+            "pnpm --filter prole-coder-vscode test",
+            "pnpm run test:unit",
+            "yarn run lint",
+            "bun run typecheck",
+            "python -m unittest discover",
+            "py -m pytest tests",
+            "cargo check",
+            "cargo clippy",
+            "cargo --locked test",
+            "npm run typecheck",
+            "pytest tests",
+            "go test ./...",
+            "dotnet test",
+            "tsc --noEmit",
+        ] {
+            assert!(
+                is_verification_shell_command(command),
+                "command should be detected as verification: {command}"
+            );
+        }
+
+        for command in [
+            "node --version",
+            "Write-Output hello",
+            "npm run deploy-check",
+            "echo test complete",
+            "python scripts/generate_testdata.py",
+            "cargo build",
+        ] {
+            assert!(
+                !is_verification_shell_command(command),
+                "command should not be detected as verification: {command}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn turn_loop_upgrades_shell_approval_risk_for_dependency_install() {
         let workspace = TestWorkspace::new("turn-loop");
@@ -4668,6 +4999,69 @@ mod tests {
         assert!(output_summary.contains("exitCode: 0"));
         assert!(output_summary.contains("stdout:"));
         assert!(output_summary.contains("second"));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_summarizes_shell_file_changes_and_verification_status() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_shell_summary_metadata")
+            .expect("run should be created");
+        #[cfg(windows)]
+        let write_command = "Set-Content -Path shell-output.txt -Value changed -Encoding UTF8";
+        #[cfg(not(windows))]
+        let write_command = "printf 'changed\\n' > shell-output.txt";
+        let verify_command = "node --test";
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("Write a file and verify.".to_owned()),
+                vec![
+                    ChatToolCall::function(
+                        "call_shell_write",
+                        "shell",
+                        json!({
+                            "command": write_command,
+                            "timeoutMs": 10_000
+                        })
+                        .to_string(),
+                    ),
+                    ChatToolCall::function(
+                        "call_shell_verify",
+                        "shell",
+                        json!({
+                            "command": verify_command,
+                            "timeoutMs": 10_000
+                        })
+                        .to_string(),
+                    ),
+                ],
+            ),
+            TurnProviderResponse::final_text("Done."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
+                .expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Write via shell"), &mut run)
+            .await
+            .expect("approved shell commands should complete");
+
+        assert_eq!(outcome.changed_files, vec!["shell-output.txt"]);
+        let events = store
+            .load_run("run_turn_shell_summary_metadata")
+            .expect("events should load");
+        let completed = events
+            .iter()
+            .find(|event| event.event_type == "run.completed")
+            .expect("run should complete");
+        assert_eq!(
+            completed.payload["changedFiles"],
+            json!(["shell-output.txt"])
+        );
+        assert_eq!(completed.payload["verificationStatus"], "passed");
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ export const agentCancelMethod = "agent.cancel" as const;
 export const agentSteerMethod = "agent.steer" as const;
 export const agentListRunsMethod = "agent.listRuns" as const;
 export const agentDeleteRunMethod = "agent.deleteRun" as const;
+export const agentLoadRunEventsMethod = "agent.loadRunEvents" as const;
 export const agentPreviewFimMethod = "agent.previewFim" as const;
 
 export interface ProtocolErrorDefinition {
@@ -522,6 +523,20 @@ export interface ResumeResult {
   readonly runId: string;
   readonly nextSeq: number;
   readonly replayStarted: boolean;
+}
+
+export interface LoadRunEventsParams {
+  readonly runId: string;
+  readonly beforeSeq?: number;
+  readonly limit?: number;
+}
+
+export interface LoadRunEventsResult {
+  readonly runId: string;
+  readonly events: readonly AgentEventEnvelope[];
+  readonly firstSeq?: number;
+  readonly lastSeq?: number;
+  readonly hasMoreBefore: boolean;
 }
 
 export type RunSummaryStatus = "running" | "completed" | "failed" | "canceled";

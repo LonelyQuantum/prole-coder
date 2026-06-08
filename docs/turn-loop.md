@@ -86,6 +86,8 @@ provider stream 中的 content delta 会立即写入 `assistant.delta`，payload
 
 如果 `finishReason=length` 时 provider 已经返回了工具调用列表，Turn Loop 也不会执行该轮工具调用，因为 streaming JSON arguments 可能刚好在输出上限处被截断。此时它会保留该轮可见 assistant 文本，并追加一条恢复提示，要求模型丢弃半截工具参数，重新发出完整 JSON 工具调用或继续简短工作；只有后续非截断响应里的完整工具调用才会进入 schema 校验和执行路径。
 
+`run.completed.changedFiles` 会合并工具执行层显式上报的路径和本 turn 中 shell 写入的 workspace 快照差异，用于兜底捕获 shell 生成或修改文件的情况。快照 baseline 只在首个 shell 工具执行前按需采集，避免 ask-only 或早失败 turn 在启动时扫描整个 workspace；完成时的快照排除 `.git`、`.prole-coder`、`target`、`node_modules` 和 `.vscode-test`，并对较小文件计算 hash，对较大文件使用大小/mtime 指纹。`run.completed.verificationStatus` 会根据已知 shell 验证命令形态汇总，例如 `cargo test/check/clippy`、`npm/pnpm/yarn/bun test` 或 `run test:*`、`python -m unittest/pytest`、`pytest`、`go test`、`dotnet test` 和 `tsc`：任何验证命令失败则为 `failed`，至少一个验证命令成功且无失败则为 `passed`，否则为 `skipped`。
+
 Turn Loop 默认允许每个预算窗口最多 50 次 provider request。窗口耗尽时不会直接写入 `E_MAX_MODEL_TURNS` 失败，而是写入 `tool.approvalRequired(toolName="model_turn_budget")`，由前端/CLI 通过同一套 `agent.approve` / `agent.reject` 队列决定是否继续；批准后再开启下一段 provider request 窗口，拒绝、取消或过期才按已有审批错误路径结束当前 run。
 
 DeepSeek streaming tool call delta 在 CLI provider wrapper 内通过 `ChatToolCallAccumulator` 拼装为完整 `ChatToolCall` 后才进入 `Completed.tool_calls`。Turn Loop 不直接处理 provider 私有 delta 形态，只要求 provider 在 `Completed` 中提供完整、可校验、可执行的工具调用列表。如果累计后的 `function.arguments` 不是合法 JSON，Turn Loop 会以 `E_INVALID_TOOL_ARGUMENTS` 失败，并把脱敏后的累计 arguments 写入当前 run 的 `diagnostics/invalid-tool-arguments-<sanitizedToolCallId>-<hash>.json`，同时在 `run.failed.diagnosticFile` 暴露该本地路径。若 arguments 是合法 JSON 但未通过已知工具 schema（例如 `read_file` 传入 `limit`），Turn Loop 会记录失败的 `tool.requested` / `tool.completed`，把 `E_INVALID_TOOL_ARGUMENTS`、schema 错误和纠偏 guidance 作为 tool result 喂回 provider，让模型可按正确参数重试。
@@ -108,7 +110,7 @@ DeepSeek streaming tool call delta 在 CLI provider wrapper 内通过 `ChatToolC
 
 RPC handler 当前提供单 active run 的真实审批等待、运行中 steer、协作式取消和全双工事件输出：当 `tool.approvalRequired` 写入 run log 后，RPC 层会把该请求登记为 pending approval，后台 Turn Loop worker 在 `ApprovalPolicy::decide` 中等待；同一事件也会通过 live event queue 投递给 request loop 的单 writer。前端发送 `agent.approve` 会继续进入 `tool.started` 和工具执行；发送 `agent.reject` 会写入拒绝事件并使当前 run 失败；发送 `agent.steer` 会把补充指导放入 active run 的 `TurnSteerQueue`，下一次 provider request 前写入 `turn.steered` 并作为最新用户运行中指令注入模型消息；发送 `agent.cancel` 会设置 active run 的 `CancellationToken`，等待审批时写入 `tool.approvalResolved(decision="canceled")` 和 `run.canceled`，provider/tool 执行中取消时写入 `run.canceled(code="E_RUN_CANCELED")`；超过默认 300 秒没有决定会写入 `tool.approvalResolved(decision="expired")` 和 `run.canceled`。
 
-RPC active run 的 Run Log 使用 `SerializedRunLog`：后台 Turn Loop worker 追加事件，`agent.resume` 读取 active run 时也通过同一个同步句柄。这样可以保证本地 `events.jsonl`、live notification 和 replay 的 `seq` 边界一致。
+RPC active run 的 Run Log 使用 `SerializedRunLog`：后台 Turn Loop worker 追加事件，`agent.resume` 和只读 `agent.loadRunEvents` 读取 active run 时也通过同一个同步句柄。这样可以保证本地 `events.jsonl`、live notification、replay 和历史分页的 `seq` 边界一致。
 
 ## 当前测试覆盖
 
@@ -118,7 +120,7 @@ RPC active run 的 Run Log 使用 `SerializedRunLog`：后台 Turn Loop worker �
 - provider 请求 `shell`，默认审批策略拒绝执行，run 失败且不会写入 `tool.started`。
 - provider 请求高风险 `shell` 命令时，Turn Loop 会在审批前升级 `tool.requested` / `tool.approvalRequired` 风险并写入 `riskReasons`；网络和破坏性升级均覆盖 `persistable: false`。
 - provider 请求 workspace-scoped 只读 shell 命令时，Turn Loop 会把该 shell 调用降为 `read` 并免审批；含管道、重定向、绝对路径、父级路径、敏感 workspace 路径或写入/外部执行参数的命令仍需审批。常见 `python --version`、`node -v`、`cargo --version` 等版本查询按单参数只读命令处理。
-- provider 请求 `apply_patch`，最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 免审批修改文件、记录 `changedFiles` 并完成 run；超过阈值的 bulk patch 或 workspace policy 文件 patch 会触发审批；hunk mismatch 等可恢复 patch 错误会作为 failed tool result 回传并继续模型回合。
+- provider 请求 `apply_patch`，最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 免审批修改文件、记录 `changedFiles` 并完成 run；shell 写入文件也会通过 workspace 前后快照进入最终 `changedFiles`；超过阈值的 bulk patch 或 workspace policy 文件 patch 会触发审批；hunk mismatch 等可恢复 patch 错误会作为 failed tool result 回传并继续模型回合。
 - provider 请求未知工具如 `write_file` 时，Turn Loop 会把 `E_UNKNOWN_TOOL` 作为 failed tool result 回传，记录失败工具事件，不写入未知工具参数，也不直接 `run.failed`。
 - thinking disabled 配置下，provider 返回无 `reasoning_content` 的工具调用时，Turn Loop 会按非 reasoning replay 路径继续执行工具并完成 run。
 - provider 发送多个 streaming content delta，Turn Loop 写入多条 `assistant.delta`，并避免在 `Completed` 时重复写入完整文本。
@@ -139,7 +141,7 @@ RPC active run 的 Run Log 使用 `SerializedRunLog`：后台 Turn Loop worker �
 
 - 多 active run 关联和持久批准存储。
 - 更强 sandbox 策略。
-- RPC request loop 里的 verification 编排；CLI `run` 已支持用户显式 `--verify`。
+- 更完整的 verification 编排；当前 Turn Loop 已能从常见 shell 验证命令形态汇总 `run.completed.verificationStatus`，CLI `run` 仍支持用户显式 `--verify`。
 
 ## 后续增强
 
