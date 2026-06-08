@@ -3869,7 +3869,7 @@ mod tests {
         assert_eq!(result.events[1].seq, 4);
         assert_eq!(result.first_seq, Some(3));
         assert_eq!(result.last_seq, Some(4));
-        assert_eq!(result.has_more_before, true);
+        assert!(result.has_more_before);
     }
 
     #[test]
@@ -5599,7 +5599,7 @@ mod tests {
         ) -> Result<AgentRpcHandlerOutput<LoadRunEventsResult>, AgentRpcHandlerError> {
             let run_id = params.run_id.clone();
             self.load_run_events.push(params);
-            let events = vec![
+            let events = [
                 run_log_event(
                     1,
                     "turn.started",
