@@ -1,6 +1,6 @@
 # 工具系统
 
-状态：`0.1.0` 设计已确定，Phase 1 基础执行层、审批前 shell 动态风险升级、Phase 3 RPC/VS Code 审批接入、VS Code Native diff patch 预览、`apply_patch` hunk 级审批和命令子进程树清理已实现。
+状态：`0.1.0` 设计已确定，Phase 1 基础执行层、审批前 shell 动态风险升级、Phase 3 RPC/VS Code 审批接入、VS Code Native diff patch 预览、`apply_patch` hunk 级审批、run-scoped 大 payload 引用和命令子进程树清理已实现。
 
 工具系统通过显式 schema 和类型化结果向 Agent Core 暴露工作区操作。模型不得直接执行文件写入、shell 命令或网络访问；它只能请求工具，工具请求必须经过 schema 校验和审批策略。
 
@@ -23,7 +23,7 @@
 - `network`
 - `destructive`
 
-工具定义中的风险等级是最低风险。Agent Core 可以基于具体参数把风险升级，但不得降级。
+工具定义中的风险等级是默认风险。Agent Core 可以基于具体参数把风险升级；唯一允许的降级例外是 `shell` 的严格只读白名单命令，且必须证明命令和 `cwd` 都限制在当前 workspace 内。
 
 ## 工具定义结构
 
@@ -58,7 +58,7 @@ pub struct ToolDefinition {
 `implementationStatus` / `implementation_status` 只描述当前仓库是否已有基础执行器实现：
 
 - `executor_implemented`：已接入 `WorkspaceToolExecutor`，可被基础 Agent Turn Loop 调用。
-- `schema_only`：协议名称、参数 schema、风险和审批策略已注册，但执行器尚未实现；如果模型在当前阶段请求这类工具，Turn Loop 必须返回显式 unsupported tool 错误。
+- `schema_only`：协议名称、参数 schema、风险和审批策略已注册，但执行器尚未实现；如果模型在当前阶段请求这类工具，Turn Loop 必须返回显式 unsupported tool 错误。`model_turn_budget` 是例外：它不是模型可调用工具，而是 Turn Loop 本地发出的 continuation approval 控制点。
 
 ## 通用结果字段
 
@@ -166,11 +166,12 @@ pub struct ToolDefinition {
 
 风险：`write`。
 
-审批：`required`。
+审批：`none`。`apply_patch` 只能修改当前 workspace 内、`expectedFiles` 明确列出的文件；最多 5 个 `expectedFiles` 的普通 workspace 代码修改默认直接执行，不打断对话。超过 5 个文件的 bulk patch，或修改 `.gitignore` / `.prole-coderignore` 这类 workspace policy 文件时，会动态要求审批。路径越界、敏感路径和非法 patch 仍会被拒绝；未来如果 patch 动态升级为 destructive 风险，仍可复用已有 hunk approval 边界。
 
 参数：
 
-- `unifiedDiff`：统一 diff。
+- `unifiedDiff`：统一 diff。小 patch 可直接内联该字段。
+- `payloadRef`：可选 run-scoped 大 payload 引用；与 `unifiedDiff` 互斥。当前支持 `{ kind: "run_file", path, sha256?, sizeBytes? }`，`path` 必须位于当前 run 的 `payloads/` 目录下。
 - `expectedFiles`：预期修改文件列表。
 
 结果：
@@ -192,6 +193,8 @@ pub struct ToolDefinition {
 - `cwd`：workspace-relative 工作目录，省略时使用 workspace root。
 - `timeoutMs`：超时时间。
 
+模型不应在 `command` 中 `cd` 到猜测的绝对路径；需要切换目录时使用 `cwd`，且 `cwd` 必须是 workspace-relative。Windows 上执行器使用 Windows PowerShell 5.1，并在启动脚本中把 PowerShell 层 stdout/stderr 设置为 UTF-8；模型不应使用 POSIX-only 路径或 PowerShell 7-only 的 `&&` / `||` 操作符。测试和验证命令不需要也不应手动追加 `2>&1`，因为 shell 工具已经分别捕获 stdout/stderr；在 PowerShell 5.1 中合并流可能把 CLIXML/progress 记录带入 stderr，使本来通过的验证看起来失败。
+
 结果：
 
 - `exitCode`
@@ -199,7 +202,9 @@ pub struct ToolDefinition {
 - `stderr`
 - `durationMs`
 
-说明：`shell` 的静态风险是 `exec`。Agent Core 会在执行前分类具体命令，并递归检查 shell 包装器、`$(...)` 和传统反引号子命令；依赖安装、网络访问、远程 git 和发布命令会升级为 `network`，删除和破坏性 git 操作会升级为 `destructive`。升级原因通过 `riskReasons` 写入 `tool.requested` 和 `tool.approvalRequired`；协议 `0.1.0` 不允许自动降级或静默执行。
+说明：`shell` 的静态风险是 `exec`。Agent Core 会在执行前分类具体命令，并递归检查 shell 包装器、`$(...)` 和传统反引号子命令；依赖安装、网络访问、远程 git 和发布命令会升级为 `network`，删除和破坏性 git 操作会升级为 `destructive`。升级原因通过 `riskReasons` 写入 `tool.requested` 和 `tool.approvalRequired`。
+
+P5-17 起，当前 workspace 内严格只读的简单 shell 命令可被降级为 `read` 并免审批执行：首版白名单包括 `rg`、`Get-Content` / `gc` / `cat` / `type`、`Select-String`、`Get-ChildItem` / `gci` / `dir`、`Test-Path`，以及 `git diff` / `status` / `log` / `show`。常见本地工具的版本查询（如 `python --version`、`node -v`、`cargo --version`、`go version`）也可免审批，但只接受裸命令名加一个版本参数。该白名单只接受无管道、无重定向、无变量展开、无子命令、无绝对路径、无 `..` 路径且不触及 `.env`、`.secrets`、`.git`、`.agents`、`.codex`、`.prole-coder` 等敏感 workspace 路径的简单参数；`rg --pre`、`rg --replace`、`rg -r` / 含 `r` 的组合短参数、`git --output`、`git --ext-diff`、`git --no-index` 等可能执行外部程序、写文件或越界读取的参数仍保持 `exec` 审批。
 
 ### `git_status`
 
@@ -276,7 +281,7 @@ pub struct ToolDefinition {
 - TypeScript 协议类型：`packages/protocol/src/index.ts`。
 - 共享协议 fixture：`docs/protocol/tool-registry.v1.json`。
 
-`crates/agent-rpc` 已实现 Run Log 事件到 `agent.event` notification 的桥接，并已分发 `agent.approve` / `agent.reject`。真实 RPC handler 已能把工具请求、审批请求、审批决定和工具结果暴露给 CLI/VS Code/TUI；VS Code 已接入真实 pending 队列、命令风险展示、Native diff patch 预览和 `apply_patch` selected hunk 审批，TUI 真实队列接入仍在后续阶段。
+`crates/agent-rpc` 已实现 Run Log 事件到 `agent.event` notification 的桥接，并已分发 `agent.approve` / `agent.reject`。真实 RPC handler 已能把工具请求、审批请求、审批决定和工具结果暴露给 CLI/VS Code/TUI；VS Code 已接入真实 pending 队列、命令风险展示、Native diff patch 预览和需要审批 patch 路径的 selected hunk 边界，TUI 真实队列接入仍在后续阶段。
 
 ## 协议一致性测试
 
@@ -303,8 +308,8 @@ fixture 中的 `tools` 被当作无序集合校验；测试会按工具名规整
 - `workspace_manifest`：生成 workspace manifest v0，默认遵守 `.gitignore` 和 `.prole-coderignore`，硬排除 `.git/`、`.secrets/`、`.secret/`、`.agents/`、`.codex/` 和 `.prole-coder/`，并返回稳定排序条目、manifest hash、git 状态和截断原因。
 - `read_file`：只读取 workspace 内 UTF-8 文本文件，支持 1-based 行范围，并返回完整文件的 `sha256` 和 `sizeBytes`。
 - `search`：通过 `rg --json --fixed-strings` 搜索，默认排除 `.git/`、`.secrets/`、`.secret/`、`.env*`、`node_modules/` 和 `target/`。
-- `apply_patch`：应用受限 unified diff，要求 patch 实际文件集合与 `expectedFiles` 完全一致；执行时会先在内存中完成全部文件的 hunk 校验和 staging，再统一写盘，因此解析或 hunk mismatch 不会留下部分文件已修改的状态；成功后返回 reverse patch。Core 会从 unified diff 生成稳定 hunk id，RPC/VS Code 首版支持 selected hunk 审批；文件创建和删除如果只批准部分 hunk 会被拒绝，避免生成不可审计的半文件操作。
-- `shell`：在 workspace 内执行非交互式命令，支持超时，执行前进行命令风险分类，返回 exit code、stdout、stderr 和耗时。
+- `apply_patch`：应用受限 unified diff，要求 patch 实际文件集合与 `expectedFiles` 完全一致；执行时会先在内存中完成全部文件的 hunk 校验和 staging，再统一写盘，因此解析或 hunk mismatch 不会留下部分文件已修改的状态；成功后返回 reverse patch。最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 默认不触发审批，超过阈值或修改 workspace policy 文件会动态要求审批；Core 仍会从 unified diff 生成稳定 hunk id，供高风险 patch 或显式审批路径复用 selected hunk 边界。文件创建和删除如果只批准部分 hunk 会被拒绝，避免生成不可审计的半文件操作。大 patch 可以先分块追加到当前 run 的 `payloads/` 文件，再通过 `payloadRef` 引用；Turn Loop 会校验 `sha256` / `sizeBytes`，然后 materialize 为 `unifiedDiff` 进入同一条 schema、路径安全和 patch staging 链路。
+- `shell`：在 workspace 内执行非交互式命令，支持 workspace-relative `cwd`、超时和命令风险分类，返回 exit code、stdout、stderr 和耗时；Windows PowerShell wrapper 会先设置 UTF-8 输出，避免 PowerShell 本地化错误信息在 run log / Output Channel 中乱码。严格只读的 `rg`、`Get-Content`、`git diff/status/log/show` 和常见 `--version` / `-v` / `-V` 查询等简单命令可按 workspace 白名单免审批，其他 shell 命令仍按 `exec` 或动态升级后的风险审批。
 - `git_status`：读取 `git status --short --branch` 或普通 `git status`。
 - `git_diff`：读取 unstaged 或 staged diff，支持限定 workspace-relative 路径。
 
@@ -316,7 +321,7 @@ fixture 中的 `tools` 被当作无序集合校验；测试会按工具名规整
 
 当前实现暂不包含 LSP diagnostics 和 plan update 的执行逻辑；它们仍只有 schema 和静态风险定义。
 
-当前执行层已接入基础 Agent Turn Loop、审批策略、取消信号和 run log。写入与命令执行会触发审批请求，并记录 `tool.approvalResolved`；CLI 二进制可以通过 stdin/stderr 做真实 y/n 审批，测试可使用显式 auto-approve 策略验证已批准路径。Run Log 事件已能通过 RPC 桥接发送给前端；`AgentTurnLoopRpcHandler` 已能通过 `agent.sendTurn` 真实驱动 Core，并在 `tool.approvalRequired` 处检查 session/workspace 持久批准，或等待 `agent.approve` / `agent.reject` / `agent.cancel` / 审批超时。`apply_patch` 的审批 payload 会携带 hunk metadata，`agent.approve.hunks` 会被 RPC 校验后交给 Core 过滤 patch 并只执行已批准 hunks。`shell` 会在审批前分类命令并动态升级风险，审批 payload 会包含命令、cwd 和上一条 shell 输出摘要；`shell`、`search`、`git_status` 和 `git_diff` 会在子进程轮询循环中检查 `CancellationToken`，取消或超时时清理整棵命令子进程树并让 Turn Loop 写入 `run.canceled`。VS Code 已接入真实 RPC 审批队列；TUI 真实队列接入仍需要后续实现。
+当前执行层已接入基础 Agent Turn Loop、审批策略、取消信号和 run log。命令执行和动态升级为 network/destructive 的操作会触发审批请求，并记录 `tool.approvalResolved`；受限 workspace 小规模代码 `apply_patch` 默认直接执行，超过 5 个 `expectedFiles` 的 bulk patch 或 workspace policy 文件 patch 会进入审批。CLI 二进制可以通过 stdin/stderr 做真实 y/n 审批，测试可使用显式 auto-approve 策略验证已批准路径。Run Log 事件已能通过 RPC 桥接发送给前端；`AgentTurnLoopRpcHandler` 已能通过 `agent.sendTurn` 真实驱动 Core，并在 `tool.approvalRequired` 处检查 session/workspace 持久批准，或等待 `agent.approve` / `agent.reject` / `agent.cancel` / 审批超时。`apply_patch` 的 hunk metadata 仍可供审批路径携带，`agent.approve.hunks` 会被 RPC 校验后交给 Core 过滤 patch 并只执行已批准 hunks。`shell` 会在审批前分类命令、动态升级高风险命令，并对严格 workspace-scoped 的只读白名单命令改为免审批；审批 payload 会包含命令、cwd 和上一条 shell 输出摘要；`shell`、`search`、`git_status` 和 `git_diff` 会在子进程轮询循环中检查 `CancellationToken`，取消或超时时清理整棵命令子进程树并让 Turn Loop 写入 `run.canceled`。如果模型请求不存在的工具，例如 `write_file`，Turn Loop 会记录失败的 `tool.requested` / `tool.completed` 并把 `E_UNKNOWN_TOOL` 工具结果返回给 provider，提示改用现有工具；未知工具参数不会写入 run log。VS Code 已接入真实 RPC 审批队列；TUI 真实队列接入仍需要后续实现。
 
 ## 后续增强
 
@@ -344,7 +349,7 @@ fixture 中的 `tools` 被当作无序集合校验；测试会按工具名规整
 
 Phase 2d 已增加通用 tool argument validator，优先使用工具注册表中的 JSON Schema 校验模型参数。
 
-校验顺序为：解析 arguments 字符串为 `serde_json::Value` -> schema validation -> typed deserialization -> 审批 -> 执行工具。
+校验顺序为：解析 arguments 字符串为 `serde_json::Value` -> schema validation -> typed deserialization -> 审批 -> 执行工具。Malformed JSON 仍是终止型 `E_INVALID_TOOL_ARGUMENTS` 并写入脱敏诊断文件；已知工具的 schema mismatch 不再直接终止 run，而是记录失败的 `tool.requested` / `tool.completed`，把错误码、schema 错误和工具专属 guidance 作为 tool result 返回给模型重试。
 
 Schema 校验不能只作为 typed deserialization 失败后的补救，因为 Rust 结构体反序列化可能忽略未知字段，而 schema 才能稳定表达 `additionalProperties`、枚举、范围和互斥字段。当前 validator 覆盖本仓库工具 schema 使用到的 JSON Schema 子集：`type`、`required`、`properties`、`additionalProperties: false`、`items`、`enum`、`minLength`、`minItems` 和 `minimum`。
 
@@ -357,7 +362,8 @@ Schema 校验不能只作为 typed deserialization 失败后的补救，因为 R
 ### `apply_patch`
 
 - 当前实现只支持受限 unified diff；后续需要支持更完整的 git patch 语法，包括 rename、copy、mode change 和更严格的 no-newline 语义。
-- 已增加 VS Code patch 预览和 `apply_patch` hunk 级审批；后续继续增强冲突诊断、失败时的精确 hunk mismatch 信息，以及 rename/copy/mode change 等更完整 patch 语法下的审批边界。
+- 已增加 VS Code patch 预览和 `apply_patch` hunk 级审批边界；最多 5 个 `expectedFiles` 的普通 workspace 代码 patch 默认免审批，超过阈值或修改 workspace policy 文件会动态要求审批。Hunk mismatch / file mismatch / invalid patch 现在作为 failed tool result 返回给模型，便于重新读取文件后重试；这些可恢复错误发生在 workspace 写入前，因此 failed result 不携带 reverse patch。后续继续增强 rename/copy/mode change 等更完整 patch 语法下的审批边界。
+- 已完成 `apply_patch.payloadRef` 第一版：provider 或本地聚合器可以把大 patch 分块追加到 run-scoped `payloads/` 文件，最终调用 `apply_patch` 时只传轻量引用；后续可继续扩展为显式 RPC chunk 方法、payload GC 和更完整的大文件写入协议。
 - 用修改前快照生成 reverse patch，并在 run log 中保存 patch id、审批 id 和可审计回滚信息。
 - 如果需要抵抗磁盘写入中途失败，应进一步引入临时文件、原子替换或备份恢复机制；当前 staging 主要保证解析和 hunk 校验失败不会产生半应用 patch。
 - 明确二进制文件和生成文件策略，避免文本 patch 意外改写不可审计内容。
@@ -365,6 +371,7 @@ Schema 校验不能只作为 typed deserialization 失败后的补救，因为 R
 ### `shell`
 
 - 已在执行前加入命令风险分类：网络、破坏性、依赖安装、发布、远程 git 操作等会升级审批，并输出 `riskReasons`；分类器会递归检查 shell 包装器、`$(...)` 和传统反引号子命令。
+- 已加入严格只读 shell 白名单，允许 workspace 内简单 `rg`、`Get-Content`、`git diff/status/log/show` 和常见版本查询等命令免审批执行；包含管道、重定向、变量展开、子命令、绝对路径、父级路径、敏感 workspace 路径或可能写文件/执行外部程序的参数时仍需审批。
 - 已通过 Run Log 统一脱敏/截断限制输出大小并记录截断原因；取消和超时会清理命令子进程树。
 - 记录环境变量差异，但默认隐藏或脱敏敏感变量。
 - 后续按平台分别实现更强的 sandbox 策略；Windows、Linux 和 macOS 不能假设具备相同隔离能力。

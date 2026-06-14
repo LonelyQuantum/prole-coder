@@ -6,14 +6,17 @@ import {
   DEFAULT_RPC_COMMAND,
   RPC_APPROVE_METHOD,
   RPC_CANCEL_METHOD,
+  RPC_DELETE_RUN_METHOD,
   RPC_EVENT_BATCH_METHOD,
   RPC_INITIALIZE_METHOD,
   RPC_LIST_RUNS_METHOD,
+  RPC_LOAD_RUN_EVENTS_METHOD,
   RPC_PREVIEW_FIM_METHOD,
   RPC_PROTOCOL_VERSION,
   RPC_REJECT_METHOD,
   RPC_RESUME_METHOD,
   RPC_SEND_TURN_METHOD,
+  RPC_STEER_METHOD,
   RpcRequestError,
   RpcServerManager,
   type RpcChildProcess,
@@ -61,6 +64,50 @@ test("RPC server manager spawns the configured command and initializes the works
   assert.equal(ready.server.name, "prole-coder-agent-rpc");
   assert.equal(ready.capabilities.provider.defaultModel, "deepseek-v4-pro");
   assert.equal(ready.capabilities.supportsEventBatching, true);
+});
+
+test("RPC server manager forwards configured process environment overrides", async () => {
+  const factory = new FakeProcessFactory();
+  const manager = new RpcServerManager({
+    launch: {
+      command: "prole",
+      args: ["rpc"],
+      autoStart: true,
+    },
+    workspace: {
+      root: "C:/workspace/project",
+      trusted: true,
+    },
+    extensionVersion: "0.1.0",
+    processFactory: factory,
+    processEnv: {
+      DEEPSEEK_API_KEY: "stored-key",
+    },
+  });
+
+  const readyPromise = manager.start();
+  const child = factory.lastChild();
+  child.stdout.pushJson(initializeResponse(child.initializeRequest().id));
+  await readyPromise;
+
+  assert.deepEqual(factory.lastOptions?.env, {
+    DEEPSEEK_API_KEY: "stored-key",
+  });
+
+  manager.stop();
+  manager.setProcessEnv({ DEEPSEEK_API_KEY: "rotated-key" });
+
+  const restarted = manager.start();
+  const restartedChild = factory.lastChild();
+  child.exit(null, "SIGTERM");
+  restartedChild.stdout.pushJson(initializeResponse(restartedChild.initializeRequest().id));
+  await restarted;
+
+  assert.deepEqual(factory.lastOptions?.env, {
+    DEEPSEEK_API_KEY: "rotated-key",
+  });
+  assert.equal(restartedChild.killed, false);
+  assert.equal(manager.status, "ready");
 });
 
 test("RPC server manager forwards agent.event notifications", async () => {
@@ -274,7 +321,7 @@ test("RPC server manager sends typed agent.sendTurn requests and resolves matchi
   });
 });
 
-test("RPC server manager sends typed run list and resume requests", async () => {
+test("RPC server manager sends typed run list, resume, and delete requests", async () => {
   const factory = new FakeProcessFactory();
   const manager = rpcManagerWithFactory(factory);
   const readyPromise = manager.start();
@@ -344,6 +391,92 @@ test("RPC server manager sends typed run list and resume requests", async () => 
     nextSeq: 9,
     replayStarted: true,
   });
+
+  const eventsPromise = manager.loadRunEvents({ runId: "run_1", beforeSeq: 3, limit: 2 });
+  await flushMicrotasks();
+  const eventsRequest = child.requestAt(3);
+  assert.equal(eventsRequest.method, RPC_LOAD_RUN_EVENTS_METHOD);
+  assert.deepEqual(eventsRequest.params, { runId: "run_1", beforeSeq: 3, limit: 2 });
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    id: eventsRequest.id,
+    result: {
+      runId: "run_1",
+      events: [agentEvent({ seq: 1, type: "run.started" })],
+      firstSeq: 1,
+      lastSeq: 1,
+      hasMoreBefore: false,
+    },
+  });
+
+  assert.deepEqual(await eventsPromise, {
+    runId: "run_1",
+    events: [agentEvent({ seq: 1, type: "run.started" })],
+    firstSeq: 1,
+    lastSeq: 1,
+    hasMoreBefore: false,
+  });
+
+  const deletePromise = manager.deleteRun({ runId: "run_1" });
+  await flushMicrotasks();
+  const deleteRequest = child.requestAt(4);
+  assert.equal(deleteRequest.method, RPC_DELETE_RUN_METHOD);
+  assert.deepEqual(deleteRequest.params, { runId: "run_1" });
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    id: deleteRequest.id,
+    result: {
+      runId: "run_1",
+      deleted: true,
+    },
+  });
+
+  assert.deepEqual(await deletePromise, {
+    runId: "run_1",
+    deleted: true,
+  });
+});
+
+test("RPC server manager marks resume replay events without marking later live events", async () => {
+  const factory = new FakeProcessFactory();
+  const manager = rpcManagerWithFactory(factory);
+  const received: unknown[] = [];
+  manager.onEvent((event) => received.push(event));
+  const readyPromise = manager.start();
+  const child = factory.lastChild();
+  child.stdout.pushJson(initializeResponse(child.initializeRequest().id));
+  await readyPromise;
+
+  const resumePromise = manager.resume({ runId: "run_1" });
+  await flushMicrotasks();
+  const resumeRequest = child.requestAt(1);
+  assert.equal(resumeRequest.method, RPC_RESUME_METHOD);
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    id: resumeRequest.id,
+    result: {
+      runId: "run_1",
+      nextSeq: 4,
+      replayStarted: true,
+    },
+  });
+  await resumePromise;
+
+  child.stdout.pushJson(agentEventNotification({ seq: 1, type: "run.started" }));
+  child.stdout.pushJson(agentEventNotification({ seq: 3, type: "tool.approvalRequired" }));
+  child.stdout.pushJson(agentEventNotification({ seq: 4, type: "turn.started" }));
+
+  assert.deepEqual(
+    received.map((event) => ({
+      seq: (event as { seq: number }).seq,
+      replay: (event as { replay?: boolean }).replay,
+    })),
+    [
+      { seq: 1, replay: true },
+      { seq: 3, replay: true },
+      { seq: 4, replay: undefined },
+    ],
+  );
 });
 
 test("RPC server manager sends typed approval requests", async () => {
@@ -452,6 +585,42 @@ test("RPC server manager sends typed cancel requests", async () => {
     runId: "run_1",
     state: "canceled",
     reason: "user canceled",
+  });
+});
+
+test("RPC server manager sends typed steer requests", async () => {
+  const factory = new FakeProcessFactory();
+  const manager = rpcManagerWithFactory(factory);
+  const readyPromise = manager.start();
+  const child = factory.lastChild();
+  child.stdout.pushJson(initializeResponse(child.initializeRequest().id));
+  await readyPromise;
+
+  const steerPromise = manager.steer({
+    runId: "run_1",
+    message: "focus on the failing test",
+  });
+  await flushMicrotasks();
+  const steerRequest = child.requestAt(1);
+  assert.equal(steerRequest.method, RPC_STEER_METHOD);
+  assert.deepEqual(steerRequest.params, {
+    runId: "run_1",
+    message: "focus on the failing test",
+  });
+  child.stdout.pushJson({
+    jsonrpc: "2.0",
+    id: steerRequest.id,
+    result: {
+      runId: "run_1",
+      steerId: "steer_1",
+      accepted: true,
+    },
+  });
+
+  assert.deepEqual(await steerPromise, {
+    runId: "run_1",
+    steerId: "steer_1",
+    accepted: true,
   });
 });
 
@@ -842,17 +1011,21 @@ function initializeResponse(id: unknown): unknown {
   };
 }
 
-function agentEventNotification(): unknown {
+function agentEventNotification(options: { readonly seq?: number; readonly type?: string } = {}): unknown {
   return {
     jsonrpc: "2.0",
     method: "agent.event",
-    params: {
-      seq: 1,
-      time: "1970-01-01T00:00:00.000Z",
-      type: "run.started",
-      runId: "run_1",
-      payload: { mode: "ask" },
-    },
+    params: agentEvent(options),
+  };
+}
+
+function agentEvent(options: { readonly seq?: number; readonly type?: string } = {}): unknown {
+  return {
+    seq: options.seq ?? 1,
+    time: "1970-01-01T00:00:00.000Z",
+    type: options.type ?? "run.started",
+    runId: "run_1",
+    payload: { mode: "ask" },
   };
 }
 

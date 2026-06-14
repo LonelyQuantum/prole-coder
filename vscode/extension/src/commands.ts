@@ -93,6 +93,7 @@ export type ApprovalPersistence = "never" | "session" | "workspace";
 
 export interface ApprovalPromptRequest {
   readonly approvalId: string;
+  readonly runId?: string;
   readonly toolCallId: string;
   readonly toolName: string;
   readonly risk: string;
@@ -110,6 +111,7 @@ export interface ApprovalPromptRequest {
 export interface ApprovalPromptHunk {
   readonly id: string;
   readonly filePath: string;
+  readonly fileIndex: number;
   readonly hunkIndex: number;
   readonly oldStart: number;
   readonly oldCount: number;
@@ -340,10 +342,6 @@ function formatApprovalMessage(request: ApprovalPromptRequest): string {
 
   if (request.cwd !== undefined) {
     detail.push(`Cwd: ${request.cwd}`);
-  }
-
-  if (request.outputSummary !== undefined) {
-    detail.push(`Output: ${request.outputSummary}`);
   }
 
   if (request.paths !== undefined && request.paths.length > 0) {

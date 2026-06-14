@@ -15,8 +15,8 @@ use prole_coder_agent_core::{
     context::ContextBuildError,
     provider::deepseek_api::{
         ChatCompletionStream, ChatFunctionDefinition, ChatTool, ChatToolCall,
-        ChatToolCallAccumulator, DeepSeekApiAdapter, DeepSeekApiConfig, DeepSeekModelId,
-        FimCompletionRequest, FinishReason, StreamEvent, ThinkingConfig, Usage,
+        ChatToolCallAccumulator, DeepSeekApiAdapter, DeepSeekApiConfig, DeepSeekApiError,
+        DeepSeekModelId, FimCompletionRequest, FinishReason, StreamEvent, ThinkingConfig, Usage,
     },
     reasoning::ReasoningContentMode,
     run_log::{RunLog, RunLogError, RunLogStore},
@@ -46,9 +46,13 @@ use prole_coder_agent_rpc::{
 use serde_json::{Value, json};
 use thiserror::Error;
 
-const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1_024;
+const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 65_536;
 const DEFAULT_VERIFY_TIMEOUT_MS: u64 = 120_000;
 const CLI_RUN_JSON_RPC_ID: &str = "cli.run";
+const DEEPSEEK_PROVIDER_NAME: &str = "deepseek";
+const MISSING_API_KEY_CONFIGURATION_ERROR: &str = "missingApiKey";
+const CONFIGURE_DEEPSEEK_API_KEY_ACTION_KIND: &str = "configureDeepSeekApiKey";
+const CONFIGURE_DEEPSEEK_API_KEY_ACTION_LABEL: &str = "Configure API Key";
 
 pub fn run_cli<I, S, W, E>(args: I, stdout: &mut W, stderr: &mut E) -> Result<(), CliError>
 where
@@ -827,11 +831,12 @@ fn turn_loop_error_json_rpc_code(error: &AgentTurnLoopError) -> i64 {
         ) => RPC_INTERNAL_INVARIANT,
         AgentTurnLoopError::Reasoning(_)
         | AgentTurnLoopError::Provider(_)
+        | AgentTurnLoopError::ProviderStreamInterrupted { .. }
+        | AgentTurnLoopError::ProviderIdleTimeout { .. }
         | AgentTurnLoopError::ProviderStreamEndedWithoutCompletion
         | AgentTurnLoopError::ProviderCompletedMultipleTimes
         | AgentTurnLoopError::ProviderEventAfterCompletion
-        | AgentTurnLoopError::MissingAssistantReasoningContent
-        | AgentTurnLoopError::MaxModelTurnsExceeded { .. } => RPC_PROVIDER_ERROR,
+        | AgentTurnLoopError::MissingAssistantReasoningContent => RPC_PROVIDER_ERROR,
         AgentTurnLoopError::RunLog(error) => run_log_error_json_rpc_code(error),
         AgentTurnLoopError::EventSink(_) | AgentTurnLoopError::ApprovalPolicy(_) => {
             RPC_INTERNAL_INVARIANT
@@ -841,7 +846,8 @@ fn turn_loop_error_json_rpc_code(error: &AgentTurnLoopError) -> i64 {
         | AgentTurnLoopError::UnsupportedTool { .. }
         | AgentTurnLoopError::Serialization(_) => RPC_TOOL_EXECUTION_FAILED,
         AgentTurnLoopError::InvalidToolArguments { .. }
-        | AgentTurnLoopError::InvalidToolArgumentSchema { .. } => RPC_INVALID_TOOL_ARGUMENTS,
+        | AgentTurnLoopError::InvalidToolArgumentSchema { .. }
+        | AgentTurnLoopError::InvalidToolPayloadReference { .. } => RPC_INVALID_TOOL_ARGUMENTS,
         AgentTurnLoopError::Canceled { .. }
         | AgentTurnLoopError::ApprovalCanceled { .. }
         | AgentTurnLoopError::ApprovalExpired { .. } => RPC_RUN_CANCELED,
@@ -986,7 +992,7 @@ impl RpcTurnProviderFactory for CliRpcProviderFactory {
             self.max_output_tokens,
             self.thinking,
         )
-        .map_err(|error| AgentRpcHandlerError::new(RPC_INTERNAL_INVARIANT, error.to_string()))
+        .map_err(cli_provider_rpc_error)
     }
 
     fn preview_fim(
@@ -1015,11 +1021,33 @@ fn fixture_fim_preview_text(params: &FimPreviewParams) -> String {
     }
 }
 
+fn cli_provider_rpc_error(error: CliError) -> AgentRpcHandlerError {
+    match error {
+        CliError::DeepSeek(error) => deepseek_configuration_rpc_error(error),
+        other => AgentRpcHandlerError::new(RPC_INTERNAL_INVARIANT, other.to_string()),
+    }
+}
+
+fn deepseek_configuration_rpc_error(error: DeepSeekApiError) -> AgentRpcHandlerError {
+    let message = format!("DeepSeek provider configuration failed: {error}");
+    let rpc_error = AgentRpcHandlerError::new(RPC_PROVIDER_ERROR, message);
+    match error {
+        DeepSeekApiError::MissingApiKey => rpc_error.with_data(json!({
+            "provider": DEEPSEEK_PROVIDER_NAME,
+            "configurationError": MISSING_API_KEY_CONFIGURATION_ERROR,
+            "recoverableAction": {
+                "kind": CONFIGURE_DEEPSEEK_API_KEY_ACTION_KIND,
+                "label": CONFIGURE_DEEPSEEK_API_KEY_ACTION_LABEL,
+            },
+        })),
+        _ => rpc_error,
+    }
+}
+
 fn deepseek_fim_preview(
     params: &FimPreviewParams,
 ) -> Result<FimPreviewResult, AgentRpcHandlerError> {
-    let config = DeepSeekApiConfig::from_env_for_fim()
-        .map_err(|error| AgentRpcHandlerError::new(RPC_PROVIDER_ERROR, error.to_string()))?;
+    let config = DeepSeekApiConfig::from_env_for_fim().map_err(deepseek_configuration_rpc_error)?;
     let adapter = DeepSeekApiAdapter::new(config)
         .map_err(|error| AgentRpcHandlerError::new(RPC_PROVIDER_ERROR, error.to_string()))?;
     let model = params
@@ -1114,7 +1142,7 @@ impl TurnProvider for DeepSeekTurnProvider {
                 .adapter
                 .create_chat_completion_stream(chat_request)
                 .await
-                .map_err(|error| TurnProviderError::new(error.to_string()))?;
+                .map_err(turn_provider_error_from_deepseek)?;
 
             Ok(deepseek_chat_stream_to_turn_provider_stream(
                 stream,
@@ -1142,7 +1170,7 @@ fn deepseek_chat_stream_to_turn_provider_stream(
             if cancellation_token.is_canceled() {
                 Err(TurnProviderError::new(cancellation_token.cancellation_reason()))?;
             }
-            match event.map_err(|error| TurnProviderError::new(error.to_string()))? {
+            match event.map_err(turn_provider_error_from_deepseek)? {
                 StreamEvent::Chunk(chunk) => {
                     chunk_count += 1;
                     model = Some(chunk.model.clone());
@@ -1263,6 +1291,15 @@ fn turn_provider_usage_from_deepseek(usage: Usage) -> TurnProviderUsage {
     }
 }
 
+fn turn_provider_error_from_deepseek(error: DeepSeekApiError) -> TurnProviderError {
+    let message = error.to_string();
+    if error.is_transient_transport_error() {
+        TurnProviderError::transient(message)
+    } else {
+        TurnProviderError::new(message)
+    }
+}
+
 fn executable_chat_tools() -> Result<Vec<ChatTool>, TurnProviderError> {
     BUILTIN_TOOLS
         .iter()
@@ -1288,6 +1325,7 @@ enum FixtureKind {
     Final,
     Readme,
     Patch,
+    Shell,
 }
 
 #[derive(Debug)]
@@ -1337,6 +1375,25 @@ impl FixtureProvider {
                 ),
                 TurnProviderResponse::final_text(
                     "Fixture provider applied CLI_SMOKE.txt and completed the run.",
+                ),
+            ],
+            FixtureKind::Shell => vec![
+                TurnProviderResponse::tool_calls(
+                    None,
+                    Some("Run the deterministic CLI smoke command.".to_owned()),
+                    vec![ChatToolCall::function(
+                        "call_shell",
+                        "shell",
+                        json!({
+                            "command": "echo cli-shell-approved",
+                            "cwd": ".",
+                            "timeoutMs": 10_000,
+                        })
+                        .to_string(),
+                    )],
+                ),
+                TurnProviderResponse::final_text(
+                    "Fixture provider ran the CLI shell command and completed the run.",
                 ),
             ],
         };
@@ -1448,6 +1505,7 @@ fn parse_fixture(value: &str) -> Result<FixtureKind, CliError> {
         "final" => Ok(FixtureKind::Final),
         "readme" => Ok(FixtureKind::Readme),
         "patch" => Ok(FixtureKind::Patch),
+        "shell" => Ok(FixtureKind::Shell),
         _ => Err(CliError::Usage(format!("unsupported fixture `{value}`"))),
     }
 }
@@ -1503,7 +1561,7 @@ fn run_help_text() -> String {
         "Run options:",
         "  --workspace <path>          Workspace root. Defaults to current directory.",
         "  --provider <deepseek|fixture>",
-        "  --fixture <final|readme|patch>",
+        "  --fixture <final|readme|patch|shell>",
         "  --mode <plan|edit|review|ask>",
         "  --run-id <id>",
         "  --turn-id <id>",
@@ -1511,7 +1569,7 @@ fn run_help_text() -> String {
         "  --verify <command>          Run an explicit verification command after success.",
         "  --json                      Emit agent.event JSON-RPC notifications.",
         "  --max-input-tokens <n>",
-        "  --max-model-turns <n>",
+        "  --max-model-turns <n>      Provider request window before continuation approval (default 50).",
         "  --max-output-tokens <n>",
         "  --thinking <enabled|disabled>",
     ]
@@ -1522,9 +1580,9 @@ fn rpc_help_text() -> String {
     [
         "RPC options:",
         "  --provider <deepseek|fixture>",
-        "  --fixture <final|readme|patch>",
+        "  --fixture <final|readme|patch|shell>",
         "  --max-input-tokens <n>",
-        "  --max-model-turns <n>",
+        "  --max-model-turns <n>      Provider request window before continuation approval (default 50).",
         "  --max-output-tokens <n>",
         "  --thinking <enabled|disabled>",
     ]
@@ -1539,15 +1597,15 @@ mod tests {
         provider::deepseek_api::{
             ChatCompletionChunk, ChatCompletionChunkChoice, ChatCompletionDelta,
             ChatFunctionCallDelta, ChatToolCallDelta, ChatToolType, CompletionTokensDetails,
-            FinishReason, StreamEvent, Usage,
+            DeepSeekApiError, FinishReason, StreamEvent, Usage,
         },
         run_log::{REDACTED_VALUE, RunLogStore},
         test_helpers::TestWorkspace,
-        turn_loop::TurnProviderEvent,
+        turn_loop::{AgentTurnLoopError, TurnProviderEvent},
     };
     use prole_coder_agent_rpc::{
-        FimPreviewParams, PROTOCOL_VERSION, RPC_APPROVAL_DENIED, RPC_TOOL_EXECUTION_FAILED,
-        RpcTurnProviderFactory,
+        FimPreviewParams, PROTOCOL_VERSION, RPC_APPROVAL_DENIED, RPC_INVALID_TOOL_ARGUMENTS,
+        RPC_PROVIDER_ERROR, RPC_TOOL_EXECUTION_FAILED, RpcTurnProviderFactory,
     };
     use serde_json::{Value, json};
     use std::{
@@ -1559,7 +1617,8 @@ mod tests {
 
     use super::{
         CliCommand, CliRpcProviderFactory, FixtureKind, ProviderKind, RunCommand, ThinkingKind,
-        deepseek_chat_stream_to_turn_provider_stream, run_cli, run_cli_with_input,
+        deepseek_chat_stream_to_turn_provider_stream, deepseek_configuration_rpc_error, run_cli,
+        run_cli_with_input, turn_loop_error_json_rpc_code, turn_provider_error_from_deepseek,
     };
 
     #[test]
@@ -1738,6 +1797,12 @@ mod tests {
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
         let events = store.load_run("run_cli_patch").expect("events should load");
         assert_eq!(notifications.len(), events.len());
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.approvalRequired"),
+            "fixture patch should not require CLI approval"
+        );
         let notification_seqs = notifications
             .iter()
             .map(|value| value["params"]["seq"].as_u64())
@@ -1750,9 +1815,54 @@ mod tests {
     }
 
     #[test]
-    fn fixture_patch_run_json_rejection_emits_json_rpc_error() {
+    fn fixture_patch_run_applies_without_approval_prompt() {
         let workspace = TestWorkspace::new("cli");
         workspace.write("CLI_SMOKE.txt", "old\n");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        run_cli(
+            [
+                "prole",
+                "run",
+                "--provider",
+                "fixture",
+                "--fixture",
+                "patch",
+                "--workspace",
+                workspace.path_str(),
+                "--run-id",
+                "run_cli_patch_no_prompt",
+                "--turn-id",
+                "turn_cli_patch_no_prompt",
+                "Patch smoke file",
+            ],
+            &mut stdout,
+            &mut stderr,
+        )
+        .expect("fixture patch run should succeed without approval");
+
+        assert_eq!(workspace.read("CLI_SMOKE.txt"), "new\n");
+        assert!(stderr.is_empty());
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let events = store
+            .load_run("run_cli_patch_no_prompt")
+            .expect("events should load");
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.approvalRequired"),
+            "fixture patch should not require CLI approval"
+        );
+        assert!(events.iter().any(|event| {
+            event.event_type == "run.completed"
+                && event.payload["changedFiles"] == json!(["CLI_SMOKE.txt"])
+        }));
+    }
+
+    #[test]
+    fn fixture_shell_run_json_rejection_emits_json_rpc_error() {
+        let workspace = TestWorkspace::new("cli");
         let mut stdin = std::io::Cursor::new(b"n\n".to_vec());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1764,15 +1874,15 @@ mod tests {
                 "--provider",
                 "fixture",
                 "--fixture",
-                "patch",
+                "shell",
                 "--json",
                 "--workspace",
                 workspace.path_str(),
                 "--run-id",
-                "run_cli_json_reject",
+                "run_cli_shell_json_reject",
                 "--turn-id",
-                "turn_cli_json_reject",
-                "Patch smoke file",
+                "turn_cli_shell_json_reject",
+                "Run fixture shell command",
             ],
             &mut stdin,
             &mut stdout,
@@ -1781,7 +1891,6 @@ mod tests {
         .expect_err("rejected json run should fail");
 
         assert!(error.is_reported());
-        assert_eq!(workspace.read("CLI_SMOKE.txt"), "old\n");
         let stderr = String::from_utf8(stderr).expect("stderr should be UTF-8");
         assert!(stderr.contains("Approval required"));
         assert!(!stderr.contains("status: failed"));
@@ -1810,11 +1919,11 @@ mod tests {
         assert_eq!(error_response["error"]["data"]["kind"], "turn");
         assert_eq!(
             error_response["error"]["data"]["runId"],
-            "run_cli_json_reject"
+            "run_cli_shell_json_reject"
         );
         assert_eq!(
             error_response["error"]["data"]["turnId"],
-            "turn_cli_json_reject"
+            "turn_cli_shell_json_reject"
         );
     }
 
@@ -1880,9 +1989,8 @@ mod tests {
     }
 
     #[test]
-    fn fixture_patch_run_prompts_for_approval_and_applies_when_approved() {
+    fn fixture_shell_run_prompts_for_approval_and_continues_when_approved() {
         let workspace = TestWorkspace::new("cli");
-        workspace.write("CLI_SMOKE.txt", "old\n");
         let mut stdin = std::io::Cursor::new(b"y\n".to_vec());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1894,14 +2002,14 @@ mod tests {
                 "--provider",
                 "fixture",
                 "--fixture",
-                "patch",
+                "shell",
                 "--workspace",
                 workspace.path_str(),
                 "--run-id",
-                "run_cli_prompt_approve",
+                "run_cli_shell_prompt_approve",
                 "--turn-id",
                 "turn_cli_prompt",
-                "Patch smoke file",
+                "Run fixture shell command",
             ],
             &mut stdin,
             &mut stdout,
@@ -1909,23 +2017,26 @@ mod tests {
         )
         .expect("approved prompt run should succeed");
 
-        assert_eq!(workspace.read("CLI_SMOKE.txt"), "new\n");
         let stderr = String::from_utf8(stderr).expect("stderr should be UTF-8");
         assert!(stderr.contains("Approval required"));
         assert!(stderr.contains("Approve this tool call?"));
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
         let events = store
-            .load_run("run_cli_prompt_approve")
+            .load_run("run_cli_shell_prompt_approve")
             .expect("events should load");
         assert!(events.iter().any(|event| {
             event.event_type == "tool.approvalResolved" && event.payload["decision"] == "approved"
         }));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "tool.started")
+        );
     }
 
     #[test]
-    fn fixture_patch_run_prompts_for_approval_and_rejects() {
+    fn fixture_shell_run_prompts_for_approval_and_rejects() {
         let workspace = TestWorkspace::new("cli");
-        workspace.write("CLI_SMOKE.txt", "old\n");
         let mut stdin = std::io::Cursor::new(b"n\n".to_vec());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1937,14 +2048,14 @@ mod tests {
                 "--provider",
                 "fixture",
                 "--fixture",
-                "patch",
+                "shell",
                 "--workspace",
                 workspace.path_str(),
                 "--run-id",
-                "run_cli_prompt_reject",
+                "run_cli_shell_prompt_reject",
                 "--turn-id",
                 "turn_cli_prompt",
-                "Patch smoke file",
+                "Run fixture shell command",
             ],
             &mut stdin,
             &mut stdout,
@@ -1953,12 +2064,11 @@ mod tests {
         .expect_err("rejected prompt run should fail");
 
         assert!(error.to_string().contains("rejected by user"));
-        assert_eq!(workspace.read("CLI_SMOKE.txt"), "old\n");
         let stderr = String::from_utf8(stderr).expect("stderr should be UTF-8");
         assert!(stderr.contains("status: failed"));
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
         let events = store
-            .load_run("run_cli_prompt_reject")
+            .load_run("run_cli_shell_prompt_reject")
             .expect("events should load");
         assert!(events.iter().any(|event| {
             event.event_type == "tool.approvalResolved"
@@ -2012,9 +2122,9 @@ mod tests {
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "run.completed"
-                    && line["params"]["runId"] == "run_cli_rpc"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.completed" && event["runId"] == "run_cli_rpc"
+                })
             },
             Duration::from_secs(30),
         );
@@ -2027,10 +2137,11 @@ mod tests {
         assert_eq!(lines[1]["id"], "turn_1");
         assert_eq!(lines[1]["result"]["accepted"], true);
         assert!(lines.iter().any(|line| {
-            line["method"] == "agent.event"
-                && line["params"]["type"] == "run.completed"
-                && line["params"]["payload"]["summary"]
-                    == "Fixture provider completed without tool calls."
+            line_has_agent_event(line, |event| {
+                event["type"] == "run.completed"
+                    && event["payload"]["summary"]
+                        == "Fixture provider completed without tool calls."
+            })
         }));
 
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
@@ -2064,6 +2175,45 @@ mod tests {
 
         assert_eq!(result.model, "fixture-fim");
         assert!(result.text.contains("prole fixture"));
+    }
+
+    #[test]
+    fn deepseek_missing_api_key_rpc_error_exposes_recoverable_action() {
+        let error = deepseek_configuration_rpc_error(DeepSeekApiError::MissingApiKey);
+
+        assert_eq!(error.code, RPC_PROVIDER_ERROR);
+        assert!(error.message.contains("DEEPSEEK_API_KEY is required"));
+        let data = error
+            .data
+            .expect("missing key should include structured data");
+        assert_eq!(data["provider"], "deepseek");
+        assert_eq!(data["configurationError"], "missingApiKey");
+        assert_eq!(data["recoverableAction"]["kind"], "configureDeepSeekApiKey");
+        assert_eq!(data["recoverableAction"]["label"], "Configure API Key");
+    }
+
+    #[test]
+    fn deepseek_transient_stream_error_maps_to_transient_provider_error() {
+        let error = turn_provider_error_from_deepseek(DeepSeekApiError::IncompleteStreamEvent {
+            buffered_bytes: 42,
+        });
+
+        assert!(error.is_transient());
+        assert!(error.to_string().contains("incomplete SSE event"));
+    }
+
+    #[test]
+    fn invalid_tool_payload_ref_maps_to_invalid_tool_arguments_rpc_code() {
+        let error = AgentTurnLoopError::InvalidToolPayloadReference {
+            tool_call_id: "call_1".to_owned(),
+            name: "apply_patch".to_owned(),
+            detail: "payloadRef.sha256 does not match payload file".to_owned(),
+        };
+
+        assert_eq!(
+            turn_loop_error_json_rpc_code(&error),
+            RPC_INVALID_TOOL_ARGUMENTS
+        );
     }
 
     type InteractiveCliRpc = (
@@ -2201,6 +2351,20 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    fn line_has_agent_event(line: &Value, predicate: impl Fn(&Value) -> bool) -> bool {
+        if line["method"] == "agent.event" {
+            return predicate(&line["params"]);
+        }
+
+        if line["method"] == "agent.eventBatch"
+            && let Some(events) = line["params"]["events"].as_array()
+        {
+            return events.iter().any(predicate);
+        }
+
+        false
     }
 
     #[test]

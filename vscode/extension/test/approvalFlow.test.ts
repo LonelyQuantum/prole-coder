@@ -131,6 +131,26 @@ test("approval controller treats the same approval id in different runs as disti
   );
 });
 
+test("approval controller ignores replayed approval events from historical run resume", async () => {
+  const rpc = new FakeApprovalRpcClient();
+  let promptCount = 0;
+  const controller = new ApprovalEventController(rpc, fakeWindow, fakeNotifier(), async (_window, request) => {
+    promptCount += 1;
+    return {
+      kind: "approve",
+      approvalId: request.approvalId,
+      persist: "never",
+    };
+  });
+
+  rpc.emit({ ...approvalEvent(), replay: true });
+  await controller.whenIdle();
+
+  assert.equal(promptCount, 0);
+  assert.deepEqual(rpc.approvals, []);
+  assert.deepEqual(rpc.rejections, []);
+});
+
 test("approval controller prepares approval preview before prompting", async () => {
   const rpc = new FakeApprovalRpcClient();
   const order: string[] = [];
@@ -237,6 +257,7 @@ test("approvalPromptRequestFromEvent maps protocol payloads to modal requests", 
 
   assert.deepEqual(request, {
     approvalId: "approval_1",
+    runId: "run_1",
     toolCallId: "tool_call_1",
     toolName: "shell",
     risk: "exec",
@@ -251,6 +272,7 @@ test("approvalPromptRequestFromEvent maps protocol payloads to modal requests", 
       {
         id: "README.md#1:old1+3:new1+3",
         filePath: "README.md",
+        fileIndex: 0,
         hunkIndex: 0,
         oldStart: 1,
         oldCount: 3,
@@ -260,6 +282,7 @@ test("approvalPromptRequestFromEvent maps protocol payloads to modal requests", 
       {
         id: "README.md#2:old5+2:new5+3",
         filePath: "README.md",
+        fileIndex: 0,
         hunkIndex: 1,
         oldStart: 5,
         oldCount: 2,
@@ -270,6 +293,15 @@ test("approvalPromptRequestFromEvent maps protocol payloads to modal requests", 
     ],
     riskReasons: ["dependency install/update"],
   });
+});
+
+test("approvalPromptRequestFromEvent accepts model turn budget continuation approvals", () => {
+  const request = approvalPromptRequestFromEvent(
+    approvalEvent({ toolName: "model_turn_budget" }),
+  );
+
+  assert.equal(request?.toolName, "model_turn_budget");
+  assert.equal(request?.approvalId, "approval_1");
 });
 
 const fakeWindow: ApprovalWindowMessenger = {

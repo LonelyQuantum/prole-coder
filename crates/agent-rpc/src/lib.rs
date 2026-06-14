@@ -23,7 +23,7 @@ use prole_coder_agent_core::{
         ApprovalDecision, ApprovalPolicy, ApprovalPolicyError, TextRange as CoreTextRange,
         TurnApprovalRequest, TurnAttachment as CoreTurnAttachment,
         TurnAttachmentKind as CoreTurnAttachmentKind, TurnEventSink, TurnEventSinkError,
-        TurnProvider,
+        TurnProvider, TurnSteerQueue, TurnSupersedes as CoreTurnSupersedes,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -54,8 +54,11 @@ pub const SEND_TURN_METHOD: RpcMethod = RpcMethod::new("sendTurn");
 pub const APPROVE_METHOD: RpcMethod = RpcMethod::new("approve");
 pub const REJECT_METHOD: RpcMethod = RpcMethod::new("reject");
 pub const CANCEL_METHOD: RpcMethod = RpcMethod::new("cancel");
+pub const STEER_METHOD: RpcMethod = RpcMethod::new("steer");
 pub const RESUME_METHOD: RpcMethod = RpcMethod::new("resume");
+pub const LOAD_RUN_EVENTS_METHOD: RpcMethod = RpcMethod::new("loadRunEvents");
 pub const LIST_RUNS_METHOD: RpcMethod = RpcMethod::new("listRuns");
+pub const DELETE_RUN_METHOD: RpcMethod = RpcMethod::new("deleteRun");
 pub const FIM_PREVIEW_METHOD: RpcMethod = RpcMethod::new("previewFim");
 pub const EVENT_METHOD: RpcMethod = RpcMethod::new("event");
 pub const EVENT_BATCH_METHOD: RpcMethod = RpcMethod::new("eventBatch");
@@ -83,6 +86,8 @@ pub const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 const RPC_LOOP_QUEUE_BOUND: usize = 256;
 const RPC_LIVE_EVENT_QUEUE_BOUND: usize = 256;
 const RPC_LIVE_EVENT_BATCH_MAX: usize = 64;
+const DEFAULT_LOAD_RUN_EVENTS_LIMIT: usize = 200;
+const MAX_LOAD_RUN_EVENTS_LIMIT: usize = 500;
 const APPROVAL_PERSISTENCE_FILE: &str = "approvals.v1.json";
 const APPROVAL_PERSISTENCE_VERSION: u32 = 1;
 
@@ -304,6 +309,23 @@ pub enum RpcRunMode {
     Ask,
 }
 
+impl TryFrom<&str> for RpcRunMode {
+    type Error = AgentRpcHandlerError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "plan" => Ok(Self::Plan),
+            "edit" => Ok(Self::Edit),
+            "review" => Ok(Self::Review),
+            "ask" => Ok(Self::Ask),
+            other => Err(AgentRpcHandlerError::new(
+                RPC_INTERNAL_INVARIANT,
+                format!("run summary contains invalid mode `{other}`"),
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendTurnParams {
@@ -313,6 +335,16 @@ pub struct SendTurnParams {
     pub mode: RpcRunMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<TurnAttachment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<TurnSupersedes>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnSupersedes {
+    pub message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -364,6 +396,48 @@ impl From<RpcRunMode> for AgentRunMode {
     }
 }
 
+fn core_turn_supersedes_from_rpc(
+    supersedes: &TurnSupersedes,
+) -> Result<CoreTurnSupersedes, AgentRpcHandlerError> {
+    let message_id = supersedes.message_id.trim();
+    if message_id.is_empty() || message_id.len() > 256 {
+        return Err(AgentRpcHandlerError::new(
+            JSON_RPC_INVALID_PARAMS,
+            "supersedes.messageId must be a non-empty string no longer than 256 bytes",
+        ));
+    }
+    let turn_id = supersedes
+        .turn_id
+        .as_deref()
+        .map(|value| {
+            if value.is_empty() || value.len() > 128 {
+                Err(AgentRpcHandlerError::new(
+                    JSON_RPC_INVALID_PARAMS,
+                    "supersedes.turnId must be a non-empty identifier no longer than 128 bytes",
+                ))
+            } else if !is_rpc_identifier_fragment(value) {
+                Err(AgentRpcHandlerError::new(
+                    JSON_RPC_INVALID_PARAMS,
+                    "supersedes.turnId must contain only ASCII letters, digits, `_`, or `-`",
+                ))
+            } else {
+                Ok(value.to_owned())
+            }
+        })
+        .transpose()?;
+
+    Ok(CoreTurnSupersedes {
+        message_id: message_id.to_owned(),
+        turn_id,
+    })
+}
+
+fn is_rpc_identifier_fragment(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
 fn core_turn_attachment_from_rpc(
     attachment: &TurnAttachment,
 ) -> Result<CoreTurnAttachment, AgentRpcHandlerError> {
@@ -401,6 +475,28 @@ pub struct ResumeResult {
     pub replay_started: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadRunEventsParams {
+    pub run_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadRunEventsResult {
+    pub run_id: String,
+    pub events: Vec<AgentEventEnvelope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seq: Option<u64>,
+    pub has_more_before: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListRunsParams {
@@ -416,6 +512,19 @@ pub struct ListRunsResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DeleteRunParams {
+    pub run_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteRunResult {
+    pub run_id: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RpcRunSummary {
     pub run_id: String,
     pub title: String,
@@ -427,7 +536,7 @@ pub struct RpcRunSummary {
     pub last_seq: u64,
     pub event_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
+    pub mode: Option<RpcRunMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -524,6 +633,21 @@ pub struct CancelResult {
     pub state: RpcRunState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SteerParams {
+    pub run_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SteerResult {
+    pub run_id: String,
+    pub steer_id: String,
+    pub accepted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -635,15 +759,30 @@ pub trait AgentRpcRequestHandler {
         params: CancelParams,
     ) -> Result<AgentRpcHandlerOutput<CancelResult>, AgentRpcHandlerError>;
 
+    fn steer(
+        &mut self,
+        params: SteerParams,
+    ) -> Result<AgentRpcHandlerOutput<SteerResult>, AgentRpcHandlerError>;
+
     fn resume(
         &mut self,
         params: ResumeParams,
     ) -> Result<AgentRpcHandlerOutput<ResumeResult>, AgentRpcHandlerError>;
 
+    fn load_run_events(
+        &mut self,
+        params: LoadRunEventsParams,
+    ) -> Result<AgentRpcHandlerOutput<LoadRunEventsResult>, AgentRpcHandlerError>;
+
     fn list_runs(
         &mut self,
         params: ListRunsParams,
     ) -> Result<AgentRpcHandlerOutput<ListRunsResult>, AgentRpcHandlerError>;
+
+    fn delete_run(
+        &mut self,
+        params: DeleteRunParams,
+    ) -> Result<AgentRpcHandlerOutput<DeleteRunResult>, AgentRpcHandlerError>;
 
     fn preview_fim(
         &mut self,
@@ -787,21 +926,24 @@ where
             Some(run_id) => run_id,
             None => generate_id("run")?,
         };
-        let turn_id = "turn_1".to_owned();
         let provider = self.provider_factory.create_provider(&params)?;
         let run_log = self
             .workspace()?
             .store
-            .create_run(run_id.clone())
+            .open_or_create_run(run_id.clone())
             .map_err(map_run_log_error)?;
+        let turn_id = next_turn_id(&run_log).map_err(map_run_log_error)?;
         let attachments = params
             .attachments
             .iter()
             .map(core_turn_attachment_from_rpc)
             .collect::<Result<Vec<_>, _>>()?;
-        let input = AgentTurnInput::new(turn_id.clone(), params.message.clone())
+        let mut input = AgentTurnInput::new(turn_id.clone(), params.message.clone())
             .with_mode(params.mode.into())
             .with_attachments(attachments);
+        if let Some(supersedes) = &params.supersedes {
+            input = input.with_supersedes(core_turn_supersedes_from_rpc(supersedes)?);
+        }
 
         let live_events = self.live_event_sender.clone();
         let active_run = spawn_active_run(ActiveRunSpawn {
@@ -932,6 +1074,47 @@ where
         .with_events(events))
     }
 
+    fn steer(
+        &mut self,
+        params: SteerParams,
+    ) -> Result<AgentRpcHandlerOutput<SteerResult>, AgentRpcHandlerError> {
+        self.drain_ready_active_run_events()?;
+        let active_run = self.active_run.as_ref().ok_or_else(|| {
+            AgentRpcHandlerError::new(
+                RPC_RUN_NOT_FOUND,
+                format!(
+                    "run `{}` is not active in the current RPC handler",
+                    params.run_id
+                ),
+            )
+        })?;
+        if active_run.run_id != params.run_id {
+            return Err(AgentRpcHandlerError::new(
+                RPC_RUN_NOT_FOUND,
+                format!(
+                    "run `{}` is not active in the current RPC handler",
+                    params.run_id
+                ),
+            ));
+        }
+        if params.message.trim().is_empty() {
+            return Err(AgentRpcHandlerError::new(
+                JSON_RPC_INVALID_PARAMS,
+                "steer.message must not be empty",
+            ));
+        }
+
+        let steer_id = generate_id("steer")?;
+        active_run
+            .steer_queue
+            .push(steer_id.clone(), params.message);
+        Ok(AgentRpcHandlerOutput::new(SteerResult {
+            run_id: params.run_id,
+            steer_id,
+            accepted: true,
+        }))
+    }
+
     fn resume(
         &mut self,
         params: ResumeParams,
@@ -972,6 +1155,56 @@ where
         .with_events(replay_events))
     }
 
+    fn load_run_events(
+        &mut self,
+        params: LoadRunEventsParams,
+    ) -> Result<AgentRpcHandlerOutput<LoadRunEventsResult>, AgentRpcHandlerError> {
+        self.drain_ready_active_run_events()?;
+        let store = &self.workspace()?.store;
+        let run_id = params.run_id.clone();
+        let events = match self
+            .active_run
+            .as_ref()
+            .filter(|active_run| active_run.run_id == params.run_id)
+        {
+            Some(active_run) => active_run.run_log.load().map_err(map_run_log_error)?,
+            None => store
+                .load_run(params.run_id.clone())
+                .map_err(map_run_log_error)?,
+        };
+        let before_seq = params.before_seq.unwrap_or(u64::MAX);
+        let limit = params
+            .limit
+            .unwrap_or(DEFAULT_LOAD_RUN_EVENTS_LIMIT)
+            .clamp(1, MAX_LOAD_RUN_EVENTS_LIMIT);
+        let eligible_events = events
+            .iter()
+            .filter(|event| event.seq < before_seq)
+            .collect::<Vec<_>>();
+        let start = eligible_events.len().saturating_sub(limit);
+        let page = eligible_events[start..]
+            .iter()
+            .map(|event| {
+                run_log_event_to_envelope(event).map_err(|source| {
+                    AgentRpcHandlerError::new(
+                        RPC_INTERNAL_INVARIANT,
+                        format!("failed to serialize run event: {source}"),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let first_seq = page.first().map(|event| event.seq);
+        let last_seq = page.last().map(|event| event.seq);
+
+        Ok(AgentRpcHandlerOutput::new(LoadRunEventsResult {
+            run_id,
+            events: page,
+            first_seq,
+            last_seq,
+            has_more_before: start > 0,
+        }))
+    }
+
     fn list_runs(
         &mut self,
         params: ListRunsParams,
@@ -991,6 +1224,32 @@ where
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(AgentRpcHandlerOutput::new(ListRunsResult { runs }))
+    }
+
+    fn delete_run(
+        &mut self,
+        params: DeleteRunParams,
+    ) -> Result<AgentRpcHandlerOutput<DeleteRunResult>, AgentRpcHandlerError> {
+        self.drain_ready_active_run_events()?;
+        if self
+            .active_run
+            .as_ref()
+            .is_some_and(|active_run| active_run.run_id == params.run_id)
+        {
+            return Err(AgentRpcHandlerError::new(
+                RPC_RUN_ALREADY_ACTIVE,
+                format!("run `{}` is active and cannot be deleted", params.run_id),
+            ));
+        }
+
+        self.workspace()?
+            .store
+            .delete_run(params.run_id.clone())
+            .map_err(map_run_log_error)?;
+        Ok(AgentRpcHandlerOutput::new(DeleteRunResult {
+            run_id: params.run_id,
+            deleted: true,
+        }))
     }
 
     fn preview_fim(
@@ -1117,6 +1376,18 @@ impl<F> AgentTurnLoopRpcHandler<F> {
     }
 }
 
+fn next_turn_id(run_log: &RunLog) -> Result<String, RunLogError> {
+    let turn_count = run_log
+        .load()?
+        .iter()
+        .filter(|event| event.event_type == "turn.started")
+        .count();
+    let turn_number = turn_count
+        .checked_add(1)
+        .ok_or(RunLogError::SequenceOverflow)?;
+    Ok(format!("turn_{turn_number}"))
+}
+
 impl TryFrom<&RunSummary> for RpcRunSummary {
     type Error = AgentRpcHandlerError;
 
@@ -1134,7 +1405,11 @@ impl TryFrom<&RunSummary> for RpcRunSummary {
                 .map_err(map_rpc_error)?,
             last_seq: summary.last_seq,
             event_count: summary.event_count,
-            mode: summary.mode.clone(),
+            mode: summary
+                .mode
+                .as_deref()
+                .map(RpcRunMode::try_from)
+                .transpose()?,
             summary: summary.summary.clone(),
             changed_files: summary.changed_files.clone(),
             verification_status: summary.verification_status.clone(),
@@ -1162,6 +1437,7 @@ struct RpcWorkspace {
 struct ActiveRpcRun {
     run_id: String,
     cancellation_token: CancellationToken,
+    steer_queue: TurnSteerQueue,
     approval_queue: RpcApprovalQueue,
     run_log: SerializedRunLog,
     events: mpsc::Receiver<RunLogEvent>,
@@ -1849,7 +2125,10 @@ where
     } = spawn;
     let buffer_internal_events = live_events.is_none();
     let cancellation_token = CancellationToken::new();
-    let worker_input = input.with_cancellation_token(cancellation_token.clone());
+    let steer_queue = TurnSteerQueue::default();
+    let worker_input = input
+        .with_steer_queue(steer_queue.clone())
+        .with_cancellation_token(cancellation_token.clone());
     let run_log = SerializedRunLog::new(run_log);
     let worker_run_log = run_log.clone();
     let worker_approval_queue = approval_queue.clone();
@@ -1875,6 +2154,7 @@ where
     Ok(ActiveRpcRun {
         run_id,
         cancellation_token,
+        steer_queue,
         approval_queue,
         run_log,
         events: events_rx,
@@ -2297,11 +2577,20 @@ where
             method if method == CANCEL_METHOD.qualified_name() => {
                 self.handle_cancel(id, message.params, writer)
             }
+            method if method == STEER_METHOD.qualified_name() => {
+                self.handle_steer(id, message.params, writer)
+            }
             method if method == RESUME_METHOD.qualified_name() => {
                 self.handle_resume(id, message.params, writer)
             }
+            method if method == LOAD_RUN_EVENTS_METHOD.qualified_name() => {
+                self.handle_load_run_events(id, message.params, writer)
+            }
             method if method == LIST_RUNS_METHOD.qualified_name() => {
                 self.handle_list_runs(id, message.params, writer)
+            }
+            method if method == DELETE_RUN_METHOD.qualified_name() => {
+                self.handle_delete_run(id, message.params, writer)
             }
             method if method == FIM_PREVIEW_METHOD.qualified_name() => {
                 self.handle_preview_fim(id, message.params, writer)
@@ -2456,6 +2745,30 @@ where
         }
     }
 
+    fn handle_steer<W>(
+        &mut self,
+        id: Value,
+        params: Option<Value>,
+        writer: &mut W,
+    ) -> Result<(), AgentRpcError>
+    where
+        W: Write,
+    {
+        let params =
+            match parse_params::<SteerParams>(params, STEER_METHOD.qualified_name().as_str()) {
+                Ok(params) => params,
+                Err(error) => return write_error(writer, id, error),
+            };
+
+        match self.handler.steer(params) {
+            Ok(output) => {
+                write_json_line(writer, &JsonRpcResponse::new(id, output.result))?;
+                emit_run_log_events(writer, &output.events)
+            }
+            Err(error) => write_error(writer, id, error.into_error_object()),
+        }
+    }
+
     fn handle_send_turn<W>(
         &mut self,
         id: Value,
@@ -2506,6 +2819,29 @@ where
         }
     }
 
+    fn handle_load_run_events<W>(
+        &mut self,
+        id: Value,
+        params: Option<Value>,
+        writer: &mut W,
+    ) -> Result<(), AgentRpcError>
+    where
+        W: Write,
+    {
+        let params = match parse_params::<LoadRunEventsParams>(
+            params,
+            LOAD_RUN_EVENTS_METHOD.qualified_name().as_str(),
+        ) {
+            Ok(params) => params,
+            Err(error) => return write_error(writer, id, error),
+        };
+
+        match self.handler.load_run_events(params) {
+            Ok(output) => write_json_line(writer, &JsonRpcResponse::new(id, output.result)),
+            Err(error) => write_error(writer, id, error.into_error_object()),
+        }
+    }
+
     fn handle_list_runs<W>(
         &mut self,
         id: Value,
@@ -2524,6 +2860,32 @@ where
         };
 
         match self.handler.list_runs(params) {
+            Ok(output) => {
+                write_json_line(writer, &JsonRpcResponse::new(id, output.result))?;
+                emit_run_log_events(writer, &output.events)
+            }
+            Err(error) => write_error(writer, id, error.into_error_object()),
+        }
+    }
+
+    fn handle_delete_run<W>(
+        &mut self,
+        id: Value,
+        params: Option<Value>,
+        writer: &mut W,
+    ) -> Result<(), AgentRpcError>
+    where
+        W: Write,
+    {
+        let params = match parse_params::<DeleteRunParams>(
+            params,
+            DELETE_RUN_METHOD.qualified_name().as_str(),
+        ) {
+            Ok(params) => params,
+            Err(error) => return write_error(writer, id, error),
+        };
+
+        match self.handler.delete_run(params) {
             Ok(output) => {
                 write_json_line(writer, &JsonRpcResponse::new(id, output.result))?;
                 emit_run_log_events(writer, &output.events)
@@ -2898,7 +3260,7 @@ mod tests {
     use prole_coder_agent_core::{
         approval::RiskLevel,
         provider::deepseek_api::ChatToolCall,
-        run_log::{RunLogEvent, RunLogStore},
+        run_log::{RunLogError, RunLogEvent, RunLogStore, RunSummaryStatus},
         test_helpers::TestWorkspace,
         turn_loop::{
             AgentTurnInput, AgentTurnLoopConfig, ApprovalDecision, TurnApprovalRequest,
@@ -2920,19 +3282,21 @@ mod tests {
         APPROVE_METHOD, ActiveRunSpawn, AgentInitializeParams, AgentInitializeResult,
         AgentRpcError, AgentRpcHandlerError, AgentRpcHandlerOutput, AgentRpcRequestHandler,
         AgentTurnLoopRpcHandler, ApproveParams, ApproveResult, CANCEL_METHOD, CancelParams,
-        CancelResult, EVENT_BATCH_METHOD, EVENT_METHOD, FIM_PREVIEW_METHOD, FimPreviewParams,
-        FimPreviewResult, INITIALIZE_METHOD, JSON_RPC_INTERNAL_ERROR, JSON_RPC_INVALID_PARAMS,
-        JSON_RPC_INVALID_REQUEST, JSON_RPC_METHOD_NOT_FOUND, JSON_RPC_PARSE_ERROR,
-        LIST_RUNS_METHOD, ListRunsParams, ListRunsResult, PROTOCOL_VERSION, REJECT_METHOD,
-        RESUME_METHOD, RPC_APPROVAL_DENIED, RPC_APPROVAL_NOT_FOUND, RPC_CONTEXT_BUDGET_EXCEEDED,
-        RPC_INTERNAL_INVARIANT, RPC_INVALID_TOOL_ARGUMENTS, RPC_PROVIDER_ERROR,
-        RPC_RUN_ALREADY_ACTIVE, RPC_RUN_CANCELED, RPC_RUN_NOT_FOUND, RPC_TOOL_EXECUTION_FAILED,
-        RPC_UNSUPPORTED_PROTOCOL, RPC_WORKSPACE_UNTRUSTED, RejectParams, RejectResult,
-        ResumeParams, ResumeResult, RpcApprovalPersistence, RpcApprovalQueue, RpcApprovalState,
-        RpcApprovedHunks, RpcRunState, RpcRunSummary, RpcRunSummaryStatus, RpcWorkspace,
-        SEND_TURN_METHOD, SendTurnParams, SendTurnResult, StdioEventBridge,
-        emit_live_run_log_events, format_unix_millis, run_log_event_to_notification,
-        run_log_events_to_batch_notification, run_stdio_request_loop, spawn_active_run,
+        CancelResult, DELETE_RUN_METHOD, DeleteRunParams, DeleteRunResult, EVENT_BATCH_METHOD,
+        EVENT_METHOD, FIM_PREVIEW_METHOD, FimPreviewParams, FimPreviewResult, INITIALIZE_METHOD,
+        JSON_RPC_INTERNAL_ERROR, JSON_RPC_INVALID_PARAMS, JSON_RPC_INVALID_REQUEST,
+        JSON_RPC_METHOD_NOT_FOUND, JSON_RPC_PARSE_ERROR, LIST_RUNS_METHOD, LOAD_RUN_EVENTS_METHOD,
+        ListRunsParams, ListRunsResult, LoadRunEventsParams, LoadRunEventsResult, PROTOCOL_VERSION,
+        REJECT_METHOD, RESUME_METHOD, RPC_APPROVAL_DENIED, RPC_APPROVAL_NOT_FOUND,
+        RPC_CONTEXT_BUDGET_EXCEEDED, RPC_INTERNAL_INVARIANT, RPC_INVALID_TOOL_ARGUMENTS,
+        RPC_PROVIDER_ERROR, RPC_RUN_ALREADY_ACTIVE, RPC_RUN_CANCELED, RPC_RUN_NOT_FOUND,
+        RPC_TOOL_EXECUTION_FAILED, RPC_UNSUPPORTED_PROTOCOL, RPC_WORKSPACE_UNTRUSTED, RejectParams,
+        RejectResult, ResumeParams, ResumeResult, RpcApprovalPersistence, RpcApprovalQueue,
+        RpcApprovalState, RpcApprovedHunks, RpcRunState, RpcRunSummary, RpcRunSummaryStatus,
+        RpcWorkspace, SEND_TURN_METHOD, STEER_METHOD, SendTurnParams, SendTurnResult,
+        StdioEventBridge, SteerParams, SteerResult, emit_live_run_log_events, format_unix_millis,
+        run_log_event_to_notification, run_log_events_to_batch_notification,
+        run_stdio_request_loop, spawn_active_run,
     };
 
     #[test]
@@ -2942,8 +3306,14 @@ mod tests {
         assert_eq!(APPROVE_METHOD.qualified_name(), "agent.approve");
         assert_eq!(REJECT_METHOD.qualified_name(), "agent.reject");
         assert_eq!(CANCEL_METHOD.qualified_name(), "agent.cancel");
+        assert_eq!(STEER_METHOD.qualified_name(), "agent.steer");
         assert_eq!(RESUME_METHOD.qualified_name(), "agent.resume");
+        assert_eq!(
+            LOAD_RUN_EVENTS_METHOD.qualified_name(),
+            "agent.loadRunEvents"
+        );
         assert_eq!(LIST_RUNS_METHOD.qualified_name(), "agent.listRuns");
+        assert_eq!(DELETE_RUN_METHOD.qualified_name(), "agent.deleteRun");
         assert_eq!(FIM_PREVIEW_METHOD.qualified_name(), "agent.previewFim");
         assert_eq!(EVENT_METHOD.qualified_name(), "agent.event");
         assert_eq!(EVENT_BATCH_METHOD.qualified_name(), "agent.eventBatch");
@@ -3300,7 +3670,11 @@ mod tests {
                 "params": {
                     "runId": "run_rpc",
                     "message": "Read README",
-                    "mode": "ask"
+                    "mode": "ask",
+                    "supersedes": {
+                        "messageId": "run_rpc:2",
+                        "turnId": "turn_1"
+                    }
                 }
             })
             .to_string(),
@@ -3315,6 +3689,13 @@ mod tests {
         assert_eq!(handler.initialized.len(), 1);
         assert_eq!(handler.send_turns.len(), 1);
         assert_eq!(handler.send_turns[0].message, "Read README");
+        assert_eq!(
+            handler.send_turns[0]
+                .supersedes
+                .as_ref()
+                .map(|value| (value.message_id.as_str(), value.turn_id.as_deref())),
+            Some(("run_rpc:2", Some("turn_1")))
+        );
         let lines = output_lines(output);
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0]["id"], "init_1");
@@ -3435,6 +3816,84 @@ mod tests {
     }
 
     #[test]
+    fn request_loop_loads_run_events_in_response_without_replay_notifications() {
+        let input = [
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init_1",
+                "method": "agent.initialize",
+                "params": initialize_params()
+            })
+            .to_string(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "load_1",
+                "method": "agent.loadRunEvents",
+                "params": {
+                    "runId": "run_rpc",
+                    "beforeSeq": 10,
+                    "limit": 2
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+        let mut output = Vec::new();
+
+        let handler =
+            run_stdio_request_loop(Cursor::new(input), &mut output, TestHandler::default())
+                .expect("request loop should complete");
+
+        assert_eq!(handler.load_run_events.len(), 1);
+        assert_eq!(handler.load_run_events[0].before_seq, Some(10));
+        assert_eq!(handler.load_run_events[0].limit, Some(2));
+        let lines = output_lines(output);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1]["id"], "load_1");
+        assert_eq!(lines[1]["result"]["events"][0]["seq"], 1);
+        assert_eq!(lines[1]["result"]["events"][1]["seq"], 2);
+        assert_eq!(lines[1]["result"]["hasMoreBefore"], false);
+    }
+
+    #[test]
+    fn turn_loop_rpc_handler_loads_run_event_pages_without_replay_output() {
+        let workspace = TestWorkspace::new("rpc");
+        let mut handler = AgentTurnLoopRpcHandler::new(final_provider_factory);
+        handler
+            .initialize(
+                serde_json::from_value(initialize_params_for(workspace.path_str()))
+                    .expect("initialize params should deserialize"),
+            )
+            .expect("handler should initialize");
+        handler
+            .send_turn(SendTurnParams {
+                run_id: Some("run_load_events_rpc".to_owned()),
+                message: "Say hello".to_owned(),
+                mode: super::RpcRunMode::Ask,
+                attachments: Vec::new(),
+                supersedes: None,
+            })
+            .expect("turn should complete");
+
+        let result = handler
+            .load_run_events(LoadRunEventsParams {
+                run_id: "run_load_events_rpc".to_owned(),
+                before_seq: Some(5),
+                limit: Some(2),
+            })
+            .expect("run events should load")
+            .result;
+
+        assert_eq!(result.run_id, "run_load_events_rpc");
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0].seq, 3);
+        assert_eq!(result.events[1].seq, 4);
+        assert_eq!(result.first_seq, Some(3));
+        assert_eq!(result.last_seq, Some(4));
+        assert!(result.has_more_before);
+    }
+
+    #[test]
     fn request_loop_lists_run_summaries() {
         let input = [
             json!({
@@ -3475,6 +3934,42 @@ mod tests {
             lines[1]["result"]["runs"][0]["verificationStatus"],
             "skipped"
         );
+    }
+
+    #[test]
+    fn request_loop_deletes_runs() {
+        let input = [
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init_1",
+                "method": "agent.initialize",
+                "params": initialize_params()
+            })
+            .to_string(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "delete_1",
+                "method": "agent.deleteRun",
+                "params": {
+                    "runId": "run_rpc"
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+        let mut output = Vec::new();
+
+        let handler =
+            run_stdio_request_loop(Cursor::new(input), &mut output, TestHandler::default())
+                .expect("request loop should complete");
+
+        assert_eq!(handler.delete_runs.len(), 1);
+        assert_eq!(handler.delete_runs[0].run_id, "run_rpc");
+        let lines = output_lines(output);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1]["id"], "delete_1");
+        assert_eq!(lines[1]["result"]["runId"], "run_rpc");
+        assert_eq!(lines[1]["result"]["deleted"], true);
     }
 
     #[test]
@@ -3690,9 +4185,9 @@ mod tests {
 
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "run.completed"
-                    && line["params"]["runId"] == "run_real_rpc"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.completed" && event["runId"] == "run_real_rpc"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -3730,12 +4225,12 @@ mod tests {
         assert_eq!(lines[1]["result"]["turnId"], "turn_1");
         let turn_response_index = line_index(&lines, |line| line["id"] == "turn_1");
         let run_started_index = line_index(&lines, |line| {
-            line["method"] == "agent.event" && line["params"]["type"] == "run.started"
+            line_has_agent_event(line, |event| event["type"] == "run.started")
         });
         assert!(turn_response_index < run_started_index);
-        assert!(lines.iter().any(|line| line["method"] == "agent.event"
-            && line["params"]["type"] == "run.completed"
-            && line["params"]["payload"]["summary"] == "RPC final answer"));
+        let events = agent_event_values(&lines);
+        assert!(events.iter().any(|event| event["type"] == "run.completed"
+            && event["payload"]["summary"] == "RPC final answer"));
         assert!(lines.iter().any(|line| {
             line["id"] == "resume_1"
                 && line["result"]["nextSeq"]
@@ -3768,6 +4263,170 @@ mod tests {
                 .iter()
                 .any(|event| event.event_type == "run.completed")
         );
+    }
+
+    #[test]
+    fn turn_loop_rpc_handler_appends_multiple_turns_to_existing_run() {
+        let workspace = TestWorkspace::new("rpc");
+        let mut handler = AgentTurnLoopRpcHandler::new(final_provider_factory);
+        handler
+            .initialize(
+                serde_json::from_value(initialize_params_for(workspace.path_str()))
+                    .expect("initialize params should deserialize"),
+            )
+            .expect("handler should initialize");
+
+        let first = handler
+            .send_turn(SendTurnParams {
+                run_id: Some("run_multi_turn".to_owned()),
+                message: "First task".to_owned(),
+                mode: super::RpcRunMode::Ask,
+                attachments: Vec::new(),
+                supersedes: None,
+            })
+            .expect("first turn should run");
+        let second = handler
+            .send_turn(SendTurnParams {
+                run_id: Some("run_multi_turn".to_owned()),
+                message: "Second task".to_owned(),
+                mode: super::RpcRunMode::Ask,
+                attachments: Vec::new(),
+                supersedes: None,
+            })
+            .expect("second turn should append to the same run");
+
+        assert_eq!(first.result.turn_id, "turn_1");
+        assert_eq!(second.result.turn_id, "turn_2");
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        let events = store
+            .load_run("run_multi_turn")
+            .expect("run log should load");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "run.started")
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "turn.started")
+                .map(|event| event.turn_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("turn_1"), Some("turn_2")]
+        );
+        let summary = store
+            .load_run_summary("run_multi_turn")
+            .expect("summary should load");
+        assert_eq!(summary.title, "Second task");
+        assert_eq!(summary.status, RunSummaryStatus::Completed);
+        assert_eq!(summary.summary.as_deref(), Some("RPC final answer"));
+    }
+
+    #[test]
+    fn turn_loop_rpc_handler_records_superseded_turn_metadata() {
+        let workspace = TestWorkspace::new("rpc");
+        let mut handler = AgentTurnLoopRpcHandler::new(final_provider_factory);
+        handler
+            .initialize(
+                serde_json::from_value(initialize_params_for(workspace.path_str()))
+                    .expect("initialize params should deserialize"),
+            )
+            .expect("handler should initialize");
+
+        handler
+            .send_turn(SendTurnParams {
+                run_id: Some("run_superseded_turn".to_owned()),
+                message: "Original request".to_owned(),
+                mode: super::RpcRunMode::Ask,
+                attachments: Vec::new(),
+                supersedes: None,
+            })
+            .expect("first turn should run");
+        handler
+            .send_turn(SendTurnParams {
+                run_id: Some("run_superseded_turn".to_owned()),
+                message: "Edited request".to_owned(),
+                mode: super::RpcRunMode::Ask,
+                attachments: Vec::new(),
+                supersedes: Some(super::TurnSupersedes {
+                    message_id: "run_superseded_turn:2".to_owned(),
+                    turn_id: Some("turn_1".to_owned()),
+                }),
+            })
+            .expect("edited turn should run");
+
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        let events = store
+            .load_run("run_superseded_turn")
+            .expect("run log should load");
+        let edited_turn_started = events
+            .iter()
+            .find(|event| {
+                event.event_type == "turn.started" && event.turn_id.as_deref() == Some("turn_2")
+            })
+            .expect("edited turn.started event should be recorded");
+
+        assert_eq!(
+            edited_turn_started.payload["supersedes"]["messageId"],
+            json!("run_superseded_turn:2")
+        );
+        assert_eq!(
+            edited_turn_started.payload["supersedes"]["turnId"],
+            json!("turn_1")
+        );
+    }
+
+    #[test]
+    fn send_turn_supersedes_rejects_invalid_turn_id() {
+        let error = super::core_turn_supersedes_from_rpc(&super::TurnSupersedes {
+            message_id: "run_superseded_turn:2".to_owned(),
+            turn_id: Some("turn_1\nnext".to_owned()),
+        })
+        .expect_err("newline in supersedes turn id should be rejected");
+
+        assert_eq!(error.code, super::JSON_RPC_INVALID_PARAMS);
+        assert!(
+            error.message.contains("supersedes.turnId"),
+            "unexpected error message: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn turn_loop_rpc_handler_deletes_inactive_run_logs() {
+        let workspace = TestWorkspace::new("rpc");
+        let mut handler = AgentTurnLoopRpcHandler::new(final_provider_factory);
+        handler
+            .initialize(
+                serde_json::from_value(initialize_params_for(workspace.path_str()))
+                    .expect("initialize params should deserialize"),
+            )
+            .expect("handler should initialize");
+        handler
+            .send_turn(SendTurnParams {
+                run_id: Some("run_delete_rpc".to_owned()),
+                message: "Say hello".to_owned(),
+                mode: super::RpcRunMode::Ask,
+                attachments: Vec::new(),
+                supersedes: None,
+            })
+            .expect("turn should complete before deletion");
+
+        let result = handler
+            .delete_run(DeleteRunParams {
+                run_id: "run_delete_rpc".to_owned(),
+            })
+            .expect("inactive run should delete");
+
+        assert_eq!(result.result.run_id, "run_delete_rpc");
+        assert!(result.result.deleted);
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        assert!(matches!(
+            store.load_run("run_delete_rpc"),
+            Err(RunLogError::RunNotFound { .. })
+        ));
     }
 
     #[test]
@@ -3807,18 +4466,18 @@ mod tests {
 
         output.wait_for_line(|line| line["id"] == "turn_1", RPC_TEST_TIMEOUT);
         assert!(
-            !output.lines().iter().any(|line| {
-                line["method"] == "agent.event" && line["params"]["type"] == "run.completed"
-            }),
+            !agent_event_values(&output.lines())
+                .iter()
+                .any(|event| event["type"] == "run.completed"),
             "sendTurn response must be written before the blocked provider completes"
         );
 
         gate.release();
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "run.completed"
-                    && line["params"]["runId"] == "run_rpc_early_accept"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.completed" && event["runId"] == "run_rpc_early_accept"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -3829,11 +4488,11 @@ mod tests {
     }
 
     #[test]
-    fn turn_loop_rpc_handler_waits_for_approval_and_applies_after_approve() {
+    fn turn_loop_rpc_handler_waits_for_shell_approval_and_continues_after_approve() {
         let workspace = TestWorkspace::new("rpc");
         workspace.write("README.md", "old\n");
         let (input, output, join) =
-            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(patch_provider_factory));
+            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(shell_provider_factory));
         send_rpc_line(
             &input,
             json!({
@@ -3851,16 +4510,16 @@ mod tests {
                 "method": "agent.sendTurn",
                 "params": {
                     "runId": "run_rpc_approval",
-                    "message": "Update README",
+                    "message": "Run an approved command",
                     "mode": "edit"
                 }
             }),
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "tool.approvalRequired"
-                    && line["params"]["runId"] == "run_rpc_approval"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "tool.approvalRequired" && event["runId"] == "run_rpc_approval"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -3878,9 +4537,9 @@ mod tests {
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "run.completed"
-                    && line["params"]["runId"] == "run_rpc_approval"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.completed" && event["runId"] == "run_rpc_approval"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -3889,26 +4548,32 @@ mod tests {
             .expect("request loop thread should not panic")
             .expect("real turn loop handler should complete after approval");
 
-        assert_eq!(workspace.read("README.md"), "new\n");
+        assert_eq!(workspace.read("README.md"), "old\n");
         let lines = output.lines();
+        let events = agent_event_values(&lines);
         let approval_required_index = line_index(&lines, |line| {
-            line["method"] == "agent.event" && line["params"]["type"] == "tool.approvalRequired"
+            line_has_agent_event(line, |event| event["type"] == "tool.approvalRequired")
         });
         let approve_response_index = line_index(&lines, |line| line["id"] == "approve_1");
         let approval_resolved_index = line_index(&lines, |line| {
-            line["method"] == "agent.event"
-                && line["params"]["type"] == "tool.approvalResolved"
-                && line["params"]["payload"]["decision"] == "approved"
+            line_has_agent_event(line, |event| {
+                event["type"] == "tool.approvalResolved"
+                    && event["payload"]["decision"] == "approved"
+            })
         });
 
         assert!(approval_required_index < approve_response_index);
         assert!(approve_response_index < approval_resolved_index);
-        let approval_payload = &lines[approval_required_index]["params"]["payload"];
+        let approval_payload = &events
+            .iter()
+            .find(|event| event["type"] == "tool.approvalRequired")
+            .expect("approval required event should exist")["payload"];
         assert_eq!(approval_payload["approvalId"], "approval_1_1");
-        assert_eq!(approval_payload["toolCallId"], "call_patch");
-        assert_eq!(approval_payload["toolName"], "apply_patch");
-        assert_eq!(approval_payload["risk"], "write");
-        assert_eq!(approval_payload["paths"], json!(["README.md"]));
+        assert_eq!(approval_payload["toolCallId"], "call_shell");
+        assert_eq!(approval_payload["toolName"], "shell");
+        assert_eq!(approval_payload["risk"], "exec");
+        assert_eq!(approval_payload["command"], "echo rpc-shell-approved");
+        assert_eq!(approval_payload["cwd"], ".");
         assert_eq!(approval_payload["persistable"], true);
         assert_eq!(lines[1]["id"], "turn_1");
         assert_eq!(lines[1]["result"]["accepted"], true);
@@ -3918,10 +4583,64 @@ mod tests {
             lines[approve_response_index]["result"]["persist"],
             "session"
         );
-        assert!(lines.iter().any(|line| {
-            line["method"] == "agent.event"
-                && line["params"]["type"] == "run.completed"
-                && line["params"]["payload"]["changedFiles"] == json!(["README.md"])
+        assert!(events.iter().any(|event| {
+            event["type"] == "run.completed" && event["payload"]["changedFiles"] == json!([])
+        }));
+    }
+
+    #[test]
+    fn turn_loop_rpc_handler_applies_workspace_patch_without_approval() {
+        let workspace = TestWorkspace::new("rpc");
+        workspace.write("README.md", "old\n");
+        let (input, output, join) =
+            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(patch_provider_factory));
+        send_rpc_line(
+            &input,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "init_1",
+                "method": "agent.initialize",
+                "params": initialize_params_for(workspace.path_str())
+            }),
+        );
+        send_rpc_line(
+            &input,
+            json!({
+                "jsonrpc": "2.0",
+                "id": "turn_1",
+                "method": "agent.sendTurn",
+                "params": {
+                    "runId": "run_rpc_patch_without_approval",
+                    "message": "Update README",
+                    "mode": "edit"
+                }
+            }),
+        );
+        output.wait_for_line(
+            |line| {
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.completed"
+                        && event["runId"] == "run_rpc_patch_without_approval"
+                })
+            },
+            RPC_TEST_TIMEOUT,
+        );
+        drop(input);
+        join.join()
+            .expect("request loop thread should not panic")
+            .expect("real turn loop handler should complete");
+
+        assert_eq!(workspace.read("README.md"), "new\n");
+        let events = agent_event_values(&output.lines());
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["type"] == "tool.approvalRequired"),
+            "workspace apply_patch should not pause for approval"
+        );
+        assert!(events.iter().any(|event| {
+            event["type"] == "run.completed"
+                && event["payload"]["changedFiles"] == json!(["README.md"])
         }));
     }
 
@@ -3930,7 +4649,7 @@ mod tests {
         let workspace = TestWorkspace::new("rpc");
         workspace.write("README.md", "old\n");
         let (input, output, join) =
-            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(patch_provider_factory));
+            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(shell_provider_factory));
         send_rpc_line(
             &input,
             json!({
@@ -3948,16 +4667,17 @@ mod tests {
                 "method": "agent.sendTurn",
                 "params": {
                     "runId": "run_rpc_rejected_approval",
-                    "message": "Update README",
+                    "message": "Run a command",
                     "mode": "edit"
                 }
             }),
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "tool.approvalRequired"
-                    && line["params"]["runId"] == "run_rpc_rejected_approval"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "tool.approvalRequired"
+                        && event["runId"] == "run_rpc_rejected_approval"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -3975,9 +4695,9 @@ mod tests {
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "run.failed"
-                    && line["params"]["runId"] == "run_rpc_rejected_approval"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.failed" && event["runId"] == "run_rpc_rejected_approval"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -3988,20 +4708,15 @@ mod tests {
 
         assert_eq!(workspace.read("README.md"), "old\n");
         let lines = output.lines();
+        let events = agent_event_values(&lines);
         let reject_response_index = line_index(&lines, |line| line["id"] == "reject_1");
         assert_eq!(lines[reject_response_index]["result"]["state"], "rejected");
         assert_eq!(lines[reject_response_index]["result"]["reason"], "not now");
-        assert!(lines.iter().any(|line| {
-            line["method"] == "agent.event"
-                && line["params"]["type"] == "tool.approvalResolved"
-                && line["params"]["payload"]["decision"] == "rejected"
+        assert!(events.iter().any(|event| {
+            event["type"] == "tool.approvalResolved" && event["payload"]["decision"] == "rejected"
         }));
-        assert!(lines.iter().any(|line| {
-            line["method"] == "agent.event" && line["params"]["type"] == "run.failed"
-        }));
-        assert!(!lines.iter().any(|line| {
-            line["method"] == "agent.event" && line["params"]["type"] == "tool.started"
-        }));
+        assert!(events.iter().any(|event| event["type"] == "run.failed"));
+        assert!(!events.iter().any(|event| event["type"] == "tool.started"));
     }
 
     #[test]
@@ -4009,7 +4724,7 @@ mod tests {
         let workspace = TestWorkspace::new("rpc");
         workspace.write("README.md", "old\n");
         let (input, output, join) =
-            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(patch_provider_factory));
+            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(shell_provider_factory));
         send_rpc_line(
             &input,
             json!({
@@ -4027,16 +4742,17 @@ mod tests {
                 "method": "agent.sendTurn",
                 "params": {
                     "runId": "run_rpc_canceled_approval",
-                    "message": "Update README",
+                    "message": "Run a command",
                     "mode": "edit"
                 }
             }),
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "tool.approvalRequired"
-                    && line["params"]["runId"] == "run_rpc_canceled_approval"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "tool.approvalRequired"
+                        && event["runId"] == "run_rpc_canceled_approval"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -4054,9 +4770,9 @@ mod tests {
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "run.canceled"
-                    && line["params"]["runId"] == "run_rpc_canceled_approval"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "run.canceled" && event["runId"] == "run_rpc_canceled_approval"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -4133,7 +4849,7 @@ mod tests {
         let workspace = TestWorkspace::new("rpc");
         workspace.write("README.md", "old\n");
         let (input, output, join) =
-            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(patch_provider_factory));
+            spawn_interactive_rpc_loop(AgentTurnLoopRpcHandler::new(shell_provider_factory));
         send_rpc_line(
             &input,
             json!({
@@ -4151,16 +4867,17 @@ mod tests {
                 "method": "agent.sendTurn",
                 "params": {
                     "runId": "run_rpc_active_disconnect",
-                    "message": "Update README and wait for approval",
+                    "message": "Run a command and wait for approval",
                     "mode": "edit"
                 }
             }),
         );
         output.wait_for_line(
             |line| {
-                line["method"] == "agent.event"
-                    && line["params"]["type"] == "tool.approvalRequired"
-                    && line["params"]["runId"] == "run_rpc_active_disconnect"
+                line_has_agent_event(line, |event| {
+                    event["type"] == "tool.approvalRequired"
+                        && event["runId"] == "run_rpc_active_disconnect"
+                })
             },
             RPC_TEST_TIMEOUT,
         );
@@ -4219,7 +4936,7 @@ mod tests {
     fn turn_loop_rpc_handler_expires_pending_approval_without_running_tool() {
         let workspace = TestWorkspace::new("rpc");
         workspace.write("README.md", "old\n");
-        let mut handler = AgentTurnLoopRpcHandler::new(patch_provider_factory)
+        let mut handler = AgentTurnLoopRpcHandler::new(shell_provider_factory)
             .with_approval_timeout(Duration::from_millis(20));
         handler
             .initialize(
@@ -4231,9 +4948,10 @@ mod tests {
         let send_output = handler
             .send_turn(SendTurnParams {
                 run_id: Some("run_rpc_expired_approval".to_owned()),
-                message: "Update README".to_owned(),
+                message: "Run a command".to_owned(),
                 mode: super::RpcRunMode::Edit,
                 attachments: Vec::new(),
+                supersedes: None,
             })
             .expect("sendTurn should pause for approval");
         assert!(send_output.events.iter().any(|event| {
@@ -4302,6 +5020,7 @@ mod tests {
                     range: None,
                     text: None,
                 }],
+                supersedes: None,
             })
             .expect("file attachments should be accepted");
         let context_built = send_output
@@ -4628,6 +5347,20 @@ mod tests {
         events
     }
 
+    fn line_has_agent_event(line: &Value, predicate: impl Fn(&Value) -> bool) -> bool {
+        if line["method"] == "agent.event" {
+            return predicate(&line["params"]);
+        }
+
+        if line["method"] == "agent.eventBatch"
+            && let Some(events) = line["params"]["events"].as_array()
+        {
+            return events.iter().any(predicate);
+        }
+
+        false
+    }
+
     fn line_index(lines: &[Value], predicate: impl Fn(&Value) -> bool) -> usize {
         lines
             .iter()
@@ -4772,8 +5505,11 @@ mod tests {
         approvals: Vec<ApproveParams>,
         rejections: Vec<RejectParams>,
         cancellations: Vec<CancelParams>,
+        steers: Vec<SteerParams>,
         resumes: Vec<ResumeParams>,
+        load_run_events: Vec<LoadRunEventsParams>,
         list_runs: Vec<ListRunsParams>,
+        delete_runs: Vec<DeleteRunParams>,
         fim_previews: Vec<FimPreviewParams>,
     }
 
@@ -4846,6 +5582,18 @@ mod tests {
             }))
         }
 
+        fn steer(
+            &mut self,
+            params: SteerParams,
+        ) -> Result<AgentRpcHandlerOutput<SteerResult>, AgentRpcHandlerError> {
+            self.steers.push(params.clone());
+            Ok(AgentRpcHandlerOutput::new(SteerResult {
+                run_id: params.run_id,
+                steer_id: "steer_rpc".to_owned(),
+                accepted: true,
+            }))
+        }
+
         fn resume(
             &mut self,
             params: ResumeParams,
@@ -4866,6 +5614,41 @@ mod tests {
             )]))
         }
 
+        fn load_run_events(
+            &mut self,
+            params: LoadRunEventsParams,
+        ) -> Result<AgentRpcHandlerOutput<LoadRunEventsResult>, AgentRpcHandlerError> {
+            let run_id = params.run_id.clone();
+            self.load_run_events.push(params);
+            let events = [
+                run_log_event(
+                    1,
+                    "turn.started",
+                    &run_id,
+                    Some("turn_rpc"),
+                    json!({ "userTask": "hello" }),
+                ),
+                run_log_event(
+                    2,
+                    "assistant.delta",
+                    &run_id,
+                    Some("turn_rpc"),
+                    json!({ "text": "hello" }),
+                ),
+            ];
+            Ok(AgentRpcHandlerOutput::new(LoadRunEventsResult {
+                run_id,
+                events: events
+                    .iter()
+                    .map(super::run_log_event_to_envelope)
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("fixture events should serialize"),
+                first_seq: Some(1),
+                last_seq: Some(2),
+                has_more_before: false,
+            }))
+        }
+
         fn list_runs(
             &mut self,
             params: ListRunsParams,
@@ -4881,11 +5664,23 @@ mod tests {
                     completed_at: Some("1970-01-01T00:00:01.000Z".to_owned()),
                     last_seq: 3,
                     event_count: 3,
-                    mode: Some("ask".to_owned()),
+                    mode: Some(super::RpcRunMode::Ask),
                     summary: Some("Done".to_owned()),
                     changed_files: Vec::new(),
                     verification_status: Some("skipped".to_owned()),
                 }],
+            }))
+        }
+
+        fn delete_run(
+            &mut self,
+            params: DeleteRunParams,
+        ) -> Result<AgentRpcHandlerOutput<DeleteRunResult>, AgentRpcHandlerError> {
+            let run_id = params.run_id.clone();
+            self.delete_runs.push(params);
+            Ok(AgentRpcHandlerOutput::new(DeleteRunResult {
+                run_id,
+                deleted: true,
             }))
         }
 
@@ -4924,6 +5719,28 @@ mod tests {
     ) -> Result<ScriptedProvider, AgentRpcHandlerError> {
         Ok(ScriptedProvider::new(vec![
             TurnProviderResponse::final_text("RPC final answer"),
+        ]))
+    }
+
+    fn shell_provider_factory(
+        _params: &SendTurnParams,
+    ) -> Result<ScriptedProvider, AgentRpcHandlerError> {
+        Ok(ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should run a shell command.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_shell",
+                    "shell",
+                    json!({
+                        "command": "echo rpc-shell-approved",
+                        "cwd": ".",
+                        "timeoutMs": 10_000,
+                    })
+                    .to_string(),
+                )],
+            ),
+            TurnProviderResponse::final_text("Command approved and completed."),
         ]))
     }
 

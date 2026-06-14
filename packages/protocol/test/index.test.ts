@@ -10,7 +10,9 @@ import {
   agentApproveMethod,
   agentRejectMethod,
   agentCancelMethod,
+  agentSteerMethod,
   agentListRunsMethod,
+  agentDeleteRunMethod,
   agentEventBatchMethod,
   agentPreviewFimMethod,
   type ApprovalRequest,
@@ -18,19 +20,25 @@ import {
   type ApproveResult,
   type CancelParams,
   type CancelResult,
+  type DeleteRunParams,
+  type DeleteRunResult,
   type AgentEventBatchParams,
   type FimPreviewParams,
   type FimPreviewResult,
   type ListRunsParams,
   type ListRunsResult,
+  type ProviderConfigurationErrorData,
   type ProviderCapabilities,
   type ProviderCompletedPayload,
   type ProviderRequestedPayload,
   type RunCompletedPayload,
   type RunLogPayloadMetadata,
   type RunSummary,
+  type RpcRecoverableAction,
   type RejectParams,
   type RejectResult,
+  type SteerParams,
+  type SteerResult,
   type ServerCapabilities,
   type ToolCompletedPayload,
   type ToolApprovalRequiredPayload,
@@ -47,6 +55,7 @@ import {
   riskLevels,
   toolDefinitions,
   toolNames,
+  rpcRecoverableActionKinds,
 } from "../src/index.js";
 
 interface ToolRegistryFixture {
@@ -129,7 +138,9 @@ test("JSON-RPC method constants match protocol document", () => {
   assert.equal(agentApproveMethod, "agent.approve");
   assert.equal(agentRejectMethod, "agent.reject");
   assert.equal(agentCancelMethod, "agent.cancel");
+  assert.equal(agentSteerMethod, "agent.steer");
   assert.equal(agentListRunsMethod, "agent.listRuns");
+  assert.equal(agentDeleteRunMethod, "agent.deleteRun");
   assert.equal(agentPreviewFimMethod, "agent.previewFim");
   assert.equal(agentEventMethod, "agent.event");
   assert.equal(agentEventBatchMethod, "agent.eventBatch");
@@ -189,6 +200,21 @@ test("protocol error code registry matches protocol document", () => {
     codes.add(definition.code);
     names.add(definition.name);
   }
+});
+
+test("provider configuration errors expose recoverable actions", () => {
+  const action = {
+    kind: "configureDeepSeekApiKey",
+    label: "Configure API Key",
+  } satisfies RpcRecoverableAction;
+  const data = {
+    provider: "deepseek",
+    configurationError: "missingApiKey",
+    recoverableAction: action,
+  } satisfies ProviderConfigurationErrorData;
+
+  assert.deepEqual(rpcRecoverableActionKinds, ["configureDeepSeekApiKey"]);
+  assert.equal(data.recoverableAction.kind, "configureDeepSeekApiKey");
 });
 
 test("approval request and decision params use stable protocol fields", () => {
@@ -272,6 +298,15 @@ test("approval request and decision params use stable protocol fields", () => {
     state: "canceled",
     reason: cancel.reason,
   } satisfies CancelResult;
+  const steer = {
+    runId: "run_1",
+    message: "Focus on the failing tests before continuing.",
+  } satisfies SteerParams;
+  const steerResult = {
+    runId: steer.runId,
+    steerId: "steer_1",
+    accepted: true,
+  } satisfies SteerResult;
   const fimPreview = {
     prefix: "fn main() {",
     suffix: "}",
@@ -301,6 +336,7 @@ test("approval request and decision params use stable protocol fields", () => {
   assert.equal(approveResult.state, "approved");
   assert.equal(reject.reason, rejectResult.reason);
   assert.equal(cancelResult.state, "canceled");
+  assert.equal(steerResult.accepted, true);
   assert.equal(fimPreview.languageId, "rust");
   assert.equal(fimPreviewResult.finishReason, "stop");
   assert.equal(expiredPayload.decision, "expired");
@@ -332,6 +368,17 @@ test("run summary params and results use stable protocol fields", () => {
   assert.equal(result.runs[0]?.runId, "run_1");
   assert.equal(result.runs[0]?.status, "completed");
   assert.equal(result.runs[0]?.lastSeq, 8);
+
+  const deleteParams = {
+    runId: "run_1",
+  } satisfies DeleteRunParams;
+  const deleteResult = {
+    runId: "run_1",
+    deleted: true,
+  } satisfies DeleteRunResult;
+
+  assert.equal(deleteParams.runId, "run_1");
+  assert.equal(deleteResult.deleted, true);
 });
 
 test("attachments and provider completed payload use phase 2c and 2d fields", () => {
@@ -551,8 +598,14 @@ function sortedTools(tools: readonly ToolRegistryTool[]): ToolRegistryTool[] {
   return [...tools].sort((left, right) => left.name.localeCompare(right.name));
 }
 
-test("tool approval defaults match risk defaults", () => {
+test("tool approval defaults match risk defaults except explicit overrides", () => {
   for (const tool of toolDefinitions) {
+    if (tool.name === "apply_patch") {
+      assert.equal(tool.risk, "write");
+      assert.equal(tool.approval, "none");
+      continue;
+    }
+
     assert.equal(
       tool.approval,
       riskDefaultApproval[tool.risk],
@@ -561,9 +614,9 @@ test("tool approval defaults match risk defaults", () => {
   }
 });
 
-test("mutating and executing tools require approval", () => {
+test("workspace patch is write risk without approval while shell requires approval", () => {
   assert.equal(findToolDefinition("apply_patch")?.risk, "write");
-  assert.equal(findToolDefinition("apply_patch")?.approval, "required");
+  assert.equal(findToolDefinition("apply_patch")?.approval, "none");
   assert.equal(findToolDefinition("shell")?.risk, "exec");
   assert.equal(findToolDefinition("shell")?.approval, "required");
 });

@@ -1,6 +1,6 @@
 # 终端界面（TUI）
 
-状态：草案，保留为正式前端但优先级排在 VS Code 核心体验之后，当前归入 Phase 5。
+状态：草案，保留为正式前端但优先级排在 VS Code 核心体验和 AGENT 性能调试之后，当前归入 Phase 7。
 
 TUI 是 `ProleCoder` 的终端前端。它应支持键盘驱动的代码工作流，同时与 VS Code 插件共享 Agent Core 行为。
 
@@ -40,7 +40,7 @@ TUI 是 `ProleCoder` 的终端前端。它应支持键盘驱动的代码工作�
 
 下一步：
 
-- 等 VS Code 核心体验和共享 RPC 事件管线稳定后，进入 TUI Phase 5 实现。
+- 等 VS Code 核心体验、AGENT 性能调试和共享 RPC 事件管线稳定后，进入 TUI Phase 7 实现。
 - 为 `prole-coder-tui` 增加命令行入口和配置加载。
 - 连接 Rust Agent RPC Server 的 stdio request loop，消费 `agent.event` 事件流。
 - 把 `ApprovalPromptModel` 接到真实 `tool.approvalRequired`，并把用户决定发送为 `agent.approve` / `agent.reject`。

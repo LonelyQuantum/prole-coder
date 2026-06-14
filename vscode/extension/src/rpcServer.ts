@@ -6,8 +6,12 @@ import type {
   ApproveResult,
   CancelParams,
   CancelResult,
+  DeleteRunParams,
+  DeleteRunResult,
   FimPreviewParams,
   FimPreviewResult,
+  LoadRunEventsParams,
+  LoadRunEventsResult,
   ListRunsParams,
   ListRunsResult,
   RejectParams,
@@ -17,6 +21,8 @@ import type {
   SendTurnParams,
   SendTurnResult,
   ServerCapabilities,
+  SteerParams,
+  SteerResult,
 } from "@prole-coder/protocol" with {
   "resolution-mode": "import",
 };
@@ -27,10 +33,13 @@ export const RPC_EVENT_METHOD = "agent.event";
 export const RPC_EVENT_BATCH_METHOD = "agent.eventBatch";
 export const RPC_SEND_TURN_METHOD = "agent.sendTurn";
 export const RPC_RESUME_METHOD = "agent.resume";
+export const RPC_LOAD_RUN_EVENTS_METHOD = "agent.loadRunEvents";
 export const RPC_LIST_RUNS_METHOD = "agent.listRuns";
+export const RPC_DELETE_RUN_METHOD = "agent.deleteRun";
 export const RPC_APPROVE_METHOD = "agent.approve";
 export const RPC_REJECT_METHOD = "agent.reject";
 export const RPC_CANCEL_METHOD = "agent.cancel";
+export const RPC_STEER_METHOD = "agent.steer";
 export const RPC_PREVIEW_FIM_METHOD = "agent.previewFim";
 export const DEFAULT_RPC_COMMAND = "prole";
 export const DEFAULT_RPC_ARGS = ["rpc"] as const;
@@ -70,6 +79,7 @@ export interface RpcServerConfiguration {
 
 export interface RpcSpawnOptions {
   readonly cwd: string;
+  readonly env?: Record<string, string | undefined>;
 }
 
 export interface RpcWritable {
@@ -95,7 +105,9 @@ export interface RpcProcessFactory {
   spawn(command: string, args: readonly string[], options: RpcSpawnOptions): RpcChildProcess;
 }
 
-export type AgentEventEnvelope = ProtocolAgentEventEnvelope;
+export type AgentEventEnvelope = ProtocolAgentEventEnvelope & {
+  readonly replay?: boolean;
+};
 
 export interface DisposableLike {
   dispose(): unknown;
@@ -105,6 +117,7 @@ export interface RpcServerManagerOptions {
   readonly launch: RpcServerLaunchConfig;
   readonly workspace: RpcServerWorkspace;
   readonly extensionVersion: string;
+  readonly processEnv?: Record<string, string | undefined>;
   readonly processFactory?: RpcProcessFactory;
   readonly notifier?: RpcServerNotifier;
 }
@@ -129,6 +142,7 @@ interface JsonRpcNotification {
 }
 
 interface PendingRpcRequest<TResult> {
+  readonly method: string;
   resolve(value: TResult): void;
   reject(error: Error): void;
 }
@@ -149,6 +163,10 @@ export const nodeRpcProcessFactory: RpcProcessFactory = {
   spawn(command, args, options) {
     return spawn(command, [...args], {
       cwd: options.cwd,
+      env: {
+        ...process.env,
+        ...options.env,
+      },
       stdio: "pipe",
       windowsHide: true,
     });
@@ -183,6 +201,8 @@ export class RpcServerManager implements DisposableLike {
   private readonly notifier: RpcServerNotifier | undefined;
   private readonly eventHandlers = new Set<(event: AgentEventEnvelope) => void>();
   private readonly pendingRequests = new Map<string, PendingRpcRequest<unknown>>();
+  private readonly replayUpperBounds = new Map<string, number>();
+  private processEnv: Record<string, string | undefined>;
 
   private child: RpcChildProcess | undefined;
   private startPromise: Promise<RpcServerReadyState> | undefined;
@@ -202,6 +222,7 @@ export class RpcServerManager implements DisposableLike {
     this.extensionVersion = options.extensionVersion;
     this.processFactory = options.processFactory ?? nodeRpcProcessFactory;
     this.notifier = options.notifier;
+    this.processEnv = { ...(options.processEnv ?? {}) };
   }
 
   get status(): RpcServerStatus {
@@ -218,6 +239,10 @@ export class RpcServerManager implements DisposableLike {
 
   get launchConfig(): RpcServerLaunchConfig {
     return this.launch;
+  }
+
+  setProcessEnv(env: Record<string, string | undefined>): void {
+    this.processEnv = { ...env };
   }
 
   start(): Promise<RpcServerReadyState> {
@@ -245,6 +270,7 @@ export class RpcServerManager implements DisposableLike {
     try {
       child = this.processFactory.spawn(this.launch.command, this.launch.args, {
         cwd: this.workspace.root,
+        env: this.processEnv,
       });
     } catch (error) {
       const spawnError = asError(error);
@@ -260,8 +286,8 @@ export class RpcServerManager implements DisposableLike {
     this.child = child;
     child.stdout.on("data", (chunk) => this.handleStdoutData(chunk));
     child.stderr.on("data", (chunk) => this.handleStderrData(chunk));
-    child.on("exit", (code, signal) => this.handleExit(code, signal));
-    child.on("error", (error) => this.handleProcessError(error));
+    child.on("exit", (code, signal) => this.handleExit(child, code, signal));
+    child.on("error", (error) => this.handleProcessError(child, error));
 
     this.startPromise = new Promise<RpcServerReadyState>((resolve, reject) => {
       this.resolveStart = resolve;
@@ -305,6 +331,7 @@ export class RpcServerManager implements DisposableLike {
 
     const promise = new Promise<TResult>((resolve, reject) => {
       this.pendingRequests.set(id, {
+        method,
         resolve: resolve as (value: unknown) => void,
         reject,
       });
@@ -328,8 +355,16 @@ export class RpcServerManager implements DisposableLike {
     return this.sendRequest<ResumeResult>(RPC_RESUME_METHOD, params);
   }
 
+  loadRunEvents(params: LoadRunEventsParams): Promise<LoadRunEventsResult> {
+    return this.sendRequest<LoadRunEventsResult>(RPC_LOAD_RUN_EVENTS_METHOD, params);
+  }
+
   listRuns(params: ListRunsParams = {}): Promise<ListRunsResult> {
     return this.sendRequest<ListRunsResult>(RPC_LIST_RUNS_METHOD, params);
+  }
+
+  deleteRun(params: DeleteRunParams): Promise<DeleteRunResult> {
+    return this.sendRequest<DeleteRunResult>(RPC_DELETE_RUN_METHOD, params);
   }
 
   approve(params: ApproveParams): Promise<ApproveResult> {
@@ -342,6 +377,10 @@ export class RpcServerManager implements DisposableLike {
 
   cancel(params: CancelParams): Promise<CancelResult> {
     return this.sendRequest<CancelResult>(RPC_CANCEL_METHOD, params);
+  }
+
+  steer(params: SteerParams): Promise<SteerResult> {
+    return this.sendRequest<SteerResult>(RPC_STEER_METHOD, params);
   }
 
   previewFim(params: FimPreviewParams): Promise<FimPreviewResult> {
@@ -468,8 +507,9 @@ export class RpcServerManager implements DisposableLike {
   }
 
   private dispatchAgentEvent(event: AgentEventEnvelope): void {
+    const eventToDispatch = this.markReplayEvent(event);
     for (const handler of this.eventHandlers) {
-      handler(event);
+      handler(eventToDispatch);
     }
   }
 
@@ -486,14 +526,48 @@ export class RpcServerManager implements DisposableLike {
       return;
     }
 
+    if (pending.method === RPC_RESUME_METHOD && isResumeResult(message.result)) {
+      this.markReplayRange(message.result);
+    }
     pending.resolve(message.result);
+  }
+
+  private markReplayRange(result: ResumeResult): void {
+    if (result.replayStarted && result.nextSeq > 0) {
+      this.replayUpperBounds.set(result.runId, result.nextSeq);
+    }
+  }
+
+  private markReplayEvent(event: AgentEventEnvelope): AgentEventEnvelope {
+    const nextLiveSeq = this.replayUpperBounds.get(event.runId);
+    if (nextLiveSeq === undefined) {
+      return event;
+    }
+
+    if (event.seq >= nextLiveSeq) {
+      this.replayUpperBounds.delete(event.runId);
+      return event;
+    }
+
+    return {
+      ...event,
+      replay: true,
+    };
   }
 
   private handleStderrData(chunk: Buffer | string): void {
     this.stderrTail = `${this.stderrTail}${chunk.toString()}`.slice(-4096);
   }
 
-  private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
+  private handleExit(
+    exitedChild: RpcChildProcess,
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    if (this.child !== exitedChild) {
+      return;
+    }
+
     const wasIntentional = this.intentionalStop;
     this.child = undefined;
     this.readyState = undefined;
@@ -524,7 +598,11 @@ export class RpcServerManager implements DisposableLike {
     }
   }
 
-  private handleProcessError(error: Error): void {
+  private handleProcessError(processChild: RpcChildProcess, error: Error): void {
+    if (this.child !== processChild) {
+      return;
+    }
+
     if (this.currentStatus === "starting") {
       this.failStarting(error);
       return;
@@ -657,6 +735,15 @@ function isAgentEventBatchParams(value: unknown): value is {
     typeof value["lastSeq"] === "number" &&
     typeof value["count"] === "number" &&
     value["events"].length === value["count"]
+  );
+}
+
+function isResumeResult(value: unknown): value is ResumeResult {
+  return (
+    isRecord(value) &&
+    typeof value["runId"] === "string" &&
+    typeof value["nextSeq"] === "number" &&
+    typeof value["replayStarted"] === "boolean"
   );
 }
 

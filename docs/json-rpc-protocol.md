@@ -45,7 +45,7 @@ Agent Core
 }
 ```
 
-实时高频事件可以使用 `agent.eventBatch` notification 批量发送；Run Log 本身仍以单个 `seq` 事件作为事实来源，`agent.resume` replay 仍按 `agent.event` 重放。
+实时高频事件可以使用 `agent.eventBatch` notification 批量发送；Run Log 本身仍以单个 `seq` 事件作为事实来源，`agent.resume` replay 仍按 `agent.event` 重放；只读历史分页使用 `agent.loadRunEvents` 在 response 中返回 event envelope，不重新发送 live notification。
 ```json
 {
   "jsonrpc": "2.0",
@@ -267,6 +267,12 @@ interface SendTurnParams {
   message: string;
   mode: "plan" | "edit" | "review" | "ask";
   attachments?: TurnAttachment[];
+  supersedes?: TurnSupersedes;
+}
+
+interface TurnSupersedes {
+  messageId: string;
+  turnId?: string;
 }
 
 interface TurnAttachment {
@@ -294,9 +300,11 @@ interface SendTurnResult {
 
 Result 返回后，进度通过 `agent.event` notification 持续到达。
 
-当前 Rust request loop 已能解析 `agent.sendTurn` 并分发给 `AgentRpcRequestHandler`。`crates/agent-rpc::AgentTurnLoopRpcHandler` 已能创建 run、选择注入的 provider factory、启动后台 Turn Loop worker，并在创建 run 后立即返回 `accepted`。Run Log 事件会通过独立的 live event queue 发送到 request loop 的单 writer，并持续输出为 `agent.event` notification；遇到审批时，worker 会先检查 session/workspace 持久批准，再在 pending approval 队列中等待 `agent.approve` / `agent.reject` / `agent.cancel`，并在超时时写入取消事件。如果 request loop 读到 EOF 或 writer 失败，会触发 handler shutdown / disconnect cancel；对于 active run，shutdown 会把未决审批解析为 `decision: "canceled"` 并写入 `run.canceled`，或等待已有 terminal event 收口。
+当前 Rust request loop 已能解析 `agent.sendTurn` 并分发给 `AgentRpcRequestHandler`。`crates/agent-rpc::AgentTurnLoopRpcHandler` 已能创建 run、选择注入的 provider factory、启动后台 Turn Loop worker，并在创建 run 后立即返回 `accepted`。Run Log 事件会通过独立的 live event queue 发送到 request loop 的单 writer，并持续输出为 `agent.event` notification；遇到审批时，worker 会先检查 session/workspace 持久批准，再在 pending approval 队列中等待 `agent.approve` / `agent.reject` / `agent.cancel`，并在超时时写入取消事件。active run 还可以通过 `agent.steer` 接收运行中的用户补充指导，Turn Loop 会在下一次 provider request 前把它作为最新用户运行中指令注入。如果 request loop 读到 EOF 或 writer 失败，会触发 handler shutdown / disconnect cancel；对于 active run，shutdown 会把未决审批解析为 `decision: "canceled"` 并写入 `run.canceled`，或等待已有 terminal event 收口。
 
 Phase 2c 起，Rust handler 会消费 `attachments` 并转换为 Context Capsule 来源：`file` 由 Core 在工作区内读取，复用工具执行层的路径和敏感目录保护；`selection` / `explicit_content` 由前端提供文本但受数量、大小、重复来源和路径校验限制；`diagnostic` 由 VS Code/TUI 等前端传入结构化诊断文本。VS Code 插件在发送 turn 时会把当前 Problems 快照转换为 diagnostic attachments，并按协议 attachment 上限优先保留 error；Phase 4 起，Sidebar Chat 与原生 `@prole` Chat Participant 会把历史对话/事件摘要压缩为受限长度的 `explicit_content` attachment，并为该自动上下文预留一个 attachment 槽位。Sidebar timeline 来源会在生成自动上下文前先限制单条消息长度，避免极端长 `assistant.delta` 合并内容造成过大的中间文本。当前默认限制是单 turn 最多 32 个 attachment，单个 attachment 文本最多 256 KiB；超过限制会让该 run 以 `run.failed` / `E_INVALID_ATTACHMENT` 结束。
+
+`supersedes` 用于编辑重发。前端可以在同一 run 内发送新 turn 时声明它覆盖了某个历史用户消息的 timeline `messageId`，并可附带原 `turnId`。Server 不会重写或删除旧 run log 事件，而是在新 `turn.started.payload.supersedes` 中追加审计元数据；resume/reload 时前端据此隐藏或标记被覆盖的用户消息，自动上下文压缩也应跳过这些 superseded 用户消息。`messageId` 是前端 timeline item id，不要求符合 `runId` 标识符字符集；Rust RPC handler 只接受非空且不超过 256 bytes 的 `messageId`。`turnId` 如果提供，必须是非空、不超过 128 bytes，且只包含 ASCII 字母、数字、`_` 或 `-`。
 
 ### `agent.approve`
 
@@ -379,6 +387,30 @@ interface CancelResult {
 - 当前内存队列默认审批超时为 300 秒；超时会把 approval 解析为 `decision: "expired"`，随后写入 `run.canceled`。测试和嵌入方可以通过 handler 配置缩短该时间。
 - 当前取消是协作式，不是强制杀线程；stdio EOF / writer failure 已能取消 active run，包括等待审批和长时间 provider request 场景。命令类工具会在取消或超时时清理子进程树。
 
+### `agent.steer`
+
+向 active run 追加运行中的用户指导。该请求不创建新的 turn，不会取消当前 provider/tool 流程；Turn Loop 会在下一次 provider request 前把 steer 消息作为最新用户运行中指令注入，并写入 `turn.steered` 事件。
+
+```ts
+interface SteerParams {
+  runId: string;
+  message: string;
+}
+
+interface SteerResult {
+  runId: string;
+  steerId: string;
+  accepted: true;
+}
+```
+
+规则：
+
+- `runId` 必须匹配当前 active run；否则返回 `E_RUN_NOT_FOUND`。
+- `message` 必须是非空文本；空白消息返回 invalid params。
+- `agent.steer` 只是追加指导，不表示批准、拒绝或取消 pending approval。
+- 如果当前 run 在收到 steer 前已经完成，handler 会先 drain terminal event，再返回 `E_RUN_NOT_FOUND`。
+
 ### `agent.resume`
 
 恢复或回放之前的 run。
@@ -405,6 +437,33 @@ interface ResumeResult {
 - 如果提供 `replayFromSeq`，server 从该 seq 重新发送事件。
 - 如果本地 run log 不存在，返回 `E_RUN_NOT_FOUND`。
 - 当前 Rust request loop 已能解析 `agent.resume` 并分发给 handler；`AgentTurnLoopRpcHandler` 已能从 Run Log 按 `replayFromSeq` 重放事件。
+
+### `agent.loadRunEvents`
+
+从当前 workspace 的 run log 读取一页历史事件。该方法用于前端向上滚动加载更早 timeline，不会把返回事件作为 `agent.event` / `agent.eventBatch` notification 重新发送，也不会触发历史审批副作用。
+
+```ts
+interface LoadRunEventsParams {
+  runId: string;
+  beforeSeq?: number;
+  limit?: number;
+}
+
+interface LoadRunEventsResult {
+  runId: string;
+  events: AgentEventEnvelope[];
+  firstSeq?: number;
+  lastSeq?: number;
+  hasMoreBefore: boolean;
+}
+```
+
+规则：
+
+- `beforeSeq` 是 exclusive 上界；省略时从 run log 末尾取最近一页。
+- `limit` 由 server 限制在 1 到 500 之间，默认 200。
+- 返回的 `events` 保持升序，使用与 live/replay 相同的 `AgentEventEnvelope` shape。
+- 如果本地 run log 不存在，返回 `E_RUN_NOT_FOUND`。
 
 ### `agent.listRuns`
 
@@ -442,6 +501,28 @@ interface ListRunsResult {
 - 返回顺序按 `updatedAt` 从新到旧排序；时间相同时按 `runId` 升序稳定排序。
 - `limit` 省略时返回全部已知 run；传入时只返回前 N 条。
 - 当前 Rust request loop 已能解析 `agent.listRuns` 并分发给 handler；`AgentTurnLoopRpcHandler` 已能从 Run Log summary metadata 返回列表。
+
+### `agent.deleteRun`
+
+删除当前 workspace 内的本地 run log。
+
+```ts
+interface DeleteRunParams {
+  runId: string;
+}
+
+interface DeleteRunResult {
+  runId: string;
+  deleted: true;
+}
+```
+
+规则：
+
+- `agent.deleteRun` 仅删除通过 run id 校验后的 `.prole-coder/runs/<runId>` 目录；非法 id 不会解析为文件路径。
+- 如果本地 run log 不存在，返回 `E_RUN_NOT_FOUND`。
+- 如果该 run 正在当前 RPC handler 内 active，返回 `E_RUN_ALREADY_ACTIVE`，前端应先取消或等待 run 收口。
+- 当前 Rust request loop 已能解析 `agent.deleteRun` 并分发给 handler；`AgentTurnLoopRpcHandler` 已能删除 inactive run 并保持 list/resume 语义一致。
 
 ### `agent.previewFim`
 
@@ -535,8 +616,13 @@ interface RunFailed {
   code: string;
   message: string;
   details?: unknown;
+  diagnosticFile?: string;
 }
 ```
+
+当 tool-call `function.arguments` 本身不是合法 JSON 时，Agent Core 会把脱敏后的原始累计 arguments 写入当前 run 目录下的诊断文件，并在 `diagnosticFile` 返回该本地文件路径。该字段只用于本地排查，不要求前端把文件内容重新发送给模型。
+
+当 provider 建立 streaming response 或等待下一段 stream event 超过配置的 idle timeout 且连续重试耗尽时，`run.failed.code` 为 `E_PROVIDER_TIMEOUT`，payload 还会包含 `timeoutMs`、`attempts`、`partialContentChars` 和 `partialReasoningChars`。该错误属于 provider 连接失败收口；JSON-RPC 方法级错误仍归入 `E_PROVIDER_ERROR` 对应的 provider 类错误码。
 
 ### `run.canceled`
 
@@ -556,8 +642,22 @@ interface RunCanceled {
 interface TurnStarted {
   turnId: string;
   userTask: string;
+  supersedes?: TurnSupersedes;
 }
 ```
+
+`supersedes` 与 `agent.sendTurn.supersedes` 语义一致，只出现在编辑重发的新 turn 上；旧 turn 的 `turn.started` 仍保留原始 `userTask` 以满足本地审计和故障复盘。
+
+### `turn.steered`
+
+```ts
+interface TurnSteered {
+  steerId: string;
+  message: string;
+}
+```
+
+该事件表示用户在 run 执行期间发送了补充指导。它用于 run log 审计和前端 timeline 展示；实际 provider 注入发生在下一次 provider request 前，注入内容会明确要求模型把 steer 当作最新用户指令遵循，因此如果 run 已在当前 provider/tool 循环内自然完成，steer 可能不会再影响模型输出。
 
 ### `assistant.delta`
 
@@ -688,6 +788,22 @@ interface ProviderRequested {
 }
 ```
 
+### `provider.retrying`
+
+该事件表示 Turn Loop 已决定重新发起 provider request。当前用于 transient stream error 和 provider idle timeout 两类可重试连接问题。
+
+```ts
+interface ProviderRetrying {
+  iteration: number;
+  reason: "transient_stream_error" | "provider_idle_timeout";
+  message: string;
+  retriesRemaining: number;
+  partialContentChars: number;
+  partialReasoningChars: number;
+  timeoutMs?: number;
+}
+```
+
 ### `provider.completed`
 
 Phase 2c 新增。该事件表示一次 provider 调用结束，用于记录 usage、cache 和 streaming 摘要；它不替代 `provider.requested`。
@@ -712,6 +828,17 @@ interface ProviderCompleted {
   };
 }
 ```
+
+### `workspace.snapshotFailed`
+
+```ts
+interface WorkspaceSnapshotFailed {
+  phase: "beforeToolExecution" | "afterToolExecution";
+  message: string;
+}
+```
+
+该事件表示 Turn Loop 试图捕获 workspace 文件快照以统计 shell 副作用变更时失败。run 可以继续执行，但 `run.completed.changedFiles` 可能只包含工具显式报告的文件，前端应把它作为诊断信息写入 Output/run log。
 
 ### `tool.requested`
 
@@ -744,6 +871,8 @@ interface ToolApprovalRequired {
   persistable: boolean;
 }
 ```
+
+`toolName` 使用内置工具名，包括 `shell`、`apply_patch`，以及 Turn Loop 本地发出的 continuation approval `model_turn_budget`。`model_turn_budget` 不是模型可主动调用的工具；它表示 provider request 预算窗口耗尽，需要客户端通过同一 pending approval queue 批准是否继续。
 
 ### `tool.approvalResolved`
 
@@ -802,7 +931,7 @@ interface PatchProposed {
 }
 ```
 
-Patch 通过其中的 `approvalId` 使用 `agent.approve` 批准。`apply_patch` 首版支持在 `tool.approvalRequired.hunks` 中暴露可批准 hunk；client 可以发送 `agent.approve` 的 `hunks.approved` 只批准其中一部分。
+需要审批的 patch 通过其中的 `approvalId` 使用 `agent.approve` 批准。普通 workspace `apply_patch` 默认不产生审批；当未来高风险 patch 或显式审批路径发出 `tool.approvalRequired` 时，payload 可以在 `hunks` 中暴露可批准 hunk，client 可以发送 `agent.approve` 的 `hunks.approved` 只批准其中一部分。
 
 ### `patch.applied`
 
@@ -878,7 +1007,7 @@ JSON-RPC 标准错误保留标准语义。项目特定错误使用 `-32000` 到 
 | -32002 | `E_WORKSPACE_UNTRUSTED` | 当前 workspace 未信任，请求操作被禁用。 |
 | -32003 | `E_RUN_NOT_FOUND` | 请求的 run 不存在于本地状态。 |
 | -32004 | `E_RUN_ALREADY_ACTIVE` | 已存在冲突的 active run。 |
-| -32010 | `E_INVALID_TOOL_ARGUMENTS` | tool-call 参数未通过 schema 校验。 |
+| -32010 | `E_INVALID_TOOL_ARGUMENTS` | tool-call 参数不是合法 JSON、payload 引用非法或发生其他终止型参数错误；已知工具 schema mismatch 也会作为失败 `tool.completed.result.errorCode` 返回 provider 重试。 |
 | -32011 | `E_APPROVAL_NOT_FOUND` | approval id 未知、已过期或已使用。 |
 | -32012 | `E_APPROVAL_DENIED` | 审批被拒绝，操作无法继续。 |
 | -32020 | `E_CONTEXT_BUDGET_EXCEEDED` | 必需上下文无法放入配置的预算。 |
@@ -903,6 +1032,34 @@ JSON-RPC 标准错误保留标准语义。项目特定错误使用 `-32000` 到 
       "requiredTokens": 1200000,
       "maxInputTokens": 1000000
     }
+  }
+}
+```
+
+Provider 配置错误可以在 `error.data` 中携带恢复动作。VS Code、TUI 等前端必须优先依据结构化字段决定 UX，不解析 `message` 文案：
+
+```ts
+interface RpcRecoverableAction {
+  kind: "configureDeepSeekApiKey";
+  label: string;
+}
+
+interface ProviderConfigurationErrorData {
+  provider: "deepseek";
+  configurationError: "missingApiKey";
+  recoverableAction: RpcRecoverableAction;
+}
+```
+
+例如 DeepSeek API key 缺失时，`agent.sendTurn` / `agent.previewFim` 会返回 `E_PROVIDER_ERROR`，并附带：
+
+```json
+{
+  "provider": "deepseek",
+  "configurationError": "missingApiKey",
+  "recoverableAction": {
+    "kind": "configureDeepSeekApiKey",
+    "label": "Configure API Key"
   }
 }
 ```

@@ -22,6 +22,11 @@ export interface ResumeRunMessage {
   readonly runId: string;
 }
 
+export interface DeleteRunMessage {
+  readonly type: "deleteRun";
+  readonly runId: string;
+}
+
 export function idleRunList(): RunListSnapshot {
   return {
     status: "idle",
@@ -58,6 +63,16 @@ export function readyRunList(
   };
 }
 
+export function deletedRunList(
+  previous: RunListSnapshot,
+  deletedRunId: string,
+  message?: string,
+): RunListSnapshot {
+  const runs = previous.runs.filter((run) => run.runId !== deletedRunId);
+  const selectedRunId = previous.selectedRunId === deletedRunId ? undefined : previous.selectedRunId;
+  return readyRunList({ runs }, selectedRunId, message);
+}
+
 export function failedRunList(
   message: string,
   previous: RunListSnapshot = idleRunList(),
@@ -76,6 +91,20 @@ export function isRefreshRunsMessage(message: unknown): message is RefreshRunsMe
 
 export function resumeRunIdFromMessage(message: unknown): string | undefined {
   if (!isRecord(message) || message["type"] !== "resumeRun") {
+    return undefined;
+  }
+
+  const runId = message["runId"];
+  if (typeof runId !== "string") {
+    return undefined;
+  }
+
+  const trimmed = runId.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+export function deleteRunIdFromMessage(message: unknown): string | undefined {
+  if (!isRecord(message) || message["type"] !== "deleteRun") {
     return undefined;
   }
 

@@ -13,6 +13,7 @@ pub enum ToolName {
     GitDiff,
     LspDiagnostics,
     PlanUpdate,
+    ModelTurnBudget,
 }
 
 impl ToolName {
@@ -27,6 +28,7 @@ impl ToolName {
             Self::GitDiff => "git_diff",
             Self::LspDiagnostics => "lsp_diagnostics",
             Self::PlanUpdate => "plan_update",
+            Self::ModelTurnBudget => "model_turn_budget",
         }
     }
 }
@@ -172,9 +174,20 @@ const SEARCH_ARGUMENT_SCHEMA: &str = r#"{
 const APPLY_PATCH_ARGUMENT_SCHEMA: &str = r#"{
   "type": "object",
   "additionalProperties": false,
-  "required": ["unifiedDiff", "expectedFiles"],
+  "required": ["expectedFiles"],
   "properties": {
     "unifiedDiff": { "type": "string", "minLength": 1 },
+    "payloadRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["run_file"] },
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "minLength": 64 },
+        "sizeBytes": { "type": "integer", "minimum": 0 }
+      }
+    },
     "expectedFiles": {
       "type": "array",
       "minItems": 1,
@@ -244,6 +257,12 @@ const PLAN_UPDATE_ARGUMENT_SCHEMA: &str = r#"{
   }
 }"#;
 
+const MODEL_TURN_BUDGET_ARGUMENT_SCHEMA: &str = r#"{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {}
+}"#;
+
 pub const BUILTIN_TOOLS: &[ToolDefinition] = &[
     ToolDefinition::new(
         ToolName::WorkspaceManifest,
@@ -276,14 +295,14 @@ pub const BUILTIN_TOOLS: &[ToolDefinition] = &[
         ToolName::ApplyPatch,
         "Apply a unified diff patch.",
         RiskLevel::Write,
-        ApprovalRequirement::Required,
+        ApprovalRequirement::None,
         ToolImplementationStatus::ExecutorImplemented,
         APPLY_PATCH_ARGUMENT_SCHEMA,
         STATUS_RESULT_SCHEMA,
     ),
     ToolDefinition::new(
         ToolName::Shell,
-        "Execute a non-interactive shell command.",
+        "Execute a non-interactive shell command from the selected workspace-relative cwd; use cwd instead of embedding cd into command.",
         RiskLevel::Exec,
         ApprovalRequirement::Required,
         ToolImplementationStatus::ExecutorImplemented,
@@ -324,6 +343,15 @@ pub const BUILTIN_TOOLS: &[ToolDefinition] = &[
         ApprovalRequirement::None,
         ToolImplementationStatus::SchemaOnly,
         PLAN_UPDATE_ARGUMENT_SCHEMA,
+        STATUS_RESULT_SCHEMA,
+    ),
+    ToolDefinition::new(
+        ToolName::ModelTurnBudget,
+        "Approve continuing an agent turn after the provider-turn budget window is exhausted.",
+        RiskLevel::Exec,
+        ApprovalRequirement::Required,
+        ToolImplementationStatus::SchemaOnly,
+        MODEL_TURN_BUDGET_ARGUMENT_SCHEMA,
         STATUS_RESULT_SCHEMA,
     ),
 ];
@@ -591,28 +619,74 @@ mod tests {
     use crate::approval::{ALL_RISK_LEVELS, ApprovalRequirement, RiskLevel};
 
     #[test]
-    fn all_builtin_tools_have_matching_default_approval() {
-        for tool in BUILTIN_TOOLS {
-            assert_eq!(
-                tool.approval,
-                tool.risk.default_approval(),
-                "tool {} has mismatched approval requirement",
-                tool.name.as_str()
-            );
-        }
-    }
-
-    #[test]
-    fn write_and_exec_tools_require_approval() {
+    fn builtin_tools_have_explicit_approval_requirements() {
         let apply_patch = find_builtin_tool(ToolName::ApplyPatch.as_str())
             .expect("apply_patch tool must be registered");
         let shell =
             find_builtin_tool(ToolName::Shell.as_str()).expect("shell tool must be registered");
 
         assert_eq!(apply_patch.risk, RiskLevel::Write);
-        assert_eq!(apply_patch.approval, ApprovalRequirement::Required);
+        assert_eq!(apply_patch.approval, ApprovalRequirement::None);
         assert_eq!(shell.risk, RiskLevel::Exec);
         assert_eq!(shell.approval, ApprovalRequirement::Required);
+    }
+
+    #[test]
+    fn builtin_tool_approval_requirements_stay_within_supported_risk_constraints() {
+        for tool in BUILTIN_TOOLS {
+            if tool.risk == RiskLevel::Read {
+                assert_eq!(
+                    tool.approval,
+                    ApprovalRequirement::None,
+                    "read-only tool `{}` must not require approval",
+                    tool.name.as_str()
+                );
+            }
+
+            if tool.approval == ApprovalRequirement::Required {
+                assert_ne!(
+                    tool.risk,
+                    RiskLevel::Read,
+                    "approval-required tool `{}` needs a non-read risk",
+                    tool.name.as_str()
+                );
+            }
+
+            if tool.approval == ApprovalRequirement::AlwaysRequired {
+                assert_eq!(
+                    tool.risk,
+                    RiskLevel::Destructive,
+                    "always-required tool `{}` must be destructive",
+                    tool.name.as_str()
+                );
+            }
+
+            if tool.risk == RiskLevel::Destructive {
+                assert_eq!(
+                    tool.approval,
+                    ApprovalRequirement::AlwaysRequired,
+                    "destructive tool `{}` must always require approval",
+                    tool.name.as_str()
+                );
+            }
+
+            if matches!(tool.risk, RiskLevel::Exec | RiskLevel::Network) {
+                assert!(
+                    tool.approval.is_required(),
+                    "exec/network tool `{}` must require approval",
+                    tool.name.as_str()
+                );
+            }
+
+            if tool.risk == RiskLevel::Write && tool.approval == ApprovalRequirement::None {
+                assert_eq!(
+                    tool.name,
+                    ToolName::ApplyPatch,
+                    "write tool `{}` needs an explicit safety review before approval override",
+                    tool.name.as_str()
+                );
+            }
+        }
     }
 
     #[test]
@@ -667,6 +741,26 @@ mod tests {
 
         assert_eq!(error.path(), "$.expectedFiles");
         assert!(error.detail().contains("expected array"));
+    }
+
+    #[test]
+    fn apply_patch_schema_accepts_run_scoped_payload_refs() {
+        let apply_patch = find_builtin_tool(ToolName::ApplyPatch.as_str())
+            .expect("apply_patch tool must be registered");
+
+        validate_tool_arguments(
+            apply_patch,
+            &json!({
+                "payloadRef": {
+                    "kind": "run_file",
+                    "path": "payloads/apply_patch/patch.diff",
+                    "sha256": "0".repeat(64),
+                    "sizeBytes": 1024,
+                },
+                "expectedFiles": ["README.md"],
+            }),
+        )
+        .expect("payloadRef apply_patch arguments should pass schema validation");
     }
 
     #[test]

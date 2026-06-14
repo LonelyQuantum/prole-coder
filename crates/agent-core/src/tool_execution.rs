@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    ffi::OsStr,
     fs, io,
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -535,6 +536,10 @@ impl WorkspaceToolExecutor {
     fn resolve_workspace_path(&self, relative: &str) -> Result<PathBuf, ToolExecutionError> {
         let normalized = normalize_workspace_relative_path(relative)?;
         reject_sensitive_path(&normalized)?;
+        if normalized == "." {
+            return Ok(self.root.clone());
+        }
+
         let path = self.root.join(Path::new(&normalized));
         let parent = path.parent().unwrap_or(&self.root);
         let canonical_parent =
@@ -556,6 +561,10 @@ impl WorkspaceToolExecutor {
         relative: &str,
     ) -> Result<PathBuf, ToolExecutionError> {
         let path = self.resolve_workspace_path(relative)?;
+        if path == self.root {
+            return Ok(self.root.clone());
+        }
+
         let canonical = fs::canonicalize(&path).map_err(|source| ToolExecutionError::Io {
             path: path.clone(),
             source,
@@ -835,9 +844,32 @@ fn run_shell_command(
 ) -> Result<CommandOutput, ToolExecutionError> {
     #[cfg(windows)]
     {
+        let user_command = powershell_single_quoted_literal(command);
+        let script = format!(
+            concat!(
+                "$utf8 = New-Object System.Text.UTF8Encoding $false; ",
+                "[Console]::InputEncoding = $utf8; ",
+                "[Console]::OutputEncoding = $utf8; ",
+                "$OutputEncoding = $utf8; ",
+                "$ErrorActionPreference = 'Stop'; ",
+                "$ProgressPreference = 'SilentlyContinue'; ",
+                "try {{ Invoke-Expression -Command {user_command}; $proleSuccess = $? }} ",
+                "catch {{ [Console]::Error.WriteLine($_.ToString()); exit 1 }}; ",
+                "$proleSuccess = $?; ",
+                "if ($global:LASTEXITCODE -ne $null) {{ exit $global:LASTEXITCODE }}; ",
+                "if (-not $proleSuccess) {{ exit 1 }}"
+            ),
+            user_command = user_command
+        );
+        let encoded_script = encode_powershell_command(&script);
         run_command(
             "powershell",
-            ["-NoProfile", "-NonInteractive", "-Command", command],
+            vec![
+                "-NoProfile".to_owned(),
+                "-NonInteractive".to_owned(),
+                "-EncodedCommand".to_owned(),
+                encoded_script,
+            ],
             cwd,
             timeout,
             cancellation_token,
@@ -850,13 +882,43 @@ fn run_shell_command(
     }
 }
 
-fn run_command<'a>(
+#[cfg(windows)]
+fn powershell_single_quoted_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('\'');
+    for character in value.chars() {
+        if character == '\'' {
+            escaped.push_str("''");
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped.push('\'');
+    escaped
+}
+
+#[cfg(windows)]
+fn encode_powershell_command(script: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let mut bytes = Vec::with_capacity(script.len() * 2);
+    for code_unit in script.encode_utf16() {
+        bytes.extend_from_slice(&code_unit.to_le_bytes());
+    }
+    STANDARD.encode(bytes)
+}
+
+fn run_command<I, S>(
     program: &str,
-    args: impl IntoIterator<Item = &'a str>,
+    args: I,
     cwd: &Path,
     timeout: Duration,
     cancellation_token: &CancellationToken,
-) -> Result<CommandOutput, ToolExecutionError> {
+) -> Result<CommandOutput, ToolExecutionError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     check_canceled(cancellation_token, program)?;
     let start = Instant::now();
     let mut command = Command::new(program);
@@ -899,10 +961,12 @@ fn run_command<'a>(
                         program: program.to_owned(),
                         source,
                     })?;
+            let stdout = sanitize_command_output(&output.stdout);
+            let stderr = sanitize_command_output(&output.stderr);
             return Ok(CommandOutput {
                 exit_code: output.status.code(),
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                stdout,
+                stderr,
                 duration_ms: start.elapsed().as_millis(),
             });
         }
@@ -917,6 +981,87 @@ fn run_command<'a>(
 
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn sanitize_command_output(output: &[u8]) -> String {
+    String::from_utf8_lossy(&strip_powershell_progress_clixml_bytes(output)).into_owned()
+}
+
+#[cfg(test)]
+fn strip_powershell_progress_clixml(text: &str) -> String {
+    String::from_utf8_lossy(&strip_powershell_progress_clixml_bytes(text.as_bytes())).into_owned()
+}
+
+fn strip_powershell_progress_clixml_bytes(output: &[u8]) -> Vec<u8> {
+    const MARKER: &[u8] = b"#< CLIXML";
+    const OBJS_START: &[u8] = b"<Objs ";
+    const END: &[u8] = b"</Objs>";
+    const PROGRESS: &[u8] = b"S=\"progress\"";
+    const ERROR: &[u8] = b"S=\"Error\"";
+
+    if !contains_bytes(output, MARKER) {
+        return output.to_vec();
+    }
+
+    let mut result = Vec::with_capacity(output.len());
+    let mut remaining = output;
+    while let Some(start) = find_bytes(remaining, MARKER) {
+        result.extend_from_slice(&remaining[..start]);
+        let after_marker = &remaining[start + MARKER.len()..];
+        let after_marker_newline = strip_one_line_break_bytes(after_marker);
+        if !trim_start_ascii(after_marker_newline).starts_with(OBJS_START) {
+            result.extend_from_slice(MARKER);
+            remaining = after_marker;
+            continue;
+        }
+
+        let Some(end) = find_bytes(after_marker_newline, END) else {
+            result.extend_from_slice(MARKER);
+            result.extend_from_slice(after_marker);
+            remaining = &[];
+            break;
+        };
+        let block_end = end + END.len();
+        let block = &after_marker_newline[..block_end];
+        if contains_bytes(block, PROGRESS) && !contains_bytes(block, ERROR) {
+            remaining = strip_one_line_break_bytes(&after_marker_newline[block_end..]);
+        } else {
+            result.extend_from_slice(MARKER);
+            result.extend_from_slice(after_marker);
+            remaining = &[];
+            break;
+        }
+    }
+    result.extend_from_slice(remaining);
+    result
+}
+
+fn strip_one_line_break_bytes(bytes: &[u8]) -> &[u8] {
+    bytes
+        .strip_prefix(b"\r\n")
+        .or_else(|| bytes.strip_prefix(b"\n"))
+        .unwrap_or(bytes)
+}
+
+fn trim_start_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    &bytes[start..]
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    find_bytes(haystack, needle).is_some()
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 #[cfg(unix)]
@@ -1656,12 +1801,24 @@ mod tests {
     use super::{
         ApplyPatchArgs, GitDiffArgs, GitStatusArgs, ReadFileArgs, SearchArgs, ShellArgs,
         ShellResult, ToolExecutionError, ToolStatus, WorkspaceManifestArgs, WorkspaceToolExecutor,
-        redacted_tool_result_value,
+        redacted_tool_result_value, sanitize_command_output, strip_powershell_progress_clixml,
     };
     use crate::cancellation::CancellationToken;
     use crate::hashing::sha256_hex;
     use crate::run_log::{REDACTED_VALUE, RUN_LOG_MAX_STRING_BYTES};
     use crate::test_helpers::TestWorkspace;
+    use std::path::Path;
+
+    fn wait_for_test_marker(path: &Path, timeout: std::time::Duration) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        path.exists()
+    }
 
     #[test]
     fn sha256_hex_matches_known_vectors() {
@@ -1961,6 +2118,113 @@ mod tests {
     }
 
     #[test]
+    fn shell_accepts_dot_cwd_as_workspace_root() {
+        let workspace = TestWorkspace::new("tool-execution");
+        let tools = WorkspaceToolExecutor::new(workspace.path()).expect("workspace should open");
+
+        #[cfg(windows)]
+        let command = "Write-Output hello";
+        #[cfg(not(windows))]
+        let command = "printf hello";
+
+        let result = tools
+            .shell(ShellArgs {
+                command: command.to_owned(),
+                cwd: Some(".".to_owned()),
+                timeout_ms: Some(10_000),
+            })
+            .expect("dot cwd should resolve to the workspace root");
+
+        assert_eq!(result.status, ToolStatus::Ok);
+        assert!(result.stdout.contains("hello"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_decodes_windows_powershell_stderr_as_utf8() {
+        let workspace = TestWorkspace::new("tool-execution");
+        let tools = WorkspaceToolExecutor::new(workspace.path()).expect("workspace should open");
+
+        let result = tools
+            .shell(ShellArgs {
+                command: "[Console]::Error.WriteLine('错误信息'); exit 1".to_owned(),
+                cwd: None,
+                timeout_ms: Some(10_000),
+            })
+            .expect("shell should return failed command output");
+
+        assert_eq!(result.status, ToolStatus::Failed);
+        assert!(
+            result.stderr.contains("错误信息"),
+            "stderr was {:?}",
+            result.stderr
+        );
+        assert!(!result.stderr.contains('\u{fffd}'));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_decodes_windows_powershell_parser_errors_as_utf8() {
+        let workspace = TestWorkspace::new("tool-execution");
+        let tools = WorkspaceToolExecutor::new(workspace.path()).expect("workspace should open");
+
+        let result = tools
+            .shell(ShellArgs {
+                command: "cd /home/user/ledger && npm test".to_owned(),
+                cwd: Some(".".to_owned()),
+                timeout_ms: Some(10_000),
+            })
+            .expect("shell should return parser error output");
+
+        assert_eq!(result.status, ToolStatus::Failed);
+        assert!(
+            result.stderr.contains("&&"),
+            "stderr was {:?}",
+            result.stderr
+        );
+        assert!(!result.stderr.contains('\u{fffd}'));
+    }
+
+    #[test]
+    fn command_output_strips_powershell_progress_clixml_noise() {
+        let clixml = concat!(
+            "#< CLIXML\r\n",
+            "<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">",
+            "<Obj S=\"progress\" RefId=\"0\"><MS><PR N=\"Record\"><AV>Preparing modules for first use.</AV>",
+            "</PR></MS></Obj></Objs>\r\n",
+            "real stderr\r\n",
+        );
+
+        assert_eq!(strip_powershell_progress_clixml(clixml), "real stderr\r\n");
+    }
+
+    #[test]
+    fn command_output_strips_powershell_progress_clixml_with_non_utf8_payload() {
+        let mut clixml = concat!(
+            "#< CLIXML\r\n",
+            "<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">",
+            "<Obj S=\"progress\" RefId=\"0\"><MS><PR N=\"Record\"><AV>"
+        )
+        .as_bytes()
+        .to_vec();
+        clixml.extend_from_slice(&[0xff, 0xfe, 0xfd]);
+        clixml.extend_from_slice(b"</AV></PR></MS></Obj></Objs>\r\nreal stderr\r\n");
+
+        assert_eq!(sanitize_command_output(&clixml), "real stderr\r\n");
+    }
+
+    #[test]
+    fn command_output_preserves_powershell_error_clixml() {
+        let clixml = concat!(
+            "#< CLIXML\r\n",
+            "<Objs Version=\"1.1.0.1\" xmlns=\"http://schemas.microsoft.com/powershell/2004/04\">",
+            "<Obj S=\"Error\" RefId=\"0\"><MS><S N=\"Exception\">real error</S></MS></Obj></Objs>\r\n",
+        );
+
+        assert_eq!(strip_powershell_progress_clixml(clixml), clixml);
+    }
+
+    #[test]
     fn shell_cancels_running_command() {
         let workspace = TestWorkspace::new("tool-execution");
         let tools = WorkspaceToolExecutor::new(workspace.path()).expect("workspace should open");
@@ -2000,27 +2264,38 @@ mod tests {
         let tools = WorkspaceToolExecutor::new(workspace.path()).expect("workspace should open");
         let cancellation_token = CancellationToken::new();
         let cancel_from_thread = cancellation_token.clone();
+        let ready_marker = workspace.path().join("tree-ready.txt");
+        let ready_marker_for_thread = ready_marker.clone();
         let cancel_thread = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert!(
+                wait_for_test_marker(&ready_marker_for_thread, std::time::Duration::from_secs(10)),
+                "descendant process did not report ready before cancellation"
+            );
             cancel_from_thread.cancel("stop process tree");
         });
 
         #[cfg(windows)]
-        let command = r#"cmd /C "ping -n 4 127.0.0.1 > nul && echo alive>tree-marker.txt""#;
+        let command = concat!(
+            "$child = Start-Process -FilePath powershell ",
+            "-ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 4; Set-Content -LiteralPath tree-marker.txt -Value alive' ",
+            "-WorkingDirectory . -PassThru; ",
+            "Set-Content -LiteralPath tree-ready.txt -Value ready; ",
+            "Wait-Process -Id $child.Id"
+        );
         #[cfg(not(windows))]
-        let command = "(sleep 3; printf alive > tree-marker.txt) & wait";
+        let command =
+            "(printf ready > tree-ready.txt; sleep 3; printf alive > tree-marker.txt) & wait";
 
-        let error = tools
-            .shell_with_cancellation(
-                ShellArgs {
-                    command: command.to_owned(),
-                    cwd: None,
-                    timeout_ms: Some(10_000),
-                },
-                &cancellation_token,
-            )
-            .expect_err("shell process tree should be canceled");
+        let result = tools.shell_with_cancellation(
+            ShellArgs {
+                command: command.to_owned(),
+                cwd: None,
+                timeout_ms: Some(10_000),
+            },
+            &cancellation_token,
+        );
         cancel_thread.join().expect("cancel thread should join");
+        let error = result.expect_err("shell process tree should be canceled");
 
         assert!(matches!(
             error,

@@ -61,9 +61,9 @@ test("automatic context can be built from sidebar timeline snapshots", () => {
         time: "1970-01-01T00:00:00.000Z",
         type: "turn.started",
         runId: "run_1",
-        kind: "turn",
-        tone: "running",
-        title: "Turn started",
+        kind: "user",
+        tone: "neutral",
+        title: "You",
         body: "Fix README",
       },
       {
@@ -75,7 +75,7 @@ test("automatic context can be built from sidebar timeline snapshots", () => {
         runId: "run_1",
         kind: "assistant",
         tone: "neutral",
-        title: "Assistant",
+        title: "DeepSeek",
         body: "README updated.",
       },
     ],
@@ -83,6 +83,43 @@ test("automatic context can be built from sidebar timeline snapshots", () => {
 
   assert.ok(attachment?.text?.includes("Fix README"));
   assert.ok(attachment?.text?.includes("README updated."));
+});
+
+test("automatic context skips superseded sidebar user messages", () => {
+  const attachment = automaticContextAttachmentFromTimeline({
+    eventCount: 2,
+    latestRunId: "run_1",
+    supersededItemIds: ["run_1:1"],
+    items: [
+      {
+        id: "run_1:1",
+        seq: 1,
+        lastSeq: 1,
+        time: "1970-01-01T00:00:00.000Z",
+        type: "turn.started",
+        runId: "run_1",
+        kind: "user",
+        tone: "neutral",
+        title: "You",
+        body: "Old request",
+      },
+      {
+        id: "run_1:2",
+        seq: 2,
+        lastSeq: 2,
+        time: "1970-01-01T00:00:01.000Z",
+        type: "turn.started",
+        runId: "run_1",
+        kind: "user",
+        tone: "neutral",
+        title: "You",
+        body: "Edited request",
+      },
+    ],
+  });
+
+  assert.ok(attachment?.text?.includes("Edited request"));
+  assert.equal(attachment?.text?.includes("Old request"), false);
 });
 
 test("automatic context caps oversized sidebar timeline messages before compression", () => {

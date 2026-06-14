@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, env, fmt, pin::Pin, str, time::Duration};
+use std::{
+    collections::BTreeMap, env, error::Error as StdError, fmt, pin::Pin, str, time::Duration,
+};
 
 use futures_util::{Stream, StreamExt};
 use reqwest::StatusCode;
@@ -13,6 +15,7 @@ pub const DEFAULT_MODEL: &str = DeepSeekModelId::V4_PRO;
 const CHAT_COMPLETIONS_PATH: &str = "chat/completions";
 const FIM_COMPLETIONS_PATH: &str = "completions";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
+const DEFAULT_HTTP_SEND_ATTEMPTS: usize = 3;
 const FIM_MAX_TOKENS_LIMIT: u32 = 4096;
 
 #[derive(Debug, Error)]
@@ -40,8 +43,12 @@ pub enum DeepSeekApiError {
     ToolChoiceUnsupportedWithThinking,
     #[error("non-stream chat completion call received a streaming request")]
     StreamingRequestInNonStreamCall,
-    #[error("DeepSeek API request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    #[error("DeepSeek API request failed: {details}")]
+    Http {
+        details: String,
+        #[source]
+        source: reqwest::Error,
+    },
     #[error("DeepSeek API returned HTTP {status}: {body}")]
     Api { status: StatusCode, body: String },
     #[error("DeepSeek API JSON response is invalid: {source}; body: {body}")]
@@ -58,6 +65,31 @@ pub enum DeepSeekApiError {
     InvalidStreamUtf8(#[from] str::Utf8Error),
     #[error("DeepSeek stream ended with an incomplete SSE event ({buffered_bytes} buffered bytes)")]
     IncompleteStreamEvent { buffered_bytes: usize },
+}
+
+impl DeepSeekApiError {
+    fn http(source: reqwest::Error) -> Self {
+        Self::http_after_send_attempts(source, 1)
+    }
+
+    fn http_after_send_attempts(source: reqwest::Error, attempts: usize) -> Self {
+        let mut details = format_reqwest_error(&source);
+        if attempts > 1 {
+            details.push_str(&format!("; retry attempts exhausted: {attempts}"));
+        }
+
+        Self::Http { details, source }
+    }
+
+    pub fn is_transient_transport_error(&self) -> bool {
+        match self {
+            Self::Http { source, .. } => {
+                retryable_send_error(source) || source.is_body() || source.is_decode()
+            }
+            Self::IncompleteStreamEvent { .. } => true,
+            _ => false,
+        }
+    }
 }
 
 pub type ChatCompletionStream =
@@ -107,6 +139,8 @@ pub struct DeepSeekApiConfig {
     base_url: Url,
     model: DeepSeekModelId,
     timeout: Duration,
+    http_send_attempts: usize,
+    use_system_proxy: bool,
 }
 
 impl DeepSeekApiConfig {
@@ -138,6 +172,8 @@ impl DeepSeekApiConfig {
             base_url,
             model: DeepSeekModelId::new(model)?,
             timeout: DEFAULT_TIMEOUT,
+            http_send_attempts: DEFAULT_HTTP_SEND_ATTEMPTS,
+            use_system_proxy: true,
         })
     }
 
@@ -163,6 +199,16 @@ impl DeepSeekApiConfig {
         self
     }
 
+    pub fn with_http_send_attempts(mut self, attempts: usize) -> Self {
+        self.http_send_attempts = attempts.max(1);
+        self
+    }
+
+    pub fn without_system_proxy(mut self) -> Self {
+        self.use_system_proxy = false;
+        self
+    }
+
     pub fn base_url(&self) -> &Url {
         &self.base_url
     }
@@ -173,6 +219,14 @@ impl DeepSeekApiConfig {
 
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    pub fn http_send_attempts(&self) -> usize {
+        self.http_send_attempts
+    }
+
+    pub fn use_system_proxy(&self) -> bool {
+        self.use_system_proxy
     }
 
     fn endpoint(&self, path: &str) -> Result<Url, DeepSeekApiError> {
@@ -200,6 +254,8 @@ impl fmt::Debug for DeepSeekApiConfig {
             .field("base_url", &self.base_url)
             .field("model", &self.model)
             .field("timeout", &self.timeout)
+            .field("http_send_attempts", &self.http_send_attempts)
+            .field("use_system_proxy", &self.use_system_proxy)
             .finish()
     }
 }
@@ -212,9 +268,11 @@ pub struct DeepSeekApiAdapter {
 
 impl DeepSeekApiAdapter {
     pub fn new(config: DeepSeekApiConfig) -> Result<Self, DeepSeekApiError> {
-        let client = reqwest::Client::builder()
-            .timeout(config.timeout())
-            .build()?;
+        let mut client = reqwest::Client::builder().timeout(config.timeout());
+        if !config.use_system_proxy() {
+            client = client.no_proxy();
+        }
+        let client = client.build().map_err(DeepSeekApiError::http)?;
 
         Ok(Self { client, config })
     }
@@ -240,11 +298,7 @@ impl DeepSeekApiAdapter {
         }
 
         let response = self
-            .client
-            .post(self.config.endpoint(CHAT_COMPLETIONS_PATH)?)
-            .bearer_auth(&self.config.api_key)
-            .json(&request)
-            .send()
+            .send_json_with_retries(CHAT_COMPLETIONS_PATH, &request)
             .await?;
 
         decode_chat_completion_response(response).await
@@ -258,11 +312,7 @@ impl DeepSeekApiAdapter {
         request.validate_for_deepseek()?;
 
         let response = self
-            .client
-            .post(self.config.endpoint(CHAT_COMPLETIONS_PATH)?)
-            .bearer_auth(&self.config.api_key)
-            .json(&request)
-            .send()
+            .send_json_with_retries(CHAT_COMPLETIONS_PATH, &request)
             .await?;
 
         decode_chat_completion_stream(response).await
@@ -274,14 +324,46 @@ impl DeepSeekApiAdapter {
     ) -> Result<FimCompletionResponse, DeepSeekApiError> {
         request.validate_for_deepseek()?;
         let response = self
-            .client
-            .post(self.config.endpoint(FIM_COMPLETIONS_PATH)?)
-            .bearer_auth(&self.config.api_key)
-            .json(&request)
-            .send()
+            .send_json_with_retries(FIM_COMPLETIONS_PATH, &request)
             .await?;
 
         decode_fim_completion_response(response).await
+    }
+
+    async fn send_json_with_retries<T>(
+        &self,
+        path: &str,
+        request: &T,
+    ) -> Result<reqwest::Response, DeepSeekApiError>
+    where
+        T: Serialize + ?Sized,
+    {
+        let endpoint = self.config.endpoint(path)?;
+        let attempts = self.config.http_send_attempts();
+
+        for attempt in 1..=attempts {
+            let result = self
+                .client
+                .post(endpoint.clone())
+                .bearer_auth(&self.config.api_key)
+                .json(request)
+                .send()
+                .await;
+
+            match result {
+                Ok(response) => return Ok(response),
+                Err(source) => {
+                    let retryable = retryable_send_error(&source);
+                    if retryable && attempt < attempts {
+                        continue;
+                    }
+
+                    return Err(DeepSeekApiError::http_after_send_attempts(source, attempt));
+                }
+            }
+        }
+
+        unreachable!("send attempts loop always returns")
     }
 }
 
@@ -289,7 +371,7 @@ async fn decode_chat_completion_response(
     response: reqwest::Response,
 ) -> Result<ChatCompletionResponse, DeepSeekApiError> {
     let status = response.status();
-    let body = response.text().await?;
+    let body = response.text().await.map_err(DeepSeekApiError::http)?;
 
     if !status.is_success() {
         return Err(DeepSeekApiError::Api { status, body });
@@ -302,7 +384,7 @@ async fn decode_fim_completion_response(
     response: reqwest::Response,
 ) -> Result<FimCompletionResponse, DeepSeekApiError> {
     let status = response.status();
-    let body = response.text().await?;
+    let body = response.text().await.map_err(DeepSeekApiError::http)?;
     if !status.is_success() {
         return Err(DeepSeekApiError::Api { status, body });
     }
@@ -315,7 +397,7 @@ async fn decode_chat_completion_stream(
 ) -> Result<ChatCompletionStream, DeepSeekApiError> {
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await?;
+        let body = response.text().await.map_err(DeepSeekApiError::http)?;
         return Err(DeepSeekApiError::Api { status, body });
     }
 
@@ -325,7 +407,7 @@ async fn decode_chat_completion_stream(
         let mut parser = SseEventParser::new();
 
         while let Some(chunk) = byte_stream.next().await {
-            let chunk = chunk?;
+            let chunk = chunk.map_err(DeepSeekApiError::http)?;
             for event in parser.push_bytes(&chunk)? {
                 let done = event == StreamEvent::Done;
                 yield event;
@@ -340,6 +422,80 @@ async fn decode_chat_completion_stream(
             yield event;
         }
     }))
+}
+
+fn format_reqwest_error(error: &reqwest::Error) -> String {
+    let mut details = Vec::new();
+    details.push(redact_url_credentials(&error.to_string()));
+
+    let mut kinds = Vec::new();
+    if error.is_timeout() {
+        kinds.push("timeout");
+    }
+    if error.is_connect() {
+        kinds.push("connect");
+    }
+    if error.is_request() {
+        kinds.push("request");
+    }
+    if error.is_body() {
+        kinds.push("body");
+    }
+    if error.is_decode() {
+        kinds.push("decode");
+    }
+    if !kinds.is_empty() {
+        details.push(format!("kind: {}", kinds.join("/")));
+    }
+    if let Some(status) = error.status() {
+        details.push(format!("status: {status}"));
+    }
+
+    let mut source = StdError::source(error);
+    while let Some(cause) = source {
+        let cause_message = redact_url_credentials(&cause.to_string());
+        if !cause_message.is_empty() && !details.iter().any(|detail| detail == &cause_message) {
+            details.push(format!("caused by: {cause_message}"));
+        }
+        source = StdError::source(cause);
+    }
+
+    details.join("; ")
+}
+
+fn retryable_send_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_request()
+}
+
+fn redact_url_credentials(message: &str) -> String {
+    let mut result = String::with_capacity(message.len());
+    let mut rest = message;
+
+    while let Some(scheme_index) = rest.find("://") {
+        let authority_start = scheme_index + "://".len();
+        result.push_str(&rest[..authority_start]);
+        let after_scheme = &rest[authority_start..];
+        let authority_end = after_scheme
+            .find(|character: char| {
+                character == '/'
+                    || character == '\\'
+                    || character == '?'
+                    || character == '#'
+                    || character.is_whitespace()
+            })
+            .unwrap_or(after_scheme.len());
+        let authority = &after_scheme[..authority_end];
+        if let Some((_, host)) = authority.rsplit_once('@') {
+            result.push_str("[redacted]@");
+            result.push_str(host);
+        } else {
+            result.push_str(authority);
+        }
+        rest = &after_scheme[authority_end..];
+    }
+
+    result.push_str(rest);
+    result
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1115,12 +1271,23 @@ pub fn parse_stream_event_block(block: &str) -> Result<Option<StreamEvent>, Deep
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+        time::Duration,
+    };
+
     use super::{
         ChatCompletionRequest, ChatFunctionCallDelta, ChatMessage, ChatTool, ChatToolCall,
         ChatToolCallAccumulator, ChatToolCallAccumulatorError, ChatToolCallDelta, ChatToolType,
-        DeepSeekApiConfig, DeepSeekApiError, DeepSeekModelId, FimCompletionRequest,
-        ReasoningEffort, SseEventParser, StreamEvent, StreamOptions, ThinkingConfig, ToolChoice,
-        parse_stream_event_block,
+        DeepSeekApiAdapter, DeepSeekApiConfig, DeepSeekApiError, DeepSeekModelId,
+        FimCompletionRequest, ReasoningEffort, SseEventParser, StreamEvent, StreamOptions,
+        ThinkingConfig, ToolChoice, parse_stream_event_block, redact_url_credentials,
     };
 
     #[test]
@@ -1172,6 +1339,43 @@ mod tests {
     }
 
     #[test]
+    fn request_error_formatting_redacts_url_credentials() {
+        assert_eq!(
+            redact_url_credentials(
+                "proxy failed at https://user:secret@example.test:8443/path and http://plain.test"
+            ),
+            "proxy failed at https://[redacted]@example.test:8443/path and http://plain.test"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_completion_retries_transient_send_errors() {
+        let (base_url, attempts, server) = spawn_retry_fixture_server();
+        let config = DeepSeekApiConfig::new("test-api-key", base_url, DeepSeekModelId::V4_PRO)
+            .expect("config should be valid")
+            .with_http_send_attempts(2)
+            .without_system_proxy();
+        let adapter = DeepSeekApiAdapter::new(config).expect("adapter should be created");
+        let request = ChatCompletionRequest::new(
+            DeepSeekModelId::new(DeepSeekModelId::V4_PRO).expect("model should be valid"),
+            vec![ChatMessage::user("hello")],
+        )
+        .expect("request should be valid");
+
+        let response = adapter
+            .create_chat_completion(request)
+            .await
+            .expect("second send attempt should succeed");
+
+        server.join().expect("fixture server should finish");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            response.choices[0].message.content.as_deref(),
+            Some("retry-ok")
+        );
+    }
+
+    #[test]
     fn fim_request_serializes_prefix_suffix_and_non_streaming_default() {
         let request = FimCompletionRequest::new(
             DeepSeekModelId::new(DeepSeekModelId::V4_PRO).expect("model should be valid"),
@@ -1188,6 +1392,59 @@ mod tests {
         assert_eq!(json["suffix"], "}");
         assert_eq!(json["max_tokens"], 32);
         assert_eq!(json["stream"], false);
+    }
+
+    fn spawn_retry_fixture_server() -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fixture listener should bind");
+        let base_url = format!(
+            "http://{}",
+            listener
+                .local_addr()
+                .expect("fixture listener should have an address")
+        );
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempt_counter = Arc::clone(&attempts);
+
+        let handle = thread::spawn(move || {
+            for attempt in 1..=2 {
+                let (mut stream, _) = listener.accept().expect("fixture connection should arrive");
+                attempt_counter.fetch_add(1, Ordering::SeqCst);
+
+                if attempt == 1 {
+                    drop(stream);
+                    continue;
+                }
+
+                read_http_request(&mut stream);
+                let body = r#"{"id":"chatcmpl-test","choices":[{"index":0,"message":{"role":"assistant","content":"retry-ok"},"finish_reason":"stop"}],"created":1,"model":"deepseek-v4-pro","object":"chat.completion","usage":null,"system_fingerprint":null}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("fixture response should write");
+            }
+        });
+
+        (base_url, attempts, handle)
+    }
+
+    fn read_http_request(stream: &mut TcpStream) {
+        let mut buffer = [0_u8; 4096];
+        let mut received = Vec::new();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("fixture read timeout should be set");
+
+        while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => received.extend_from_slice(&buffer[..count]),
+                Err(_) => break,
+            }
+        }
     }
 
     #[test]

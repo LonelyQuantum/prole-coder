@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   RUN_LIST_LIMIT,
+  deletedRunList,
   failedRunList,
   idleRunList,
   isRefreshRunsMessage,
+  deleteRunIdFromMessage,
   loadingRunList,
   readyRunList,
   resumeRunIdFromMessage,
@@ -40,13 +42,32 @@ test("run history ready snapshots only keep a selected run that still exists", (
   });
 });
 
+test("run history delete snapshots remove runs and keep valid selections", () => {
+  const ready = readyRunList(
+    { runs: [runSummary("run_1"), runSummary("run_2"), runSummary("run_3")] },
+    "run_2",
+  );
+
+  assert.deepEqual(deletedRunList(ready, "run_1", "Deleted run_1."), {
+    status: "ready",
+    runs: [runSummary("run_2"), runSummary("run_3")],
+    selectedRunId: "run_2",
+    message: "Deleted run_1.",
+  });
+  assert.deepEqual(deletedRunList(ready, "run_2", "Deleted run_2."), {
+    status: "ready",
+    runs: [runSummary("run_1"), runSummary("run_3")],
+    message: "Deleted run_2.",
+  });
+});
+
 test("run history leaves result limiting to the RPC server", () => {
   const runs = Array.from({ length: RUN_LIST_LIMIT + 1 }, (_, index) => runSummary(`run_${index}`));
 
   assert.equal(readyRunList({ runs }).runs.length, RUN_LIST_LIMIT + 1);
 });
 
-test("run history parses refresh and resume webview messages defensively", () => {
+test("run history parses refresh, resume, and delete webview messages defensively", () => {
   assert.equal(RUN_LIST_LIMIT, 20);
   assert.equal(isRefreshRunsMessage({ type: "refreshRuns" }), true);
   assert.equal(isRefreshRunsMessage({ type: "refreshRuns", runId: "run_1" }), true);
@@ -54,7 +75,11 @@ test("run history parses refresh and resume webview messages defensively", () =>
   assert.equal(resumeRunIdFromMessage({ type: "resumeRun", runId: " run_1 " }), "run_1");
   assert.equal(resumeRunIdFromMessage({ type: "resumeRun", runId: " " }), undefined);
   assert.equal(resumeRunIdFromMessage({ type: "resumeRun", runId: 1 }), undefined);
+  assert.equal(deleteRunIdFromMessage({ type: "deleteRun", runId: " run_1 " }), "run_1");
+  assert.equal(deleteRunIdFromMessage({ type: "deleteRun", runId: " " }), undefined);
+  assert.equal(deleteRunIdFromMessage({ type: "deleteRun", runId: 1 }), undefined);
   assert.equal(resumeRunIdFromMessage(idleRunList()), undefined);
+  assert.equal(deleteRunIdFromMessage(idleRunList()), undefined);
 });
 
 function runSummary(runId: string) {

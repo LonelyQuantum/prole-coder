@@ -3,6 +3,7 @@ export const PATCH_APPROVAL_EVENT_TYPE = "tool.approvalRequired";
 
 const APPLY_PATCH_TOOL_NAME = "apply_patch";
 const DEFAULT_MAX_PENDING_PATCHES = 50;
+const HUNK_DECLARED_COUNT_TOLERANCE = 5;
 
 export interface DisposableLike {
   dispose(): unknown;
@@ -16,6 +17,7 @@ export interface PatchPreviewEvent {
   readonly type: string;
   readonly runId: string;
   readonly turnId?: string;
+  readonly replay?: boolean;
   readonly payload: unknown;
 }
 
@@ -154,7 +156,11 @@ export class PatchDiffPreviewController implements DisposableLike {
   }
 
   prepareApproval(event: PatchPreviewEvent, request: PatchApprovalRequest): Promise<void> {
-    if (event.type !== PATCH_APPROVAL_EVENT_TYPE || request.toolName !== APPLY_PATCH_TOOL_NAME) {
+    if (
+      event.replay === true ||
+      event.type !== PATCH_APPROVAL_EVENT_TYPE ||
+      request.toolName !== APPLY_PATCH_TOOL_NAME
+    ) {
       return Promise.resolve();
     }
 
@@ -165,6 +171,10 @@ export class PatchDiffPreviewController implements DisposableLike {
   }
 
   private handleEvent(event: PatchPreviewEvent): void {
+    if (event.replay === true) {
+      return;
+    }
+
     if (event.type !== PATCH_PREVIEW_EVENT_TYPE) {
       return;
     }
@@ -314,6 +324,8 @@ export function parseUnifiedDiff(unifiedDiff: string): ParsedPatch {
       hunks.push({
         hunkIndex: hunks.length,
         ...header,
+        oldCount: parsed.oldCount,
+        newCount: parsed.newCount,
         lines: parsed.lines,
       });
       index = parsed.nextIndex;
@@ -421,16 +433,35 @@ function parseHunkLines(
   lines: readonly string[],
   startIndex: number,
   header: Omit<ParsedPatchHunk, "hunkIndex" | "lines">,
-): { readonly lines: readonly ParsedPatchLine[]; readonly nextIndex: number } {
+): {
+  readonly lines: readonly ParsedPatchLine[];
+  readonly nextIndex: number;
+  readonly oldCount: number;
+  readonly newCount: number;
+} {
   const hunkLines: ParsedPatchLine[] = [];
   let oldSeen = 0;
   let newSeen = 0;
   let index = startIndex;
 
-  while (oldSeen < header.oldCount || newSeen < header.newCount) {
+  while (index < lines.length) {
     const line = lines[index];
     if (line === undefined) {
-      throw new PatchPreviewError("patch ended before hunk was complete");
+      break;
+    }
+    const nextLine = lines[index + 1];
+    if (
+      line.startsWith("@@ ") ||
+      line.startsWith("diff --git ") ||
+      (line.startsWith("--- ") && nextLine !== undefined && nextLine.startsWith("+++ "))
+    ) {
+      break;
+    }
+    if (line.length === 0) {
+      if (index === lines.length - 1) {
+        break;
+      }
+      throw new PatchPreviewError("invalid blank patch line in hunk");
     }
     if (line.startsWith("\\ No newline at end of file")) {
       index += 1;
@@ -457,13 +488,20 @@ function parseHunkLines(
         throw new PatchPreviewError(`invalid patch line \`${line}\``);
     }
 
-    if (oldSeen > header.oldCount || newSeen > header.newCount) {
-      throw new PatchPreviewError("hunk contains more lines than declared");
-    }
     index += 1;
   }
 
-  return { lines: hunkLines, nextIndex: index };
+  if (hunkLines.length === 0) {
+    throw new PatchPreviewError("hunk has no patch lines");
+  }
+  if (
+    oldSeen > header.oldCount + HUNK_DECLARED_COUNT_TOLERANCE ||
+    newSeen > header.newCount + HUNK_DECLARED_COUNT_TOLERANCE
+  ) {
+    throw new PatchPreviewError("hunk contains too many more lines than declared");
+  }
+
+  return { lines: hunkLines, nextIndex: index, oldCount: oldSeen, newCount: newSeen };
 }
 
 function parseHunkHeader(line: string): Omit<ParsedPatchHunk, "hunkIndex" | "lines"> {

@@ -10,13 +10,54 @@ import {
 } from "./commands";
 import { createPatchDiffPreviewController } from "./diffPreview";
 import { registerFimInlineCompletionProvider } from "./fimPreviewVscode";
+import {
+  GENERATE_COMMIT_MESSAGE_COMMAND,
+  GENERATE_PR_DESCRIPTION_COMMAND,
+  generateCommitMessage,
+  generatePrDescription,
+} from "./gitWorkflow";
+import { createVscodeGitRepositoryProvider, createVscodeMarkdownSink } from "./gitWorkflowVscode";
+import { createOutputLogger } from "./logging";
+import { createExtensionNotifier, type ExtensionNotifier } from "./notifier";
+import {
+  registerProviderSecretCommands,
+  type SecretQuickPickController,
+  type SecretQuickPickItem,
+} from "./providerSecretCommands";
+import {
+  DEEPSEEK_API_KEY_STORE_SECRET_ID,
+  DEEPSEEK_API_KEY_SECRET_ID,
+  deepSeekEnvOverride,
+  providerSecretRedactionValues,
+  resolveDeepSeekApiKey,
+  resolveDeepSeekModel,
+} from "./providerSecrets";
+import { MutableSecretRedactor } from "./redaction";
 import { RpcServerManager, readRpcServerLaunchConfig } from "./rpcServer";
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  const rpcServer = createRpcServerManager(context);
-  const chatView = new ProleChatViewProvider(context.extensionUri, rpcServer, workspaceRoot);
-  const chatParticipant = registerProleChatParticipant(context, rpcServer, workspaceRoot);
+  const outputChannel = vscode.window.createOutputChannel("ProleCoder");
+  const logger = createOutputLogger(outputChannel);
+  const secretRedactor = new MutableSecretRedactor();
+  const initialSecretStatus = resolveDeepSeekApiKey({
+    secretValue: await context.secrets.get(DEEPSEEK_API_KEY_SECRET_ID),
+    keyStoreValue: await context.secrets.get(DEEPSEEK_API_KEY_STORE_SECRET_ID),
+    processEnv: process.env,
+  });
+  const providerConfiguration = vscode.workspace.getConfiguration("prole-coder.provider");
+  const configuredModel = providerConfiguration.get<unknown>("model", "");
+  const initialModelId = resolveDeepSeekModel({
+    configuredModel: typeof configuredModel === "string" ? configuredModel : "",
+    processEnv: process.env,
+  });
+  secretRedactor.update(providerSecretRedactionValues(initialSecretStatus));
+  const notifier = createExtensionNotifier(logger, vscode.window, secretRedactor);
+  context.subscriptions.push(outputChannel);
+
+  const rpcServer = createRpcServerManager(context, notifier, deepSeekEnvOverride(initialSecretStatus, initialModelId));
+  const chatView = new ProleChatViewProvider(context.extensionUri, rpcServer, workspaceRoot, logger, secretRedactor);
+  const chatParticipant = registerProleChatParticipant(context, rpcServer, workspaceRoot, logger, secretRedactor);
   const openChat = registerOpenChatCommand(
     vscode.commands,
     vscode.window,
@@ -27,10 +68,10 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands,
     {
       showInformationMessage(message) {
-        return vscode.window.showInformationMessage(message);
+        return notifier.info(message);
       },
       showWarningMessage(message) {
-        return vscode.window.showWarningMessage(message);
+        return notifier.warn(message);
       },
       openSettings(query) {
         return vscode.commands.executeCommand("workbench.action.openSettings", query);
@@ -43,20 +84,73 @@ export function activate(context: vscode.ExtensionContext): void {
       retainContextWhenHidden: true,
     },
   });
+  const secretWindow = {
+    showInputBox: vscode.window.showInputBox.bind(vscode.window),
+    showQuickPick: vscode.window.showQuickPick.bind(vscode.window),
+    createQuickPick: <T extends SecretQuickPickItem>(): SecretQuickPickController<T> =>
+      vscode.window.createQuickPick<vscode.QuickPickItem>() as unknown as SecretQuickPickController<T>,
+    showInformationMessage: vscode.window.showInformationMessage.bind(vscode.window),
+    showWarningMessage: vscode.window.showWarningMessage.bind(vscode.window),
+  };
+  const providerSecretCommands = registerProviderSecretCommands({
+    commands: vscode.commands,
+    window: secretWindow,
+    secrets: context.secrets,
+    processEnv: process.env,
+    redactor: secretRedactor,
+    rpcServer,
+    isRpcIdle: () => chatView.isIdle(),
+    providerConfiguration,
+    configurationTarget: vscode.ConfigurationTarget.Global,
+    renameAliasButton: {
+      iconPath: new vscode.ThemeIcon("edit"),
+      tooltip: "Rename alias",
+    },
+    deleteKeyButton: {
+      iconPath: new vscode.ThemeIcon("trash"),
+      tooltip: "Delete key",
+    },
+  });
+  const gitRepositoryProvider = createVscodeGitRepositoryProvider();
+  const markdownSink = createVscodeMarkdownSink();
+  const gitWorkflowCommands = [
+    vscode.commands.registerCommand(GENERATE_COMMIT_MESSAGE_COMMAND, () =>
+      generateCommitMessage({
+        repositories: gitRepositoryProvider,
+        window: vscode.window,
+        agent: rpcServer,
+        redactor: secretRedactor,
+      }),
+    ),
+    vscode.commands.registerCommand(GENERATE_PR_DESCRIPTION_COMMAND, () =>
+      generatePrDescription({
+        repositories: gitRepositoryProvider,
+        window: vscode.window,
+        agent: rpcServer,
+        markdownSink,
+        redactor: secretRedactor,
+      }),
+    ),
+  ];
 
-  context.subscriptions.push(openChat, openSettings, chatView, chatViewRegistration, chatParticipant);
+  context.subscriptions.push(
+    openChat,
+    openSettings,
+    chatView,
+    chatViewRegistration,
+    chatParticipant,
+    ...providerSecretCommands,
+    ...gitWorkflowCommands,
+  );
   registerTestCommands(context, chatView);
   if (rpcServer !== undefined && workspaceRoot !== undefined) {
     const patchDiffPreviewController = createPatchDiffPreviewController(context, rpcServer, workspaceRoot);
+    const approvalRequester = testApprovalRequester(context) ?? inlineChatApprovalRequester(chatView);
     const approvalController = new ApprovalEventController(
       rpcServer,
       vscode.window,
-      {
-        warn(message) {
-          return vscode.window.showWarningMessage(message);
-        },
-      },
-      testApprovalRequester(context),
+      notifier,
+      approvalRequester,
       patchDiffPreviewController,
     );
     context.subscriptions.push(patchDiffPreviewController, approvalController);
@@ -64,9 +158,8 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(rpcServer);
     if (rpcServer.autoStart) {
       void rpcServer.start().catch((error: unknown) => {
-        void vscode.window.showWarningMessage(
-          `prole-coder RPC server failed to start: ${errorMessage(error)}`,
-        );
+        const message = `prole-coder RPC server failed to start: ${errorMessage(error)}`;
+        void notifier.error(message);
       });
     }
   }
@@ -76,7 +169,11 @@ export function deactivate(): void {
   // VS Code disposes context subscriptions, including the RPC server manager.
 }
 
-function createRpcServerManager(context: vscode.ExtensionContext): RpcServerManager | undefined {
+function createRpcServerManager(
+  context: vscode.ExtensionContext,
+  notifier: ExtensionNotifier,
+  processEnv: Record<string, string | undefined>,
+): RpcServerManager | undefined {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (workspaceRoot === undefined) {
     return undefined;
@@ -89,14 +186,8 @@ function createRpcServerManager(context: vscode.ExtensionContext): RpcServerMana
       trusted: vscode.workspace.isTrusted,
     },
     extensionVersion: extensionVersion(context),
-    notifier: {
-      info(message) {
-        return vscode.window.showInformationMessage(message);
-      },
-      warn(message) {
-        return vscode.window.showWarningMessage(message);
-      },
-    },
+    processEnv,
+    notifier,
   });
 }
 
@@ -134,6 +225,9 @@ function registerTestCommands(context: vscode.ExtensionContext, chatView: ProleC
       chatView.testHandleWebviewMessage(message),
     ),
     vscode.commands.registerCommand("prole-coder.test.chatState", () => chatView.testState()),
+    vscode.commands.registerCommand("prole-coder.test.chatProbe", (action: unknown) =>
+      chatView.testProbeWebview(action),
+    ),
   );
 }
 
@@ -150,4 +244,8 @@ function testApprovalRequester(context: vscode.ExtensionContext): ApprovalReques
     approvalId: request.approvalId,
     persist: "never",
   });
+}
+
+function inlineChatApprovalRequester(chatView: ProleChatViewProvider): ApprovalRequester {
+  return (_window, request) => chatView.requestApproval(request);
 }

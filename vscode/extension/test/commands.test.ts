@@ -286,7 +286,7 @@ test("requestApproval maps the simple approve choice to one-shot approval", asyn
   assert.equal(modal, true);
   assert.ok(message?.includes("Command: cargo test"));
   assert.ok(message?.includes("Cwd: crates/cli"));
-  assert.ok(message?.includes("Output: last run passed"));
+  assert.equal(message?.includes("Output: last run passed"), false);
   assert.deepEqual(items, [APPROVAL_APPROVE_LABEL, APPROVAL_REJECT_LABEL]);
 });
 
@@ -350,6 +350,7 @@ test("requestApproval maps selected patch hunks to one-shot approve params", asy
       {
         id: "README.md#1:old1+3:new1+3",
         filePath: "README.md",
+        fileIndex: 0,
         hunkIndex: 0,
         oldStart: 1,
         oldCount: 3,
@@ -359,6 +360,7 @@ test("requestApproval maps selected patch hunks to one-shot approve params", asy
       {
         id: "README.md#2:old5+2:new5+3",
         filePath: "README.md",
+        fileIndex: 0,
         hunkIndex: 1,
         oldStart: 5,
         oldCount: 2,

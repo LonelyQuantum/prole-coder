@@ -148,7 +148,24 @@ impl RunLogStore {
 
     pub fn load_run_summary(&self, run_id: impl Into<String>) -> Result<RunSummary, RunLogError> {
         let run_id = validate_id("run id", run_id.into())?;
-        read_summary(&run_id, &self.summary_path(&run_id)?)
+        load_or_recover_summary(
+            &run_id,
+            &self.summary_path(&run_id)?,
+            &self.events_path(&run_id)?,
+        )
+    }
+
+    pub fn delete_run(&self, run_id: impl Into<String>) -> Result<(), RunLogError> {
+        let run_id = validate_id("run id", run_id.into())?;
+        let run_dir = self.run_dir(&run_id)?;
+        if !run_dir.is_dir() {
+            return Err(RunLogError::RunNotFound { run_id });
+        }
+
+        fs::remove_dir_all(&run_dir).map_err(|source| RunLogError::Io {
+            path: run_dir,
+            source,
+        })
     }
 
     pub fn list_run_summaries(&self) -> Result<Vec<RunSummary>, RunLogError> {
@@ -175,11 +192,16 @@ impl RunLogStore {
 
             let run_id = entry.file_name().to_string_lossy().into_owned();
             let run_id = validate_id("run id", run_id)?;
-            let summary_path = entry.path().join(SUMMARY_FILE);
-            if !summary_path.is_file() {
+            let events_path = entry.path().join(EVENTS_FILE);
+            if !events_path.is_file() {
                 continue;
             }
-            summaries.push(read_summary(&run_id, &summary_path)?);
+            let summary_path = entry.path().join(SUMMARY_FILE);
+            summaries.push(load_or_recover_summary(
+                &run_id,
+                &summary_path,
+                &events_path,
+            )?);
         }
 
         summaries.sort_by(|left, right| {
@@ -206,6 +228,29 @@ pub trait RunLogWriter {
         turn_id: Option<String>,
         payload: Value,
     ) -> Result<RunLogEvent, RunLogError>;
+
+    fn write_diagnostic_file(
+        &mut self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<Option<PathBuf>, RunLogError> {
+        let _ = (relative_path, contents);
+        Ok(None)
+    }
+
+    fn read_payload_file(&mut self, relative_path: &Path) -> Result<Option<String>, RunLogError> {
+        let _ = relative_path;
+        Ok(None)
+    }
+
+    fn append_payload_chunk(
+        &mut self,
+        relative_path: &Path,
+        chunk: &str,
+    ) -> Result<Option<PathBuf>, RunLogError> {
+        let _ = (relative_path, chunk);
+        Ok(None)
+    }
 }
 
 /// `RunLog` is a single-writer append handle.
@@ -275,12 +320,40 @@ impl RunLog {
             .next_seq
             .checked_add(1)
             .ok_or(RunLogError::SequenceOverflow)?;
-        update_summary(&self.run_id, &self.summary_path, &event)?;
+        update_summary(&self.run_id, &self.summary_path, &self.events_path, &event)?;
         Ok(event)
     }
 
     pub fn load(&self) -> Result<Vec<RunLogEvent>, RunLogError> {
         read_events(&self.run_id, &self.events_path)
+    }
+
+    pub fn write_run_diagnostic_file(
+        &mut self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<PathBuf, RunLogError> {
+        write_run_text_file(&self.events_path, relative_path, contents, true)
+    }
+
+    pub fn write_run_payload_file(
+        &mut self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<PathBuf, RunLogError> {
+        write_run_text_file(&self.events_path, relative_path, contents, false)
+    }
+
+    pub fn append_run_payload_chunk(
+        &mut self,
+        relative_path: &Path,
+        chunk: &str,
+    ) -> Result<PathBuf, RunLogError> {
+        append_run_text_file(&self.events_path, relative_path, chunk)
+    }
+
+    pub fn read_run_payload_file(&self, relative_path: &Path) -> Result<String, RunLogError> {
+        read_run_text_file(&self.events_path, relative_path)
     }
 }
 
@@ -296,6 +369,28 @@ impl RunLogWriter for RunLog {
         payload: Value,
     ) -> Result<RunLogEvent, RunLogError> {
         self.append(event_type, turn_id, payload)
+    }
+
+    fn write_diagnostic_file(
+        &mut self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<Option<PathBuf>, RunLogError> {
+        self.write_run_diagnostic_file(relative_path, contents)
+            .map(Some)
+    }
+
+    fn read_payload_file(&mut self, relative_path: &Path) -> Result<Option<String>, RunLogError> {
+        self.read_run_payload_file(relative_path).map(Some)
+    }
+
+    fn append_payload_chunk(
+        &mut self,
+        relative_path: &Path,
+        chunk: &str,
+    ) -> Result<Option<PathBuf>, RunLogError> {
+        self.append_run_payload_chunk(relative_path, chunk)
+            .map(Some)
     }
 }
 
@@ -346,6 +441,35 @@ impl SerializedRunLog {
         self.lock()?.load()
     }
 
+    pub fn write_run_diagnostic_file(
+        &self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<PathBuf, RunLogError> {
+        self.lock()?
+            .write_run_diagnostic_file(relative_path, contents)
+    }
+
+    pub fn write_run_payload_file(
+        &self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<PathBuf, RunLogError> {
+        self.lock()?.write_run_payload_file(relative_path, contents)
+    }
+
+    pub fn append_run_payload_chunk(
+        &self,
+        relative_path: &Path,
+        chunk: &str,
+    ) -> Result<PathBuf, RunLogError> {
+        self.lock()?.append_run_payload_chunk(relative_path, chunk)
+    }
+
+    pub fn read_run_payload_file(&self, relative_path: &Path) -> Result<String, RunLogError> {
+        self.lock()?.read_run_payload_file(relative_path)
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, RunLog>, RunLogError> {
         self.inner
             .lock()
@@ -367,6 +491,26 @@ impl RunLogWriter for SerializedRunLog {
         payload: Value,
     ) -> Result<RunLogEvent, RunLogError> {
         self.append(event_type, turn_id, payload)
+    }
+
+    fn write_diagnostic_file(
+        &mut self,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<Option<PathBuf>, RunLogError> {
+        SerializedRunLog::write_run_diagnostic_file(self, relative_path, contents).map(Some)
+    }
+
+    fn read_payload_file(&mut self, relative_path: &Path) -> Result<Option<String>, RunLogError> {
+        SerializedRunLog::read_run_payload_file(self, relative_path).map(Some)
+    }
+
+    fn append_payload_chunk(
+        &mut self,
+        relative_path: &Path,
+        chunk: &str,
+    ) -> Result<Option<PathBuf>, RunLogError> {
+        SerializedRunLog::append_run_payload_chunk(self, relative_path, chunk).map(Some)
     }
 }
 
@@ -451,8 +595,15 @@ impl RunSummary {
 
         match event.event_type.as_str() {
             "run.started" => {
-                self.started_at_unix_ms = event.time_unix_ms;
+                if self.event_count == 1 {
+                    self.started_at_unix_ms = event.time_unix_ms;
+                }
                 self.updated_at_unix_ms = event.time_unix_ms;
+                self.status = RunSummaryStatus::Running;
+                self.completed_at_unix_ms = None;
+                self.summary = None;
+                self.changed_files.clear();
+                self.verification_status = None;
                 self.mode = string_field(&event.payload, "mode");
             }
             "turn.started" => {
@@ -574,6 +725,101 @@ fn append_event(path: &Path, event: &RunLogEvent) -> Result<(), RunLogError> {
     Ok(())
 }
 
+fn write_run_text_file(
+    events_path: &Path,
+    relative_path: &Path,
+    contents: &str,
+    append_newline: bool,
+) -> Result<PathBuf, RunLogError> {
+    let relative_path = normalize_workspace_relative_path(relative_path)?;
+    let run_dir = events_path
+        .parent()
+        .ok_or_else(|| RunLogError::InvalidStatePath {
+            path: events_path.to_path_buf(),
+        })?;
+    let path = run_dir.join(relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| RunLogError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|source| RunLogError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    file.write_all(contents.as_bytes())
+        .map_err(|source| RunLogError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    if append_newline {
+        file.write_all(b"\n").map_err(|source| RunLogError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    }
+    file.flush().map_err(|source| RunLogError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(path)
+}
+
+fn read_run_text_file(events_path: &Path, relative_path: &Path) -> Result<String, RunLogError> {
+    let relative_path = normalize_workspace_relative_path(relative_path)?;
+    let run_dir = events_path
+        .parent()
+        .ok_or_else(|| RunLogError::InvalidStatePath {
+            path: events_path.to_path_buf(),
+        })?;
+    let path = run_dir.join(relative_path);
+    fs::read_to_string(&path).map_err(|source| RunLogError::Io { path, source })
+}
+
+fn append_run_text_file(
+    events_path: &Path,
+    relative_path: &Path,
+    chunk: &str,
+) -> Result<PathBuf, RunLogError> {
+    let relative_path = normalize_workspace_relative_path(relative_path)?;
+    let run_dir = events_path
+        .parent()
+        .ok_or_else(|| RunLogError::InvalidStatePath {
+            path: events_path.to_path_buf(),
+        })?;
+    let path = run_dir.join(relative_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| RunLogError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|source| RunLogError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    file.write_all(chunk.as_bytes())
+        .map_err(|source| RunLogError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    file.flush().map_err(|source| RunLogError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(path)
+}
+
 fn write_summary(path: &Path, summary: &RunSummary) -> Result<(), RunLogError> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -628,10 +874,85 @@ fn read_summary(run_id: &str, path: &Path) -> Result<RunSummary, RunLogError> {
     Ok(summary)
 }
 
-fn update_summary(run_id: &str, path: &Path, event: &RunLogEvent) -> Result<(), RunLogError> {
-    let mut summary = read_summary(run_id, path)?;
-    summary.apply_event(event, path)?;
-    write_summary(path, &summary)
+fn load_or_recover_summary(
+    run_id: &str,
+    summary_path: &Path,
+    events_path: &Path,
+) -> Result<RunSummary, RunLogError> {
+    match read_summary(run_id, summary_path) {
+        Ok(summary) => {
+            if summary_matches_events(run_id, &summary, events_path)? {
+                Ok(summary)
+            } else {
+                rebuild_summary_from_events(run_id, summary_path, events_path)
+            }
+        }
+        Err(error) if is_recoverable_summary_error(&error) => {
+            rebuild_summary_from_events(run_id, summary_path, events_path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn update_summary(
+    run_id: &str,
+    summary_path: &Path,
+    events_path: &Path,
+    event: &RunLogEvent,
+) -> Result<(), RunLogError> {
+    match read_summary(run_id, summary_path) {
+        Ok(mut summary) => match summary.apply_event(event, summary_path) {
+            Ok(()) => write_summary(summary_path, &summary),
+            Err(error) if is_recoverable_summary_error(&error) => {
+                rebuild_summary_from_events(run_id, summary_path, events_path).map(|_| ())
+            }
+            Err(error) => Err(error),
+        },
+        Err(error) if is_recoverable_summary_error(&error) => {
+            rebuild_summary_from_events(run_id, summary_path, events_path).map(|_| ())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn summary_matches_events(
+    run_id: &str,
+    summary: &RunSummary,
+    events_path: &Path,
+) -> Result<bool, RunLogError> {
+    let next_seq = next_sequence_from_events(run_id, events_path)?;
+    let event_count = next_seq
+        .checked_sub(1)
+        .ok_or(RunLogError::SequenceOverflow)?;
+    Ok(summary.last_seq == event_count && summary.event_count == event_count)
+}
+
+fn rebuild_summary_from_events(
+    run_id: &str,
+    summary_path: &Path,
+    events_path: &Path,
+) -> Result<RunSummary, RunLogError> {
+    let events = read_events(run_id, events_path)?;
+    let created_at_unix_ms = events
+        .first()
+        .map(|event| event.time_unix_ms)
+        .unwrap_or(unix_time_millis()?);
+    let mut summary = RunSummary::new(run_id.to_owned(), created_at_unix_ms);
+    for event in &events {
+        summary.apply_event(event, summary_path)?;
+    }
+    write_summary(summary_path, &summary)?;
+    Ok(summary)
+}
+
+fn is_recoverable_summary_error(error: &RunLogError) -> bool {
+    matches!(
+        error,
+        RunLogError::RunSummaryNotFound { .. }
+            | RunLogError::InvalidSummaryJson { .. }
+            | RunLogError::RunIdMismatch { .. }
+            | RunLogError::SummarySequenceMismatch { .. }
+    )
 }
 
 fn next_sequence_from_events(run_id: &str, path: &Path) -> Result<u64, RunLogError> {
@@ -977,7 +1298,7 @@ mod tests {
 
     use super::{
         REDACTED_VALUE, RUN_LOG_MAX_ARRAY_ITEMS, RUN_LOG_MAX_STRING_BYTES, RUNS_DIR, RunLogError,
-        RunLogStore, RunLogWriter, RunSummaryStatus, SerializedRunLog,
+        RunLogStore, RunLogWriter, RunSummary, RunSummaryStatus, SerializedRunLog, write_summary,
     };
     use crate::test_helpers::TestWorkspace;
 
@@ -1062,6 +1383,67 @@ mod tests {
         assert_eq!(payload["cacheHitTokens"], 42);
         assert_eq!(payload["nested"]["refresh_token"], REDACTED_VALUE);
         assert_eq!(payload["stdout"], format!("visible {REDACTED_VALUE}"));
+    }
+
+    #[test]
+    fn run_log_writes_diagnostic_files_inside_run_directory() {
+        let workspace = TestWorkspace::new("run-log");
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        let mut run = store
+            .create_run("run_diagnostic")
+            .expect("run should be created");
+
+        let path = run
+            .write_run_diagnostic_file(
+                std::path::Path::new("diagnostics/invalid-tool-arguments.json"),
+                "hello diagnostic",
+            )
+            .expect("diagnostic file should be written");
+
+        assert!(path.starts_with(store.runs_dir().join("run_diagnostic")));
+        assert_eq!(
+            fs::read_to_string(path).expect("diagnostic file should be readable"),
+            "hello diagnostic\n"
+        );
+        assert!(matches!(
+            run.write_run_diagnostic_file(std::path::Path::new("../outside.txt"), "bad"),
+            Err(RunLogError::InvalidStatePath { .. })
+        ));
+
+        let payload_path = run
+            .write_run_payload_file(
+                std::path::Path::new("payloads/apply_patch/patch.diff"),
+                "diff",
+            )
+            .expect("payload file should be written");
+        assert_eq!(
+            fs::read_to_string(&payload_path).expect("payload file should be readable"),
+            "diff"
+        );
+        assert_eq!(
+            run.read_run_payload_file(std::path::Path::new("payloads/apply_patch/patch.diff"))
+                .expect("payload file should load"),
+            "diff"
+        );
+        run.append_run_payload_chunk(
+            std::path::Path::new("payloads/apply_patch/chunked.diff"),
+            "di",
+        )
+        .expect("first payload chunk should append");
+        run.append_run_payload_chunk(
+            std::path::Path::new("payloads/apply_patch/chunked.diff"),
+            "ff",
+        )
+        .expect("second payload chunk should append");
+        assert_eq!(
+            run.read_run_payload_file(std::path::Path::new("payloads/apply_patch/chunked.diff"))
+                .expect("chunked payload file should load"),
+            "diff"
+        );
+        assert!(matches!(
+            run.read_run_payload_file(std::path::Path::new("../outside.txt")),
+            Err(RunLogError::InvalidStatePath { .. })
+        ));
     }
 
     #[test]
@@ -1227,7 +1609,115 @@ mod tests {
     }
 
     #[test]
-    fn run_log_lists_summaries_by_recent_update_without_scanning_events() {
+    fn run_log_recovers_summary_from_events_after_stale_summary() {
+        let workspace = TestWorkspace::new("run-log");
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        let mut run = store
+            .create_run("run_summary_recovery")
+            .expect("run should be created");
+
+        let started = run
+            .append_at(100, "run.started", None, json!({ "mode": "edit" }))
+            .expect("run started should append");
+        run.append_at(
+            110,
+            "turn.started",
+            Some("turn_1".to_owned()),
+            json!({ "userTask": "Fix the README" }),
+        )
+        .expect("turn started should append");
+
+        let mut stale_summary = RunSummary::new("run_summary_recovery".to_owned(), 100);
+        stale_summary
+            .apply_event(&started, run.summary_path())
+            .expect("stale summary should apply first event");
+        write_summary(run.summary_path(), &stale_summary).expect("stale summary should be written");
+
+        let recovered = store
+            .load_run_summary("run_summary_recovery")
+            .expect("summary should recover from events");
+        assert_eq!(recovered.last_seq, 2);
+        assert_eq!(recovered.title, "Fix the README");
+
+        write_summary(run.summary_path(), &stale_summary)
+            .expect("stale summary should be written again");
+        run.append_at(
+            120,
+            "run.completed",
+            Some("turn_1".to_owned()),
+            json!({
+                "summary": "done",
+                "changedFiles": ["README.md"],
+                "verificationStatus": "passed",
+            }),
+        )
+        .expect("append should recover stale summary before updating");
+
+        let summary = store
+            .load_run_summary("run_summary_recovery")
+            .expect("summary should load");
+        assert_eq!(summary.last_seq, 3);
+        assert_eq!(summary.status, RunSummaryStatus::Completed);
+        assert_eq!(summary.summary.as_deref(), Some("done"));
+        assert_eq!(summary.changed_files, vec!["README.md"]);
+    }
+
+    #[test]
+    fn run_log_summary_resets_terminal_fields_when_run_reopens_for_next_turn() {
+        let workspace = TestWorkspace::new("run-log");
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        let mut run = store
+            .create_run("run_multi_turn_summary")
+            .expect("run should be created");
+
+        run.append_at(100, "run.started", None, json!({ "mode": "ask" }))
+            .expect("first run started should append");
+        run.append_at(
+            110,
+            "turn.started",
+            Some("turn_1".to_owned()),
+            json!({ "turnId": "turn_1", "userTask": "First task" }),
+        )
+        .expect("first turn started should append");
+        run.append_at(
+            120,
+            "run.completed",
+            Some("turn_1".to_owned()),
+            json!({
+                "summary": "First summary.",
+                "changedFiles": ["README.md"],
+                "verificationStatus": "passed"
+            }),
+        )
+        .expect("first completion should append");
+        run.append_at(200, "run.started", None, json!({ "mode": "edit" }))
+            .expect("second run started should append");
+        run.append_at(
+            210,
+            "turn.started",
+            Some("turn_2".to_owned()),
+            json!({ "turnId": "turn_2", "userTask": "Second task" }),
+        )
+        .expect("second turn started should append");
+
+        let summary = store
+            .load_run_summary("run_multi_turn_summary")
+            .expect("summary should load");
+        assert_eq!(summary.title, "Second task");
+        assert_eq!(summary.status, RunSummaryStatus::Running);
+        assert_eq!(summary.started_at_unix_ms, 100);
+        assert_eq!(summary.updated_at_unix_ms, 210);
+        assert_eq!(summary.completed_at_unix_ms, None);
+        assert_eq!(summary.last_seq, 5);
+        assert_eq!(summary.event_count, 5);
+        assert_eq!(summary.mode.as_deref(), Some("edit"));
+        assert_eq!(summary.summary, None);
+        assert!(summary.changed_files.is_empty());
+        assert_eq!(summary.verification_status, None);
+    }
+
+    #[test]
+    fn run_log_lists_summaries_by_recent_update() {
         let workspace = TestWorkspace::new("run-log");
         let store = RunLogStore::new(workspace.path()).expect("store should open");
         let mut older = store
@@ -1257,6 +1747,28 @@ mod tests {
         );
         assert_eq!(summaries[0].updated_at_unix_ms, 300);
         assert_eq!(summaries[1].updated_at_unix_ms, 100);
+    }
+
+    #[test]
+    fn run_log_deletes_run_directory_safely() {
+        let workspace = TestWorkspace::new("run-log");
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        store
+            .create_run("run_delete")
+            .expect("run should be created");
+
+        store
+            .delete_run("run_delete")
+            .expect("run should be deleted");
+
+        assert!(matches!(
+            store.load_run("run_delete"),
+            Err(RunLogError::RunNotFound { .. })
+        ));
+        assert!(matches!(
+            store.delete_run("../outside"),
+            Err(RunLogError::InvalidIdentifier { .. })
+        ));
     }
 
     #[test]

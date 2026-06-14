@@ -8,7 +8,10 @@ export const agentResumeMethod = "agent.resume" as const;
 export const agentApproveMethod = "agent.approve" as const;
 export const agentRejectMethod = "agent.reject" as const;
 export const agentCancelMethod = "agent.cancel" as const;
+export const agentSteerMethod = "agent.steer" as const;
 export const agentListRunsMethod = "agent.listRuns" as const;
+export const agentDeleteRunMethod = "agent.deleteRun" as const;
+export const agentLoadRunEventsMethod = "agent.loadRunEvents" as const;
 export const agentPreviewFimMethod = "agent.previewFim" as const;
 
 export interface ProtocolErrorDefinition {
@@ -38,6 +41,22 @@ export const rpcErrorCodes = {
   runCanceled: -32050,
   internalInvariant: -32060,
 } as const;
+
+export const rpcRecoverableActionKinds = ["configureDeepSeekApiKey"] as const;
+export type RpcRecoverableActionKind = (typeof rpcRecoverableActionKinds)[number];
+
+export interface RpcRecoverableAction {
+  readonly kind: RpcRecoverableActionKind;
+  readonly label: string;
+}
+
+export type ProviderConfigurationErrorCode = "missingApiKey";
+
+export interface ProviderConfigurationErrorData {
+  readonly provider: "deepseek";
+  readonly configurationError: ProviderConfigurationErrorCode;
+  readonly recoverableAction: RpcRecoverableAction;
+}
 
 export const protocolErrorDefinitions = [
   { code: jsonRpcErrorCodes.parseError, name: "Parse error" },
@@ -152,6 +171,7 @@ export const toolNames = [
   "git_diff",
   "lsp_diagnostics",
   "plan_update",
+  "model_turn_budget",
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 
@@ -289,7 +309,7 @@ export const toolDefinitions = [
     name: "apply_patch",
     description: "应用统一 diff patch。",
     risk: "write",
-    approval: "required",
+    approval: "none",
     implementationStatus: "executor_implemented",
     argumentSchema: {
       type: "object",
@@ -402,6 +422,20 @@ export const toolDefinitions = [
     },
     resultSchema: statusResultSchema,
   },
+  {
+    name: "model_turn_budget",
+    description: "Approve continuing an agent turn after the provider-turn budget window is exhausted.",
+    risk: "exec",
+    approval: "required",
+    implementationStatus: "schema_only",
+    // Intentionally zero-argument: only `{}` is valid for this local continuation control point.
+    argumentSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+    resultSchema: statusResultSchema,
+  },
 ] as const satisfies readonly ToolDefinition[];
 
 export function findToolDefinition(name: string): ToolDefinition | undefined {
@@ -461,11 +495,17 @@ export interface TurnAttachment {
   readonly text?: string;
 }
 
+export interface TurnSupersedes {
+  readonly messageId: string;
+  readonly turnId?: string;
+}
+
 export interface SendTurnParams {
   readonly runId?: string;
   readonly message: string;
   readonly mode: RpcRunMode;
   readonly attachments?: readonly TurnAttachment[];
+  readonly supersedes?: TurnSupersedes;
 }
 
 export interface SendTurnResult {
@@ -483,6 +523,20 @@ export interface ResumeResult {
   readonly runId: string;
   readonly nextSeq: number;
   readonly replayStarted: boolean;
+}
+
+export interface LoadRunEventsParams {
+  readonly runId: string;
+  readonly beforeSeq?: number;
+  readonly limit?: number;
+}
+
+export interface LoadRunEventsResult {
+  readonly runId: string;
+  readonly events: readonly AgentEventEnvelope[];
+  readonly firstSeq?: number;
+  readonly lastSeq?: number;
+  readonly hasMoreBefore: boolean;
 }
 
 export type RunSummaryStatus = "running" | "completed" | "failed" | "canceled";
@@ -508,6 +562,15 @@ export interface RunSummary {
 
 export interface ListRunsResult {
   readonly runs: readonly RunSummary[];
+}
+
+export interface DeleteRunParams {
+  readonly runId: string;
+}
+
+export interface DeleteRunResult {
+  readonly runId: string;
+  readonly deleted: true;
 }
 
 export interface ApproveParams {
@@ -547,6 +610,17 @@ export interface CancelResult {
   readonly runId: string;
   readonly state: "canceled";
   readonly reason?: string;
+}
+
+export interface SteerParams {
+  readonly runId: string;
+  readonly message: string;
+}
+
+export interface SteerResult {
+  readonly runId: string;
+  readonly steerId: string;
+  readonly accepted: true;
 }
 
 export interface FimPreviewParams {

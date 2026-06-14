@@ -1,4 +1,12 @@
-use std::{collections::HashSet, future::Future, path::Path, pin::Pin, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
+    fs,
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use futures_util::{Stream, StreamExt};
 use serde::{Serialize, de::DeserializeOwned};
@@ -13,6 +21,7 @@ use crate::{
         ContextBuildError, ContextBuilder, ContextBuilderConfig, ContextItem, ContextItemKind,
         ContextManifestOmitted, ContextManifestReport,
     },
+    hashing::sha256_hex,
     provider::deepseek_api::{ChatMessage, ChatToolCall},
     reasoning::{
         ReasoningContentError, ReasoningContentMode, ReasoningContentState,
@@ -20,11 +29,11 @@ use crate::{
     },
     run_log::{RunLogError, RunLogEvent, RunLogWriter, redact_text},
     tool::{
-        ToolArgumentSchemaError, ToolDefinition, ToolName, find_builtin_tool,
+        BUILTIN_TOOLS, ToolArgumentSchemaError, ToolDefinition, ToolName, find_builtin_tool,
         validate_tool_arguments,
     },
     tool_execution::{
-        ApplyPatchArgs, PatchApprovalHunk, ReadFileArgs, ShellArgs, ShellResult,
+        ApplyPatchArgs, ApplyPatchResult, PatchApprovalHunk, ReadFileArgs, ShellArgs, ShellResult,
         ToolExecutionError, ToolStatus, WorkspaceManifestArgs, WorkspaceToolExecutor,
         filter_apply_patch_hunks, patch_approval_hunks, redacted_tool_result_value,
     },
@@ -32,8 +41,81 @@ use crate::{
 
 const DEFAULT_MAX_ATTACHMENTS: usize = 32;
 const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 256 * 1024;
+const DEFAULT_MAX_MODEL_TURNS: usize = 50;
+const DEFAULT_PROVIDER_TRANSIENT_RETRIES: usize = 2;
+const DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_PROVIDER_IDLE_TIMEOUT_ATTEMPTS: usize = 5;
+const PROVIDER_STREAM_RETRY_PARTIAL_CONTENT_MAX_CHARS: usize = 2_000;
+const PROVIDER_STREAM_RETRY_REASONING_NOTICE: &str = concat!(
+    "The interrupted stream had already produced hidden reasoning before a complete user-facing ",
+    "response arrived; ProleCoder did not replay that hidden reasoning text."
+);
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_LINES: usize = 8;
 const SHELL_APPROVAL_OUTPUT_SUMMARY_MAX_BYTES: usize = 2 * 1024;
+const TOOL_ARGUMENT_DIAGNOSTIC_MAX_BYTES: usize = 128 * 1024;
+const WORKSPACE_DIFF_MAX_FILES: usize = 20_000;
+const WORKSPACE_DIFF_HASH_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const WORKSPACE_DIFF_EXCLUDED_DIRS: &[&str] = &[
+    ".git",
+    ".prole-coder",
+    "target",
+    "node_modules",
+    ".vscode-test",
+];
+const MAX_AUTO_APPROVED_PATCH_FILES: usize = 5;
+const WORKSPACE_POLICY_PATCH_FILES: &[&str] = &[".gitignore", ".prole-coderignore"];
+const READ_ONLY_VERSION_COMMANDS: &[&str] = &[
+    "bun", "cargo", "code", "corepack", "deno", "dotnet", "git", "go", "java", "node", "npm",
+    "pip", "pip3", "pnpm", "prole", "python", "python3", "py", "rg", "rustc", "rustup", "tsc",
+    "yarn",
+];
+const READ_ONLY_LOWERCASE_VERSION_COMMANDS: &[&str] = &[
+    "bun", "deno", "node", "npm", "pnpm", "rg", "rustc", "tsc", "yarn",
+];
+const READ_ONLY_VERSION_SUBCOMMANDS: &[&str] = &["go"];
+const MODEL_TURN_BUDGET_TOOL_NAME: &str = "model_turn_budget";
+const FINAL_RESPONSE_SUMMARY_INSTRUCTION: &str = concat!(
+    "When the task is complete, make the final assistant message a concise work summary for the user. ",
+    "Mention what changed, important files, verification or tests, and any blockers. ",
+    "Do not dump raw tool logs, JSON-RPC events, or intermediate provider/tool chatter; those details are recorded in ProleCoder Output."
+);
+const FINAL_RESPONSE_LENGTH_RETRY_INSTRUCTION: &str = concat!(
+    "Your previous response ended because the model reached its output length limit before a complete final user-facing summary. ",
+    "Do not call tools unless absolutely necessary. Return only a concise final work summary now, covering changes, important files, verification or tests, and blockers."
+);
+const TOOL_CALL_LENGTH_RETRY_INSTRUCTION: &str = concat!(
+    "Your previous response ended because the model reached its output length limit while composing a tool call. ",
+    "Discard any partial or truncated tool-call arguments from that response. ",
+    "If a tool is still needed, issue a fresh complete tool call with valid JSON arguments now; otherwise continue with the task briefly."
+);
+const PROVIDER_STREAM_RETRY_INSTRUCTION: &str = concat!(
+    "The previous provider response stream was interrupted by a transient connection error before ProleCoder received a completed response. ",
+    "Continue the same task from where you left off. Do not repeat completed tool results, and only call tools that are still needed."
+);
+const STEER_INSTRUCTION_PREFIX: &str = concat!(
+    "The user sent this steering instruction while the run is in progress. ",
+    "Treat it as the latest user instruction and follow it immediately for all subsequent ",
+    "user-visible assistant text and actions. If it conflicts with earlier user instructions, ",
+    "the steering instruction wins unless it conflicts with safety or tool rules.\n\n",
+    "Steering instruction:\n"
+);
+#[cfg(windows)]
+const TOOL_USAGE_INSTRUCTION: &str = concat!(
+    "Tool usage rules: all workspace paths must be workspace-relative unless a tool explicitly says otherwise. ",
+    "Do not invent absolute paths such as /home/user/project, and do not use cd to move into guessed directories. ",
+    "For the shell tool, put the target directory in the cwd argument, usually \".\" or a workspace-relative subdirectory, and keep command to the command itself. ",
+    "Shell commands run under Windows PowerShell 5.1, so do not use POSIX-only paths or PowerShell 7-only operators such as && and ||. Use separate tool calls or Windows PowerShell-compatible syntax. ",
+    "For test and verification commands, do not append redirections such as 2>&1; the shell tool captures stdout and stderr separately, and PowerShell stream merging can emit CLIXML/progress noise that looks like a failed verification. ",
+    "There is no write_file tool; for text edits, use apply_patch with expectedFiles and a unified diff or payloadRef, and reread the target file before retrying a failed patch."
+);
+#[cfg(not(windows))]
+const TOOL_USAGE_INSTRUCTION: &str = concat!(
+    "Tool usage rules: all workspace paths must be workspace-relative unless a tool explicitly says otherwise. ",
+    "Do not invent absolute paths such as /home/user/project, and do not use cd to move into guessed directories. ",
+    "For the shell tool, put the target directory in the cwd argument, usually \".\" or a workspace-relative subdirectory, and keep command to the command itself. ",
+    "Shell commands run under POSIX sh from the selected cwd. ",
+    "There is no write_file tool; for text edits, use apply_patch with expectedFiles and a unified diff or payloadRef, and reread the target file before retrying a failed patch."
+);
 
 #[derive(Debug)]
 pub struct AgentTurnLoop<P, A> {
@@ -120,7 +202,9 @@ where
                 AgentTurnLoopError::RunLog(_) | AgentTurnLoopError::EventSink(_)
             )
         {
-            let (event_type, payload) = terminal_error_event(error);
+            let diagnostic_file =
+                write_invalid_tool_arguments_diagnostic_file(run_log, turn_id.as_str(), error);
+            let (event_type, payload) = terminal_error_event(error, diagnostic_file.as_deref());
             let append_result =
                 append_turn_event(run_log, event_sink, event_type, Some(turn_id), payload);
             if let Err(append_error) = append_result {
@@ -145,6 +229,16 @@ where
                 detail: "max_model_turns must be greater than zero".to_owned(),
             });
         }
+        if self.config.provider_idle_timeout == Duration::ZERO {
+            return Err(AgentTurnLoopError::InvalidConfig {
+                detail: "provider_idle_timeout must be greater than zero".to_owned(),
+            });
+        }
+        if self.config.provider_idle_timeout_attempts == 0 {
+            return Err(AgentTurnLoopError::InvalidConfig {
+                detail: "provider_idle_timeout_attempts must be greater than zero".to_owned(),
+            });
+        }
         input.cancellation_token.check()?;
 
         append_turn_event(
@@ -158,17 +252,20 @@ where
                 "mode": input.mode.as_str(),
             }),
         )?;
+        let mut turn_started_payload = json!({
+            "turnId": input.turn_id.clone(),
+            "userTask": input.user_task.clone(),
+        });
+        if let Some(supersedes) = &input.supersedes {
+            turn_started_payload["supersedes"] = serde_json::to_value(supersedes)?;
+        }
         append_turn_event(
             run_log,
             event_sink,
             "turn.started",
             Some(input.turn_id.clone()),
-            json!({
-                "turnId": input.turn_id.clone(),
-                "userTask": input.user_task.clone(),
-            }),
+            turn_started_payload,
         )?;
-
         let context = self.build_context(&input)?;
         append_turn_event(
             run_log,
@@ -181,125 +278,288 @@ where
         let mut messages = vec![ChatMessage::user(context.content)];
         let mut tool_results = Vec::new();
         let mut changed_files = Vec::new();
+        let mut workspace_before = None;
+        let mut workspace_snapshot_failed = false;
+        let mut verification_status = VerificationStatus::Skipped;
         let mut last_shell_output_summary = None;
+        let mut provider_transient_retries_remaining = self.config.provider_transient_retries;
+        let mut provider_idle_timeout_retries_remaining =
+            self.config.provider_idle_timeout_attempts.saturating_sub(1);
 
-        for iteration in 1..=self.config.max_model_turns {
-            let prepared = self.reasoning.prepare_messages(&messages)?;
-            append_turn_event(
-                run_log,
-                event_sink,
-                "provider.requested",
-                Some(input.turn_id.clone()),
-                json!({
-                    "iteration": iteration,
-                    "messageCount": prepared.messages.len(),
-                    "reasoningState": reasoning_state_payload(prepared.state),
-                }),
-            )?;
-
-            let provider_turn = self
-                .collect_provider_response(
-                    TurnProviderRequest {
-                        iteration,
-                        messages: prepared.messages,
-                        cancellation_token: input.cancellation_token.clone(),
-                    },
-                    &input.turn_id,
-                    iteration,
-                    run_log,
-                    event_sink,
-                )
-                .await?;
-            let response = provider_turn.response;
-
-            if !response.tool_calls.is_empty()
-                && self.reasoning.mode() == ReasoningContentMode::ThinkingEnabled
-                && response
-                    .reasoning_content
-                    .as_deref()
-                    .is_none_or(|reasoning| reasoning.trim().is_empty())
-            {
-                return Err(AgentTurnLoopError::MissingAssistantReasoningContent);
-            }
-
-            if let Some(content) = response
-                .content
-                .as_deref()
-                .filter(|content| !content.is_empty())
-                .filter(|_| !provider_turn.emitted_content_delta)
-            {
+        let mut next_iteration = 1usize;
+        loop {
+            let budget_start = next_iteration;
+            let budget_end = budget_start + self.config.max_model_turns - 1;
+            for iteration in budget_start..=budget_end {
+                drain_steer_messages(&input, run_log, event_sink, &mut messages)?;
+                let prepared = self.reasoning.prepare_messages(&messages)?;
                 append_turn_event(
                     run_log,
                     event_sink,
-                    "assistant.delta",
+                    "provider.requested",
                     Some(input.turn_id.clone()),
                     json!({
                         "iteration": iteration,
-                        "text": content,
-                    }),
-                )?;
-            }
-
-            if response.tool_calls.is_empty() {
-                let final_message = response.content.unwrap_or_default();
-                append_turn_event(
-                    run_log,
-                    event_sink,
-                    "run.completed",
-                    Some(input.turn_id.clone()),
-                    json!({
-                        "summary": final_message,
-                        "changedFiles": changed_files.clone(),
-                        "verificationStatus": "skipped",
+                        "messageCount": prepared.messages.len(),
+                        "reasoningState": reasoning_state_payload(prepared.state),
                     }),
                 )?;
 
-                return Ok(AgentTurnOutcome {
-                    final_message,
-                    iterations: iteration,
-                    tool_results,
-                    changed_files,
-                });
-            }
-
-            let tool_calls = response.tool_calls;
-            messages.push(ChatMessage::assistant_with_tool_calls(
-                response.content,
-                response.reasoning_content,
-                tool_calls.clone(),
-            ));
-
-            for (tool_index, tool_call) in tool_calls.iter().enumerate() {
-                let tool_context = ToolCallContext {
-                    turn_id: &input.turn_id,
-                    iteration,
-                    tool_index: tool_index + 1,
-                    previous_shell_output_summary: last_shell_output_summary.as_deref(),
-                    cancellation_token: &input.cancellation_token,
+                let provider_turn = match self
+                    .collect_provider_response(
+                        TurnProviderRequest {
+                            iteration,
+                            messages: prepared.messages,
+                            cancellation_token: input.cancellation_token.clone(),
+                        },
+                        &input.turn_id,
+                        iteration,
+                        run_log,
+                        event_sink,
+                    )
+                    .await
+                {
+                    Ok(provider_turn) => {
+                        provider_transient_retries_remaining =
+                            self.config.provider_transient_retries;
+                        provider_idle_timeout_retries_remaining =
+                            self.config.provider_idle_timeout_attempts.saturating_sub(1);
+                        provider_turn
+                    }
+                    Err(AgentTurnLoopError::ProviderIdleTimeout {
+                        timeout_ms,
+                        partial_content,
+                        partial_reasoning_chars,
+                        ..
+                    }) if provider_idle_timeout_retries_remaining > 0 => {
+                        provider_idle_timeout_retries_remaining -= 1;
+                        append_turn_event(
+                            run_log,
+                            event_sink,
+                            "provider.retrying",
+                            Some(input.turn_id.clone()),
+                            json!({
+                                "iteration": iteration,
+                                "reason": "provider_idle_timeout",
+                                "message": format!(
+                                    "provider request made no progress for {timeout_ms}ms"
+                                ),
+                                "timeoutMs": timeout_ms,
+                                "partialContentChars": partial_content.chars().count(),
+                                "partialReasoningChars": partial_reasoning_chars,
+                                "retriesRemaining": provider_idle_timeout_retries_remaining,
+                            }),
+                        )?;
+                        push_provider_stream_retry_messages(
+                            &mut messages,
+                            &partial_content,
+                            partial_reasoning_chars,
+                        );
+                        continue;
+                    }
+                    Err(AgentTurnLoopError::ProviderIdleTimeout {
+                        timeout_ms,
+                        partial_content,
+                        partial_reasoning_chars,
+                        ..
+                    }) => {
+                        return Err(AgentTurnLoopError::ProviderIdleTimeout {
+                            timeout_ms,
+                            attempts: self.config.provider_idle_timeout_attempts,
+                            partial_content,
+                            partial_reasoning_chars,
+                        });
+                    }
+                    Err(AgentTurnLoopError::ProviderStreamInterrupted {
+                        source,
+                        partial_content,
+                        partial_reasoning_chars,
+                    }) if provider_transient_retries_remaining > 0 => {
+                        provider_transient_retries_remaining -= 1;
+                        append_turn_event(
+                            run_log,
+                            event_sink,
+                            "provider.retrying",
+                            Some(input.turn_id.clone()),
+                            json!({
+                                "iteration": iteration,
+                                "reason": "transient_stream_error",
+                                "message": source.to_string(),
+                                "partialContentChars": partial_content.chars().count(),
+                                "partialReasoningChars": partial_reasoning_chars,
+                                "retriesRemaining": provider_transient_retries_remaining,
+                            }),
+                        )?;
+                        push_provider_stream_retry_messages(
+                            &mut messages,
+                            &partial_content,
+                            partial_reasoning_chars,
+                        );
+                        continue;
+                    }
+                    Err(AgentTurnLoopError::ProviderStreamInterrupted { source, .. }) => {
+                        return Err(AgentTurnLoopError::Provider(source));
+                    }
+                    Err(error) => return Err(error),
                 };
-                let executed =
-                    self.execute_tool_call(tool_call, tool_context, run_log, event_sink)?;
-                let follow_up_output_summary = executed.follow_up_output_summary.clone();
-                changed_files.extend(executed.changed_files.iter().cloned());
-                messages.push(ChatMessage::tool_result(
-                    tool_call.id.clone(),
-                    executed.message_content.clone(),
+                let mut response = provider_turn.response;
+
+                if response.completion.finish_reason == TurnProviderFinishReason::Length {
+                    if response.tool_calls.is_empty() {
+                        push_final_response_retry_messages(&mut messages, &response);
+                        continue;
+                    }
+
+                    push_tool_call_length_retry_messages(&mut messages, &response);
+                    continue;
+                }
+
+                if recover_missing_tool_call_reasoning(&mut response, self.reasoning.mode()) {
+                    append_turn_event(
+                        run_log,
+                        event_sink,
+                        "provider.reasoningRecovered",
+                        Some(input.turn_id.clone()),
+                        json!({
+                            "iteration": iteration,
+                            "reason": "missing_tool_call_reasoning_content",
+                            "toolCallCount": response.tool_calls.len(),
+                        }),
+                    )?;
+                }
+
+                if let Some(content) = response
+                    .content
+                    .as_deref()
+                    .filter(|content| !content.is_empty())
+                    .filter(|_| !provider_turn.emitted_content_delta)
+                {
+                    append_turn_event(
+                        run_log,
+                        event_sink,
+                        "assistant.delta",
+                        Some(input.turn_id.clone()),
+                        json!({
+                            "iteration": iteration,
+                            "text": content,
+                        }),
+                    )?;
+                }
+
+                if response.tool_calls.is_empty() {
+                    if response.completion.finish_reason != TurnProviderFinishReason::Stop {
+                        return Err(AgentTurnLoopError::Provider(TurnProviderError::new(
+                            format!(
+                                "provider finished with `{}` before a final assistant summary",
+                                turn_provider_finish_reason_label(
+                                    response.completion.finish_reason
+                                )
+                            ),
+                        )));
+                    }
+                    let final_message = response.content.unwrap_or_default();
+                    let (final_changed_files, snapshot_error) = final_changed_files(
+                        changed_files,
+                        workspace_before.as_ref(),
+                        self.tools.root(),
+                    );
+                    if let Some(message) = snapshot_error {
+                        append_workspace_snapshot_failed_event(
+                            run_log,
+                            event_sink,
+                            &input.turn_id,
+                            "afterToolExecution",
+                            message,
+                        )?;
+                    }
+                    append_turn_event(
+                        run_log,
+                        event_sink,
+                        "run.completed",
+                        Some(input.turn_id.clone()),
+                        json!({
+                            "summary": final_message,
+                            "changedFiles": final_changed_files.clone(),
+                            "verificationStatus": verification_status.as_str(),
+                        }),
+                    )?;
+
+                    return Ok(AgentTurnOutcome {
+                        final_message,
+                        iterations: iteration,
+                        tool_results,
+                        changed_files: final_changed_files,
+                    });
+                }
+
+                let tool_calls = response.tool_calls;
+                messages.push(ChatMessage::assistant_with_tool_calls(
+                    response.content,
+                    response.reasoning_content,
+                    tool_calls.clone(),
                 ));
-                tool_results.push(AgentToolResult {
-                    tool_call_id: tool_call.id.clone(),
-                    name: tool_call.function.name.clone(),
-                    status: executed.status,
-                    result: executed.log_result,
-                });
-                if let Some(output_summary) = follow_up_output_summary {
-                    last_shell_output_summary = Some(output_summary);
+
+                for (tool_index, tool_call) in tool_calls.iter().enumerate() {
+                    if workspace_before.is_none()
+                        && !workspace_snapshot_failed
+                        && should_capture_workspace_diff_baseline(tool_call.function.name.as_str())
+                    {
+                        match workspace_file_snapshot(self.tools.root()) {
+                            Ok(snapshot) => {
+                                workspace_before = Some(snapshot);
+                            }
+                            Err(error) => {
+                                workspace_snapshot_failed = true;
+                                append_workspace_snapshot_failed_event(
+                                    run_log,
+                                    event_sink,
+                                    &input.turn_id,
+                                    "beforeToolExecution",
+                                    error.to_string(),
+                                )?;
+                            }
+                        }
+                    }
+                    let tool_context = ToolCallContext {
+                        turn_id: &input.turn_id,
+                        iteration,
+                        tool_index: tool_index + 1,
+                        previous_shell_output_summary: last_shell_output_summary.as_deref(),
+                        cancellation_token: &input.cancellation_token,
+                    };
+                    let executed =
+                        self.execute_tool_call(tool_call, tool_context, run_log, event_sink)?;
+                    let follow_up_output_summary = executed.follow_up_output_summary.clone();
+                    verification_status = verification_status.combine(executed.verification_status);
+                    changed_files.extend(executed.changed_files.iter().cloned());
+                    messages.push(ChatMessage::tool_result(
+                        tool_call.id.clone(),
+                        executed.message_content.clone(),
+                    ));
+                    tool_results.push(AgentToolResult {
+                        tool_call_id: tool_call.id.clone(),
+                        name: tool_call.function.name.clone(),
+                        status: executed.status,
+                        result: executed.log_result,
+                    });
+                    if let Some(output_summary) = follow_up_output_summary {
+                        last_shell_output_summary = Some(output_summary);
+                    }
                 }
             }
-        }
 
-        Err(AgentTurnLoopError::MaxModelTurnsExceeded {
-            max_model_turns: self.config.max_model_turns,
-        })
+            next_iteration = budget_end + 1;
+            self.ensure_model_turn_budget_continuation(
+                &input.turn_id,
+                budget_end,
+                &input.cancellation_token,
+                run_log,
+                event_sink,
+            )?;
+            provider_transient_retries_remaining = self.config.provider_transient_retries;
+            provider_idle_timeout_retries_remaining =
+                self.config.provider_idle_timeout_attempts.saturating_sub(1);
+        }
     }
 
     async fn collect_provider_response<L>(
@@ -316,18 +576,74 @@ where
         let cancellation_token = request.cancellation_token.clone();
         cancellation_token.check()?;
         let started = Instant::now();
-        let mut stream = self
-            .provider
-            .complete_stream(request)
-            .await
-            .map_err(|error| provider_error_or_canceled(error, &cancellation_token))?;
+        let provider_idle_timeout = self.config.provider_idle_timeout;
+        let mut stream = match tokio::time::timeout(
+            provider_idle_timeout,
+            self.provider.complete_stream(request),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                return match provider_error_or_canceled(error, &cancellation_token) {
+                    AgentTurnLoopError::Provider(source) if source.is_transient() => {
+                        Err(AgentTurnLoopError::ProviderStreamInterrupted {
+                            source,
+                            partial_content: String::new(),
+                            partial_reasoning_chars: 0,
+                        })
+                    }
+                    error => Err(error),
+                };
+            }
+            Err(_) => {
+                return Err(AgentTurnLoopError::ProviderIdleTimeout {
+                    timeout_ms: provider_idle_timeout.as_millis(),
+                    attempts: 1,
+                    partial_content: String::new(),
+                    partial_reasoning_chars: 0,
+                });
+            }
+        };
         cancellation_token.check()?;
         let mut response = None;
         let mut emitted_content_delta = false;
+        let mut partial_content = String::new();
+        let mut partial_reasoning_chars = 0usize;
 
-        while let Some(event) = stream.next().await {
+        loop {
+            let next_event = match tokio::time::timeout(provider_idle_timeout, stream.next()).await
+            {
+                Ok(next_event) => next_event,
+                Err(_) => {
+                    return Err(AgentTurnLoopError::ProviderIdleTimeout {
+                        timeout_ms: provider_idle_timeout.as_millis(),
+                        attempts: 1,
+                        partial_content,
+                        partial_reasoning_chars,
+                    });
+                }
+            };
+            let Some(event) = next_event else {
+                break;
+            };
             cancellation_token.check()?;
-            match event.map_err(|error| provider_error_or_canceled(error, &cancellation_token))? {
+            let event = match event {
+                Ok(event) => event,
+                Err(error) => {
+                    return match provider_error_or_canceled(error, &cancellation_token) {
+                        AgentTurnLoopError::Provider(source) if source.is_transient() => {
+                            Err(AgentTurnLoopError::ProviderStreamInterrupted {
+                                source,
+                                partial_content,
+                                partial_reasoning_chars,
+                            })
+                        }
+                        error => Err(error),
+                    };
+                }
+            };
+            match event {
                 TurnProviderEvent::AssistantDelta(delta) => {
                     if response.is_some() {
                         return Err(AgentTurnLoopError::ProviderEventAfterCompletion);
@@ -339,6 +655,7 @@ where
                         .filter(|content| !content.is_empty())
                     {
                         emitted_content_delta = true;
+                        partial_content.push_str(content);
                         append_turn_event(
                             run_log,
                             event_sink,
@@ -350,6 +667,14 @@ where
                                 "stream": true,
                             }),
                         )?;
+                    }
+
+                    if let Some(reasoning_content) = delta
+                        .reasoning_content
+                        .as_deref()
+                        .filter(|reasoning_content| !reasoning_content.is_empty())
+                    {
+                        partial_reasoning_chars += reasoning_content.chars().count();
                     }
                 }
                 TurnProviderEvent::Completed(completed) => {
@@ -416,6 +741,14 @@ where
                 "stable workspace manifest summary",
             ));
         }
+        builder.add_item(ContextItem::project_rules(
+            TOOL_USAGE_INSTRUCTION,
+            "default tool usage contract",
+        ));
+        builder.add_item(ContextItem::project_rules(
+            FINAL_RESPONSE_SUMMARY_INSTRUCTION,
+            "default final response summary contract",
+        ));
         builder.add_item(ContextItem::user_task(input.user_task.clone()));
         for item in &input.context_items {
             builder.add_item(item.clone());
@@ -608,13 +941,25 @@ where
     ) -> Result<ExecutedToolCall, AgentTurnLoopError> {
         context.cancellation_token.check()?;
         let tool_name = tool_call.function.name.as_str();
-        let definition =
-            find_builtin_tool(tool_name).ok_or_else(|| AgentTurnLoopError::UnknownTool {
-                tool_call_id: tool_call.id.clone(),
-                name: tool_name.to_owned(),
-            })?;
+        let Some(definition) = find_builtin_tool(tool_name) else {
+            return self.execute_unknown_tool_call(tool_call, context, run_log, event_sink);
+        };
         let arguments_preview = parse_tool_arguments_value(tool_call)?;
-        validate_tool_call_arguments(definition, tool_call, &arguments_preview)?;
+        if let Err(source) = validate_tool_arguments(definition, &arguments_preview) {
+            return self.execute_invalid_tool_argument_schema_tool_call(
+                tool_call,
+                context,
+                InvalidToolArgumentSchemaCall {
+                    definition,
+                    arguments_preview,
+                    source,
+                },
+                run_log,
+                event_sink,
+            );
+        }
+        let executable_arguments =
+            executable_tool_arguments(definition, tool_call, &arguments_preview, run_log)?;
         let risk_assessment = tool_risk_assessment(definition, &arguments_preview);
 
         append_turn_event(
@@ -675,8 +1020,16 @@ where
                 )
             }
             ToolName::ApplyPatch => {
-                let args: ApplyPatchArgs = parse_tool_arguments(tool_call, &arguments_preview)?;
-                let approval_hunks = patch_approval_hunks(&args.unified_diff)?;
+                let args: ApplyPatchArgs = parse_tool_arguments(tool_call, &executable_arguments)?;
+                let approval_hunks = match patch_approval_hunks(&args.unified_diff) {
+                    Ok(hunks) => hunks,
+                    Err(error) if is_recoverable_apply_patch_error(&error) => {
+                        return self.execute_failed_apply_patch_tool_call(
+                            tool_call, context, error, run_log, event_sink,
+                        );
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 let approval_scope = self.ensure_approval(
                     definition,
                     &risk_assessment,
@@ -694,7 +1047,17 @@ where
                 )?;
                 let args = match approval_scope {
                     ApprovalScope::All => args,
-                    ApprovalScope::Hunks { hunk_ids } => filter_apply_patch_hunks(args, &hunk_ids)?,
+                    ApprovalScope::Hunks { hunk_ids } => {
+                        match filter_apply_patch_hunks(args, &hunk_ids) {
+                            Ok(args) => args,
+                            Err(error) if is_recoverable_apply_patch_error(&error) => {
+                                return self.execute_failed_apply_patch_tool_call(
+                                    tool_call, context, error, run_log, event_sink,
+                                );
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
                 };
                 self.execute_without_approval(
                     tool_call,
@@ -704,18 +1067,29 @@ where
                     event_sink,
                     |tools, args, cancellation_token| {
                         let result =
-                            tools.apply_patch_with_cancellation(args, cancellation_token)?;
+                            match tools.apply_patch_with_cancellation(args, cancellation_token) {
+                                Ok(result) => result,
+                                Err(error) if is_recoverable_apply_patch_error(&error) => {
+                                    failed_apply_patch_result(&error)
+                                }
+                                Err(error) => return Err(error.into()),
+                            };
+                        let changed_files = if result.status == ToolStatus::Ok {
+                            result.files.clone()
+                        } else {
+                            Vec::new()
+                        };
                         tool_record(
                             result.status,
                             result.summary.clone(),
-                            result.files.clone(),
+                            changed_files,
                             &result,
                         )
                     },
                 )
             }
             ToolName::Shell => {
-                let args: ShellArgs = parse_tool_arguments(tool_call, &arguments_preview)?;
+                let args: ShellArgs = parse_tool_arguments(tool_call, &executable_arguments)?;
                 self.ensure_approval(
                     definition,
                     &risk_assessment,
@@ -731,6 +1105,7 @@ where
                     run_log,
                     event_sink,
                 )?;
+                let command = args.command.clone();
                 self.execute_without_approval(
                     tool_call,
                     context,
@@ -739,7 +1114,7 @@ where
                     event_sink,
                     |tools, args, cancellation_token| {
                         let result = tools.shell_with_cancellation(args, cancellation_token)?;
-                        shell_tool_record(result)
+                        shell_tool_record(&command, result)
                     },
                 )
             }
@@ -777,6 +1152,10 @@ where
                 name: tool_name.to_owned(),
             }),
             ToolName::PlanUpdate => Err(AgentTurnLoopError::UnsupportedTool {
+                tool_call_id: tool_call.id.clone(),
+                name: tool_name.to_owned(),
+            }),
+            ToolName::ModelTurnBudget => Err(AgentTurnLoopError::UnsupportedTool {
                 tool_call_id: tool_call.id.clone(),
                 name: tool_name.to_owned(),
             }),
@@ -830,6 +1209,141 @@ where
         Ok(executed)
     }
 
+    fn execute_failed_apply_patch_tool_call<L>(
+        &self,
+        tool_call: &ChatToolCall,
+        context: ToolCallContext<'_>,
+        error: ToolExecutionError,
+        run_log: &mut L,
+        event_sink: &mut (impl TurnEventSink + ?Sized),
+    ) -> Result<ExecutedToolCall, AgentTurnLoopError>
+    where
+        L: RunLogWriter + ?Sized,
+    {
+        self.execute_without_approval(
+            tool_call,
+            context,
+            error,
+            run_log,
+            event_sink,
+            |_tools, error, _cancellation_token| {
+                let result = failed_apply_patch_result(&error);
+                tool_record(result.status, result.summary.clone(), Vec::new(), &result)
+            },
+        )
+    }
+
+    fn execute_invalid_tool_argument_schema_tool_call<L>(
+        &self,
+        tool_call: &ChatToolCall,
+        context: ToolCallContext<'_>,
+        invalid: InvalidToolArgumentSchemaCall<'_>,
+        run_log: &mut L,
+        event_sink: &mut (impl TurnEventSink + ?Sized),
+    ) -> Result<ExecutedToolCall, AgentTurnLoopError>
+    where
+        L: RunLogWriter + ?Sized,
+    {
+        context.cancellation_token.check()?;
+        let tool_name = tool_call.function.name.as_str();
+        let risk_assessment = tool_risk_assessment(invalid.definition, &invalid.arguments_preview);
+        let validation_error = invalid.source.to_string();
+        let summary = invalid_tool_schema_summary(tool_name, &validation_error);
+        let result = invalid_tool_schema_result(
+            invalid.definition.name,
+            tool_name,
+            &summary,
+            &validation_error,
+        );
+        let message_content = serde_json::to_string(&result)?;
+        let executed = ExecutedToolCall {
+            status: ToolStatus::Failed,
+            summary,
+            message_content,
+            log_result: result,
+            changed_files: Vec::new(),
+            verification_status: None,
+            follow_up_output_summary: None,
+        };
+
+        append_turn_event(
+            run_log,
+            event_sink,
+            "tool.requested",
+            Some(context.turn_id.to_owned()),
+            tool_requested_payload(
+                tool_call.id.clone(),
+                tool_name,
+                &risk_assessment,
+                invalid.arguments_preview,
+            ),
+        )?;
+        append_turn_event(
+            run_log,
+            event_sink,
+            "tool.completed",
+            Some(context.turn_id.to_owned()),
+            json!({
+                "toolCallId": tool_call.id.clone(),
+                "name": tool_name,
+                "status": executed.status.as_str(),
+                "summary": executed.summary.clone(),
+                "result": executed.log_result.clone(),
+            }),
+        )?;
+
+        Ok(executed)
+    }
+
+    fn execute_unknown_tool_call<L>(
+        &self,
+        tool_call: &ChatToolCall,
+        context: ToolCallContext<'_>,
+        run_log: &mut L,
+        event_sink: &mut (impl TurnEventSink + ?Sized),
+    ) -> Result<ExecutedToolCall, AgentTurnLoopError>
+    where
+        L: RunLogWriter + ?Sized,
+    {
+        context.cancellation_token.check()?;
+        let tool_name = tool_call.function.name.as_str();
+        let summary = unknown_tool_summary(tool_name);
+        let result = unknown_tool_result(tool_name, &summary);
+        let message_content = serde_json::to_string(&result)?;
+        let executed = ExecutedToolCall {
+            status: ToolStatus::Failed,
+            summary,
+            message_content,
+            log_result: result,
+            changed_files: Vec::new(),
+            verification_status: None,
+            follow_up_output_summary: None,
+        };
+
+        append_turn_event(
+            run_log,
+            event_sink,
+            "tool.requested",
+            Some(context.turn_id.to_owned()),
+            unknown_tool_requested_payload(tool_call.id.clone(), tool_name),
+        )?;
+        append_turn_event(
+            run_log,
+            event_sink,
+            "tool.completed",
+            Some(context.turn_id.to_owned()),
+            json!({
+                "toolCallId": tool_call.id.clone(),
+                "name": tool_name,
+                "status": executed.status.as_str(),
+                "summary": executed.summary.clone(),
+                "result": executed.log_result.clone(),
+            }),
+        )?;
+
+        Ok(executed)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn ensure_approval(
         &mut self,
@@ -847,7 +1361,11 @@ where
         run_log: &mut (impl RunLogWriter + ?Sized),
         event_sink: &mut (impl TurnEventSink + ?Sized),
     ) -> Result<ApprovalScope, AgentTurnLoopError> {
-        let approval = effective_approval_requirement(definition.approval, risk_assessment.risk);
+        let approval = effective_approval_requirement(
+            definition.approval,
+            risk_assessment.risk,
+            risk_assessment.approval_override,
+        );
         if approval == ApprovalRequirement::None {
             return Ok(ApprovalScope::All);
         }
@@ -907,6 +1425,104 @@ where
                     approval_resolved_payload(&request, "approved", None, Some(&approval_scope)),
                 )?;
                 Ok(approval_scope)
+            }
+            ApprovalDecision::Rejected { reason } => {
+                append_turn_event(
+                    run_log,
+                    event_sink,
+                    "tool.approvalResolved",
+                    Some(turn_id.to_owned()),
+                    approval_resolved_payload(&request, "rejected", Some(reason.as_str()), None),
+                )?;
+                Err(AgentTurnLoopError::ApprovalRejected {
+                    approval_id: request.approval_id,
+                    tool_call_id: request.tool_call_id,
+                    reason,
+                })
+            }
+            ApprovalDecision::Canceled { reason } => {
+                append_turn_event(
+                    run_log,
+                    event_sink,
+                    "tool.approvalResolved",
+                    Some(turn_id.to_owned()),
+                    approval_resolved_payload(&request, "canceled", Some(reason.as_str()), None),
+                )?;
+                Err(AgentTurnLoopError::ApprovalCanceled {
+                    approval_id: request.approval_id,
+                    tool_call_id: request.tool_call_id,
+                    reason,
+                })
+            }
+            ApprovalDecision::Expired { reason } => {
+                append_turn_event(
+                    run_log,
+                    event_sink,
+                    "tool.approvalResolved",
+                    Some(turn_id.to_owned()),
+                    approval_resolved_payload(&request, "expired", Some(reason.as_str()), None),
+                )?;
+                Err(AgentTurnLoopError::ApprovalExpired {
+                    approval_id: request.approval_id,
+                    tool_call_id: request.tool_call_id,
+                    reason,
+                })
+            }
+        }
+    }
+
+    fn ensure_model_turn_budget_continuation(
+        &mut self,
+        turn_id: &str,
+        completed_iterations: usize,
+        cancellation_token: &CancellationToken,
+        run_log: &mut (impl RunLogWriter + ?Sized),
+        event_sink: &mut (impl TurnEventSink + ?Sized),
+    ) -> Result<(), AgentTurnLoopError> {
+        cancellation_token.check()?;
+        let request = TurnApprovalRequest {
+            approval_id: format!("approval_model_turn_budget_{completed_iterations}"),
+            tool_call_id: format!("model_turn_budget_{completed_iterations}"),
+            tool_name: MODEL_TURN_BUDGET_TOOL_NAME.to_owned(),
+            risk: RiskLevel::Exec,
+            title: "Continue agent turn".to_owned(),
+            detail: format!(
+                "The model has used {completed_iterations} provider turn(s) without finishing. Approve to continue for up to {} more provider turn(s).",
+                self.config.max_model_turns
+            ),
+            command: None,
+            cwd: None,
+            output_summary: None,
+            paths: None,
+            hunks: None,
+            risk_reasons: vec!["model turn budget reached".to_owned()],
+            persistable: false,
+        };
+
+        append_turn_event(
+            run_log,
+            event_sink,
+            "tool.approvalRequired",
+            Some(turn_id.to_owned()),
+            approval_payload(&request),
+        )?;
+
+        cancellation_token.check()?;
+        match self.approval_policy.decide(&request)? {
+            ApprovalDecision::Approved | ApprovalDecision::ApprovedHunks { .. } => {
+                append_turn_event(
+                    run_log,
+                    event_sink,
+                    "tool.approvalResolved",
+                    Some(turn_id.to_owned()),
+                    approval_resolved_payload(
+                        &request,
+                        "approved",
+                        None,
+                        Some(&ApprovalScope::All),
+                    ),
+                )?;
+                Ok(())
             }
             ApprovalDecision::Rejected { reason } => {
                 append_turn_event(
@@ -1022,6 +1638,123 @@ where
     )
 }
 
+fn push_final_response_retry_messages(
+    messages: &mut Vec<ChatMessage>,
+    response: &TurnProviderResponse,
+) {
+    if let Some(content) = response
+        .content
+        .as_deref()
+        .filter(|content| !content.trim().is_empty())
+    {
+        messages.push(ChatMessage::assistant(content.to_owned()));
+    }
+    messages.push(ChatMessage::user(FINAL_RESPONSE_LENGTH_RETRY_INSTRUCTION));
+}
+
+fn push_tool_call_length_retry_messages(
+    messages: &mut Vec<ChatMessage>,
+    response: &TurnProviderResponse,
+) {
+    if let Some(content) = response
+        .content
+        .as_deref()
+        .filter(|content| !content.trim().is_empty())
+    {
+        messages.push(ChatMessage::assistant(content.to_owned()));
+    }
+    messages.push(ChatMessage::user(TOOL_CALL_LENGTH_RETRY_INSTRUCTION));
+}
+
+fn push_provider_stream_retry_messages(
+    messages: &mut Vec<ChatMessage>,
+    partial_content: &str,
+    partial_reasoning_chars: usize,
+) {
+    if let Some(content) = provider_stream_retry_partial_content(partial_content) {
+        messages.push(ChatMessage::assistant(content));
+    }
+    let instruction = if partial_reasoning_chars == 0 {
+        PROVIDER_STREAM_RETRY_INSTRUCTION.to_owned()
+    } else {
+        format!("{PROVIDER_STREAM_RETRY_INSTRUCTION} {PROVIDER_STREAM_RETRY_REASONING_NOTICE}")
+    };
+    messages.push(ChatMessage::user(instruction));
+}
+
+fn provider_stream_retry_partial_content(partial_content: &str) -> Option<String> {
+    let partial_content = partial_content.trim();
+    if partial_content.is_empty() {
+        return None;
+    }
+
+    let char_count = partial_content.chars().count();
+    if char_count <= PROVIDER_STREAM_RETRY_PARTIAL_CONTENT_MAX_CHARS {
+        return Some(partial_content.to_owned());
+    }
+
+    let suffix = partial_content
+        .chars()
+        .rev()
+        .take(PROVIDER_STREAM_RETRY_PARTIAL_CONTENT_MAX_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    Some(format!(
+        "[earlier interrupted assistant text omitted]\n{suffix}"
+    ))
+}
+
+fn recover_missing_tool_call_reasoning(
+    response: &mut TurnProviderResponse,
+    mode: ReasoningContentMode,
+) -> bool {
+    if response.tool_calls.is_empty() || mode != ReasoningContentMode::ThinkingEnabled {
+        return false;
+    }
+
+    if response
+        .reasoning_content
+        .as_deref()
+        .is_some_and(|reasoning| !reasoning.trim().is_empty())
+    {
+        return false;
+    }
+
+    response.reasoning_content = Some(recovered_tool_call_reasoning_content(&response.tool_calls));
+    true
+}
+
+fn recovered_tool_call_reasoning_content(tool_calls: &[ChatToolCall]) -> String {
+    let tool_names = tool_calls
+        .iter()
+        .filter_map(|tool_call| {
+            let name = tool_call.function.name.trim();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect::<BTreeSet<_>>();
+
+    if tool_names.is_empty() {
+        return "Tool call selected.".to_owned();
+    }
+
+    format!(
+        "Tool call selected: {}.",
+        tool_names.into_iter().collect::<Vec<_>>().join(", ")
+    )
+}
+
+fn turn_provider_finish_reason_label(reason: TurnProviderFinishReason) -> &'static str {
+    match reason {
+        TurnProviderFinishReason::Stop => "stop",
+        TurnProviderFinishReason::Length => "length",
+        TurnProviderFinishReason::ToolCalls => "tool_calls",
+        TurnProviderFinishReason::ContentFilter => "content_filter",
+        TurnProviderFinishReason::Error => "error",
+    }
+}
+
 fn attachment_path(
     index: usize,
     attachment: &TurnAttachment,
@@ -1109,6 +1842,9 @@ fn attachment_dedup_signature(key: &str) -> String {
 pub struct AgentTurnLoopConfig {
     pub max_input_tokens: u64,
     pub max_model_turns: usize,
+    pub provider_transient_retries: usize,
+    pub provider_idle_timeout: Duration,
+    pub provider_idle_timeout_attempts: usize,
     pub reasoning_mode: ReasoningContentMode,
     pub max_attachments: usize,
     pub max_attachment_bytes: u64,
@@ -1118,7 +1854,10 @@ impl Default for AgentTurnLoopConfig {
     fn default() -> Self {
         Self {
             max_input_tokens: 1_000_000,
-            max_model_turns: 8,
+            max_model_turns: DEFAULT_MAX_MODEL_TURNS,
+            provider_transient_retries: DEFAULT_PROVIDER_TRANSIENT_RETRIES,
+            provider_idle_timeout: Duration::from_secs(DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS),
+            provider_idle_timeout_attempts: DEFAULT_PROVIDER_IDLE_TIMEOUT_ATTEMPTS,
             reasoning_mode: ReasoningContentMode::ThinkingEnabled,
             max_attachments: DEFAULT_MAX_ATTACHMENTS,
             max_attachment_bytes: DEFAULT_MAX_ATTACHMENT_BYTES,
@@ -1133,6 +1872,8 @@ pub struct AgentTurnInput {
     pub mode: AgentRunMode,
     pub context_items: Vec<ContextItem>,
     pub attachments: Vec<TurnAttachment>,
+    pub supersedes: Option<TurnSupersedes>,
+    pub steer_queue: Option<TurnSteerQueue>,
     pub cancellation_token: CancellationToken,
 }
 
@@ -1144,6 +1885,8 @@ impl AgentTurnInput {
             mode: AgentRunMode::Edit,
             context_items: Vec::new(),
             attachments: Vec::new(),
+            supersedes: None,
+            steer_queue: None,
             cancellation_token: CancellationToken::new(),
         }
     }
@@ -1168,10 +1911,69 @@ impl AgentTurnInput {
         self
     }
 
+    pub fn with_supersedes(mut self, supersedes: TurnSupersedes) -> Self {
+        self.supersedes = Some(supersedes);
+        self
+    }
+
+    pub fn with_steer_queue(mut self, steer_queue: TurnSteerQueue) -> Self {
+        self.steer_queue = Some(steer_queue);
+        self
+    }
+
     pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
         self.cancellation_token = cancellation_token;
         self
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TurnSteerQueue {
+    inner: Arc<Mutex<VecDeque<TurnSteerMessage>>>,
+}
+
+impl TurnSteerQueue {
+    pub fn push(&self, steer_id: impl Into<String>, message: impl Into<String>) {
+        let mut queue = self
+            .inner
+            .lock()
+            .expect("turn steer queue lock should not be poisoned");
+        queue.push_back(TurnSteerMessage {
+            steer_id: steer_id.into(),
+            message: message.into(),
+        });
+    }
+
+    fn drain(&self) -> Vec<TurnSteerMessage> {
+        let mut queue = self
+            .inner
+            .lock()
+            .expect("turn steer queue lock should not be poisoned");
+        queue.drain(..).collect()
+    }
+}
+
+impl PartialEq for TurnSteerQueue {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for TurnSteerQueue {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnSteerMessage {
+    pub steer_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnSupersedes {
+    pub message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1490,13 +2292,26 @@ pub trait TurnProvider {
 #[error("{message}")]
 pub struct TurnProviderError {
     message: String,
+    transient: bool,
 }
 
 impl TurnProviderError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            transient: false,
         }
+    }
+
+    pub fn transient(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            transient: true,
+        }
+    }
+
+    pub const fn is_transient(&self) -> bool {
+        self.transient
     }
 }
 
@@ -1595,6 +2410,19 @@ pub enum AgentTurnLoopError {
     Reasoning(#[from] ReasoningContentError),
     #[error("provider failed: {0}")]
     Provider(#[from] TurnProviderError),
+    #[error("provider response stream interrupted: {source}")]
+    ProviderStreamInterrupted {
+        source: TurnProviderError,
+        partial_content: String,
+        partial_reasoning_chars: usize,
+    },
+    #[error("provider request made no progress for {timeout_ms}ms after {attempts} attempts")]
+    ProviderIdleTimeout {
+        timeout_ms: u128,
+        attempts: usize,
+        partial_content: String,
+        partial_reasoning_chars: usize,
+    },
     #[error("provider stream ended without a completed response")]
     ProviderStreamEndedWithoutCompletion,
     #[error("provider stream emitted more than one completed response")]
@@ -1618,12 +2446,19 @@ pub enum AgentTurnLoopError {
         tool_call_id: String,
         name: String,
         source: serde_json::Error,
+        raw_arguments: Option<String>,
     },
     #[error("tool call `{tool_call_id}` for `{name}` failed JSON Schema validation: {source}")]
     InvalidToolArgumentSchema {
         tool_call_id: String,
         name: String,
         source: ToolArgumentSchemaError,
+    },
+    #[error("tool call `{tool_call_id}` for `{name}` has invalid payload reference: {detail}")]
+    InvalidToolPayloadReference {
+        tool_call_id: String,
+        name: String,
+        detail: String,
     },
     #[error("tool result serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -1664,8 +2499,6 @@ pub enum AgentTurnLoopError {
     },
     #[error("approval policy failed: {0}")]
     ApprovalPolicy(#[from] ApprovalPolicyError),
-    #[error("model did not finish after {max_model_turns} turns")]
-    MaxModelTurnsExceeded { max_model_turns: usize },
 }
 
 impl AgentTurnLoopError {
@@ -1674,7 +2507,8 @@ impl AgentTurnLoopError {
             Self::InvalidConfig { .. } => "E_INVALID_CONFIG",
             Self::ContextBuild(_) => "E_CONTEXT_BUILD_FAILED",
             Self::Reasoning(_) => "E_REASONING_CONTENT",
-            Self::Provider(_) => "E_PROVIDER_ERROR",
+            Self::Provider(_) | Self::ProviderStreamInterrupted { .. } => "E_PROVIDER_ERROR",
+            Self::ProviderIdleTimeout { .. } => "E_PROVIDER_TIMEOUT",
             Self::ProviderStreamEndedWithoutCompletion => "E_PROVIDER_STREAM_INCOMPLETE",
             Self::ProviderCompletedMultipleTimes => "E_PROVIDER_STREAM_INVALID",
             Self::ProviderEventAfterCompletion => "E_PROVIDER_STREAM_INVALID",
@@ -1684,9 +2518,9 @@ impl AgentTurnLoopError {
             Self::Canceled { .. } => "E_RUN_CANCELED",
             Self::UnknownTool { .. } => "E_UNKNOWN_TOOL",
             Self::UnsupportedTool { .. } => "E_UNSUPPORTED_TOOL",
-            Self::InvalidToolArguments { .. } | Self::InvalidToolArgumentSchema { .. } => {
-                "E_INVALID_TOOL_ARGUMENTS"
-            }
+            Self::InvalidToolArguments { .. }
+            | Self::InvalidToolArgumentSchema { .. }
+            | Self::InvalidToolPayloadReference { .. } => "E_INVALID_TOOL_ARGUMENTS",
             Self::Serialization(_) => "E_SERIALIZATION",
             Self::TooManyAttachments { .. }
             | Self::DuplicateAttachment { .. }
@@ -1697,7 +2531,6 @@ impl AgentTurnLoopError {
             Self::ApprovalCanceled { .. } => "E_APPROVAL_CANCELED",
             Self::ApprovalExpired { .. } => "E_APPROVAL_EXPIRED",
             Self::ApprovalPolicy(_) => "E_APPROVAL_POLICY",
-            Self::MaxModelTurnsExceeded { .. } => "E_MAX_MODEL_TURNS",
         }
     }
 }
@@ -1725,7 +2558,33 @@ struct ExecutedToolCall {
     message_content: String,
     log_result: Value,
     changed_files: Vec<String>,
+    verification_status: Option<VerificationStatus>,
     follow_up_output_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerificationStatus {
+    Skipped,
+    Passed,
+    Failed,
+}
+
+impl VerificationStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Skipped => "skipped",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+        }
+    }
+
+    const fn combine(self, observed: Option<Self>) -> Self {
+        match (self, observed) {
+            (Self::Failed, _) | (_, Some(Self::Failed)) => Self::Failed,
+            (_, Some(Self::Passed)) => Self::Passed,
+            (status, _) => status,
+        }
+    }
 }
 
 struct CollectedProviderTurn {
@@ -1746,28 +2605,134 @@ struct ToolCallContext<'a> {
     cancellation_token: &'a CancellationToken,
 }
 
+struct InvalidToolArgumentSchemaCall<'a> {
+    definition: &'a ToolDefinition,
+    arguments_preview: Value,
+    source: ToolArgumentSchemaError,
+}
+
 fn parse_tool_arguments_value(tool_call: &ChatToolCall) -> Result<Value, AgentTurnLoopError> {
     serde_json::from_str(&tool_call.function.arguments).map_err(|source| {
         AgentTurnLoopError::InvalidToolArguments {
             tool_call_id: tool_call.id.clone(),
             name: tool_call.function.name.clone(),
             source,
+            raw_arguments: Some(tool_call.function.arguments.clone()),
         }
     })
 }
 
-fn validate_tool_call_arguments(
+fn executable_tool_arguments(
     definition: &ToolDefinition,
     tool_call: &ChatToolCall,
     arguments: &Value,
-) -> Result<(), AgentTurnLoopError> {
-    validate_tool_arguments(definition, arguments).map_err(|source| {
-        AgentTurnLoopError::InvalidToolArgumentSchema {
-            tool_call_id: tool_call.id.clone(),
-            name: tool_call.function.name.clone(),
-            source,
+    run_log: &mut (impl RunLogWriter + ?Sized),
+) -> Result<Value, AgentTurnLoopError> {
+    if definition.name != ToolName::ApplyPatch {
+        return Ok(arguments.clone());
+    }
+
+    apply_patch_arguments_for_execution(tool_call, arguments, run_log)
+}
+
+fn apply_patch_arguments_for_execution(
+    tool_call: &ChatToolCall,
+    arguments: &Value,
+    run_log: &mut (impl RunLogWriter + ?Sized),
+) -> Result<Value, AgentTurnLoopError> {
+    let object = arguments.as_object().ok_or_else(|| {
+        invalid_payload_ref(tool_call, "apply_patch arguments must be a JSON object")
+    })?;
+    let has_unified_diff = object.get("unifiedDiff").is_some();
+    let payload_ref = object.get("payloadRef");
+
+    match (has_unified_diff, payload_ref) {
+        (true, None) => Ok(arguments.clone()),
+        (false, Some(payload_ref)) => {
+            let unified_diff = read_run_payload_ref(tool_call, payload_ref, run_log)?;
+            let mut materialized = object.clone();
+            materialized.remove("payloadRef");
+            materialized.insert("unifiedDiff".to_owned(), Value::String(unified_diff));
+            Ok(Value::Object(materialized))
         }
-    })
+        (true, Some(_)) => Err(invalid_payload_ref(
+            tool_call,
+            "apply_patch must provide either unifiedDiff or payloadRef, not both",
+        )),
+        (false, None) => Err(invalid_payload_ref(
+            tool_call,
+            "apply_patch must provide unifiedDiff or payloadRef",
+        )),
+    }
+}
+
+fn read_run_payload_ref(
+    tool_call: &ChatToolCall,
+    payload_ref: &Value,
+    run_log: &mut (impl RunLogWriter + ?Sized),
+) -> Result<String, AgentTurnLoopError> {
+    let object = payload_ref
+        .as_object()
+        .ok_or_else(|| invalid_payload_ref(tool_call, "payloadRef must be an object"))?;
+    let kind = object.get("kind").and_then(Value::as_str);
+    if kind != Some("run_file") {
+        return Err(invalid_payload_ref(
+            tool_call,
+            "payloadRef.kind must be `run_file`",
+        ));
+    }
+
+    let path = object
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_payload_ref(tool_call, "payloadRef.path must be a string"))?;
+    let slash_path = path.replace('\\', "/");
+    if !slash_path.starts_with("payloads/") {
+        return Err(invalid_payload_ref(
+            tool_call,
+            "payloadRef.path must be under payloads/",
+        ));
+    }
+
+    let contents = run_log
+        .read_payload_file(Path::new(path))
+        .map_err(|source| {
+            invalid_payload_ref(tool_call, format!("payloadRef.path is invalid: {source}"))
+        })?
+        .ok_or_else(|| {
+            invalid_payload_ref(
+                tool_call,
+                "active run log does not support payload references",
+            )
+        })?;
+    if let Some(expected_size) = object.get("sizeBytes").and_then(Value::as_u64) {
+        let actual_size = contents.len() as u64;
+        if actual_size != expected_size {
+            return Err(invalid_payload_ref(
+                tool_call,
+                format!("payloadRef.sizeBytes expected {expected_size}, got {actual_size}"),
+            ));
+        }
+    }
+    if let Some(expected_sha256) = object.get("sha256").and_then(Value::as_str) {
+        let actual_sha256 = crate::hashing::sha256_hex(contents.as_bytes());
+        if actual_sha256 != expected_sha256 {
+            return Err(invalid_payload_ref(
+                tool_call,
+                "payloadRef.sha256 does not match payload file",
+            ));
+        }
+    }
+
+    Ok(contents)
+}
+
+fn invalid_payload_ref(tool_call: &ChatToolCall, detail: impl Into<String>) -> AgentTurnLoopError {
+    AgentTurnLoopError::InvalidToolPayloadReference {
+        tool_call_id: tool_call.id.clone(),
+        name: tool_call.function.name.clone(),
+        detail: detail.into(),
+    }
 }
 
 fn parse_tool_arguments<T: DeserializeOwned>(
@@ -1779,6 +2744,7 @@ fn parse_tool_arguments<T: DeserializeOwned>(
             tool_call_id: tool_call.id.clone(),
             name: tool_call.function.name.clone(),
             source,
+            raw_arguments: None,
         }
     })
 }
@@ -1797,12 +2763,17 @@ fn tool_record<T: serde::Serialize>(
         message_content,
         log_result,
         changed_files,
+        verification_status: None,
         follow_up_output_summary: None,
     })
 }
 
-fn shell_tool_record(result: ShellResult) -> Result<ExecutedToolCall, AgentTurnLoopError> {
+fn shell_tool_record(
+    command: &str,
+    result: ShellResult,
+) -> Result<ExecutedToolCall, AgentTurnLoopError> {
     let output_summary = shell_approval_output_summary(&result);
+    let verification_status = verification_status_for_shell_command(command, result.status);
     let log_result = redacted_tool_result_value(&result)?;
     let message_content = serde_json::to_string(&log_result)?;
     Ok(ExecutedToolCall {
@@ -1811,8 +2782,90 @@ fn shell_tool_record(result: ShellResult) -> Result<ExecutedToolCall, AgentTurnL
         message_content,
         log_result,
         changed_files: Vec::new(),
+        verification_status,
         follow_up_output_summary: output_summary,
     })
+}
+
+fn verification_status_for_shell_command(
+    command: &str,
+    status: ToolStatus,
+) -> Option<VerificationStatus> {
+    if !is_verification_shell_command(command) {
+        return None;
+    }
+
+    Some(match status {
+        ToolStatus::Ok => VerificationStatus::Passed,
+        ToolStatus::Failed => VerificationStatus::Failed,
+    })
+}
+
+fn is_verification_shell_command(command: &str) -> bool {
+    let tokens = shell_command_tokens(command);
+    let Some(program) = tokens.first().map(String::as_str) else {
+        return false;
+    };
+
+    match program {
+        "cargo" => tokens
+            .iter()
+            .skip(1)
+            .any(|token| matches!(token.as_str(), "check" | "clippy" | "test")),
+        "npm" | "pnpm" | "yarn" | "bun" => is_javascript_verification_command(&tokens[1..]),
+        "node" => tokens.iter().skip(1).any(|token| token == "test"),
+        "py" | "python" | "python3" => tokens
+            .windows(2)
+            .any(|pair| pair[0] == "m" && matches!(pair[1].as_str(), "pytest" | "unittest")),
+        "pytest" => true,
+        "go" | "dotnet" => tokens.iter().skip(1).any(|token| token.as_str() == "test"),
+        "tsc" => true,
+        _ => false,
+    }
+}
+
+fn shell_command_tokens(command: &str) -> Vec<String> {
+    command
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric()
+                || character == '-'
+                || character == '_'
+                || character == '.'
+                || character == ':')
+        })
+        .filter(|token| !token.is_empty())
+        .map(|token| token.trim_start_matches('-').to_ascii_lowercase())
+        .collect()
+}
+
+fn is_javascript_verification_command(tokens: &[String]) -> bool {
+    for (index, token) in tokens.iter().enumerate() {
+        if token == "test" {
+            return true;
+        }
+        if token == "run"
+            && let Some(script) = tokens.get(index + 1)
+            && is_javascript_verification_script(script)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_javascript_verification_script(script: &str) -> bool {
+    matches!(
+        script,
+        "check" | "clippy" | "lint" | "test" | "tests" | "typecheck" | "type-check"
+    ) || script.starts_with("check:")
+        || script.starts_with("lint:")
+        || script.starts_with("test:")
+        || script.starts_with("typecheck:")
+        || script.starts_with("type-check:")
+}
+
+fn should_capture_workspace_diff_baseline(tool_name: &str) -> bool {
+    tool_name.eq_ignore_ascii_case(ToolName::Shell.as_str())
 }
 
 fn shell_approval_output_summary(result: &ShellResult) -> Option<String> {
@@ -1870,6 +2923,186 @@ fn truncate_shell_output_summary(text: &str) -> String {
     format!("{}{}", &text[..end], TRUNCATED_MARKER)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceFileSnapshot {
+    files: BTreeMap<String, WorkspaceFileFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceFileFingerprint {
+    len: u64,
+    modified_unix_ms: Option<u128>,
+    hash: Option<String>,
+}
+
+fn final_changed_files(
+    mut changed_files: Vec<String>,
+    workspace_before: Option<&WorkspaceFileSnapshot>,
+    workspace_root: &Path,
+) -> (Vec<String>, Option<String>) {
+    if let Some(before) = workspace_before {
+        match workspace_file_snapshot(workspace_root) {
+            Ok(after) => {
+                changed_files.extend(workspace_snapshot_changed_files(before, &after));
+            }
+            Err(error) => {
+                return (
+                    sorted_unique_strings(changed_files),
+                    Some(error.to_string()),
+                );
+            }
+        }
+    }
+    (sorted_unique_strings(changed_files), None)
+}
+
+fn append_workspace_snapshot_failed_event<L>(
+    run_log: &mut L,
+    event_sink: &mut (impl TurnEventSink + ?Sized),
+    turn_id: &str,
+    phase: &str,
+    message: String,
+) -> Result<RunLogEvent, AgentTurnLoopError>
+where
+    L: RunLogWriter + ?Sized,
+{
+    append_turn_event(
+        run_log,
+        event_sink,
+        "workspace.snapshotFailed",
+        Some(turn_id.to_owned()),
+        json!({
+            "phase": phase,
+            "message": message,
+        }),
+    )
+}
+
+fn workspace_file_snapshot(root: &Path) -> std::io::Result<WorkspaceFileSnapshot> {
+    let root = fs::canonicalize(root)?;
+    let mut files = BTreeMap::new();
+    let mut scanned_files = 0usize;
+    scan_workspace_dir(&root, &root, &mut files, &mut scanned_files)?;
+    Ok(WorkspaceFileSnapshot { files })
+}
+
+fn scan_workspace_dir(
+    root: &Path,
+    dir: &Path,
+    files: &mut BTreeMap<String, WorkspaceFileFingerprint>,
+    scanned_files: &mut usize,
+) -> std::io::Result<()> {
+    if *scanned_files >= WORKSPACE_DIFF_MAX_FILES {
+        return Ok(());
+    }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if dir == root => return Err(error),
+        Err(_) => return Ok(()),
+    };
+    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        if *scanned_files >= WORKSPACE_DIFF_MAX_FILES {
+            return Ok(());
+        }
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if is_workspace_diff_excluded_dir(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            scan_workspace_dir(root, &path, files, scanned_files)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let Some(relative_path) = workspace_relative_slash_path(root, &path) else {
+            continue;
+        };
+        let Some(fingerprint) = workspace_file_fingerprint(&path) else {
+            continue;
+        };
+        files.insert(relative_path, fingerprint);
+        *scanned_files += 1;
+    }
+
+    Ok(())
+}
+
+fn workspace_file_fingerprint(path: &Path) -> Option<WorkspaceFileFingerprint> {
+    let metadata = fs::metadata(path).ok()?;
+    let len = metadata.len();
+    let modified_unix_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis());
+    let hash = if len <= WORKSPACE_DIFF_HASH_MAX_BYTES {
+        fs::read(path).ok().map(|bytes| sha256_hex(&bytes))
+    } else {
+        None
+    };
+
+    Some(WorkspaceFileFingerprint {
+        len,
+        modified_unix_ms,
+        hash,
+    })
+}
+
+fn workspace_snapshot_changed_files(
+    before: &WorkspaceFileSnapshot,
+    after: &WorkspaceFileSnapshot,
+) -> Vec<String> {
+    let mut changed = Vec::new();
+    let paths = before
+        .files
+        .keys()
+        .chain(after.files.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for path in paths {
+        if before.files.get(&path) != after.files.get(&path) {
+            changed.push(path);
+        }
+    }
+    changed
+}
+
+fn sorted_unique_strings(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn workspace_relative_slash_path(root: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(root)
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .filter(|relative| !relative.is_empty())
+}
+
+fn is_workspace_diff_excluded_dir(file_name: &str) -> bool {
+    WORKSPACE_DIFF_EXCLUDED_DIRS
+        .iter()
+        .any(|excluded| file_name.eq_ignore_ascii_case(excluded))
+}
+
 fn reasoning_state_payload(state: ReasoningContentState) -> Value {
     match state {
         ReasoningContentState::NoReplayRequired => {
@@ -1884,38 +3117,345 @@ fn reasoning_state_payload(state: ReasoningContentState) -> Value {
     }
 }
 
+fn drain_steer_messages(
+    input: &AgentTurnInput,
+    run_log: &mut (impl RunLogWriter + ?Sized),
+    event_sink: &mut (impl TurnEventSink + ?Sized),
+    messages: &mut Vec<ChatMessage>,
+) -> Result<(), AgentTurnLoopError> {
+    let Some(steer_queue) = &input.steer_queue else {
+        return Ok(());
+    };
+
+    for steer in steer_queue.drain() {
+        append_turn_event(
+            run_log,
+            event_sink,
+            "turn.steered",
+            Some(input.turn_id.clone()),
+            json!({
+                "steerId": steer.steer_id,
+                "message": steer.message,
+            }),
+        )?;
+        messages.push(ChatMessage::user(format!(
+            "{STEER_INSTRUCTION_PREFIX}{}",
+            steer.message
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ToolRiskAssessment {
     risk: RiskLevel,
     risk_reasons: Vec<String>,
+    approval_override: Option<ApprovalRequirement>,
 }
 
 fn tool_risk_assessment(definition: &ToolDefinition, arguments: &Value) -> ToolRiskAssessment {
     if definition.name == ToolName::Shell
         && let Some(command) = arguments.get("command").and_then(Value::as_str)
     {
+        let cwd = arguments.get("cwd").and_then(Value::as_str);
+        if is_auto_approved_read_only_shell(command, cwd) {
+            return ToolRiskAssessment {
+                risk: RiskLevel::Read,
+                risk_reasons: vec!["read-only shell allowlist".to_owned()],
+                approval_override: Some(ApprovalRequirement::None),
+            };
+        }
+
         let classification = classify_shell_command(command);
         return ToolRiskAssessment {
             risk: classification.risk,
             risk_reasons: classification.reason_summaries(),
+            approval_override: None,
         };
+    }
+
+    if definition.name == ToolName::ApplyPatch
+        && let Some(expected_files) = arguments.get("expectedFiles").and_then(Value::as_array)
+    {
+        if let Some(policy_file) = expected_files
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|path| is_workspace_policy_patch_file(path))
+        {
+            return ToolRiskAssessment {
+                risk: definition.risk,
+                risk_reasons: vec![format!(
+                    "workspace policy file `{policy_file}` requires approval"
+                )],
+                approval_override: Some(ApprovalRequirement::Required),
+            };
+        }
+
+        let file_count = expected_files.len();
+        if file_count > MAX_AUTO_APPROVED_PATCH_FILES {
+            return ToolRiskAssessment {
+                risk: definition.risk,
+                risk_reasons: vec![format!(
+                    "bulk patch touches {file_count} files; limit for automatic workspace patch is {MAX_AUTO_APPROVED_PATCH_FILES}"
+                )],
+                approval_override: Some(ApprovalRequirement::Required),
+            };
+        }
     }
 
     ToolRiskAssessment {
         risk: definition.risk,
         risk_reasons: Vec::new(),
+        approval_override: None,
     }
+}
+
+fn is_workspace_policy_patch_file(path: &str) -> bool {
+    let file_name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    WORKSPACE_POLICY_PATCH_FILES
+        .iter()
+        .any(|policy_file| file_name.eq_ignore_ascii_case(policy_file))
+}
+
+fn is_auto_approved_read_only_shell(command: &str, cwd: Option<&str>) -> bool {
+    if !is_safe_workspace_relative_token(cwd.unwrap_or(".")) {
+        return false;
+    }
+
+    let Some(tokens) = split_simple_read_only_shell_tokens(command) else {
+        return false;
+    };
+    let Some(program) = tokens.first().map(String::as_str) else {
+        return false;
+    };
+
+    if is_auto_approved_read_only_version_query(&tokens) {
+        return true;
+    }
+
+    match program.to_ascii_lowercase().as_str() {
+        "rg" => {
+            read_only_shell_args_are_workspace_scoped(&tokens[1..])
+                && tokens[1..]
+                    .iter()
+                    .all(|token| is_read_only_rg_argument(token))
+        }
+        "get-content" | "gc" | "cat" | "type" | "select-string" | "get-childitem" | "gci"
+        | "dir" | "test-path" => read_only_shell_args_are_workspace_scoped(&tokens[1..]),
+        "git" => is_auto_approved_read_only_git(&tokens[1..]),
+        _ => false,
+    }
+}
+
+fn is_auto_approved_read_only_version_query(tokens: &[String]) -> bool {
+    let [program, version_arg] = tokens else {
+        return false;
+    };
+    if !is_plain_shell_program_name(program) {
+        return false;
+    }
+
+    let program = program.to_ascii_lowercase();
+    if !READ_ONLY_VERSION_COMMANDS.contains(&program.as_str()) {
+        return false;
+    }
+
+    matches!(version_arg.as_str(), "--version" | "-V")
+        || (version_arg == "-v" && READ_ONLY_LOWERCASE_VERSION_COMMANDS.contains(&program.as_str()))
+        || (version_arg == "version" && READ_ONLY_VERSION_SUBCOMMANDS.contains(&program.as_str()))
+}
+
+fn is_plain_shell_program_name(program: &str) -> bool {
+    let trimmed = program.trim();
+    !trimmed.is_empty()
+        && !trimmed.starts_with('-')
+        && !trimmed.starts_with('.')
+        && !trimmed.chars().any(|ch| matches!(ch, '/' | '\\' | ':'))
+}
+
+fn is_auto_approved_read_only_git(args: &[String]) -> bool {
+    let Some(subcommand) = args.first().map(String::as_str) else {
+        return false;
+    };
+    if !matches!(subcommand, "diff" | "status" | "log" | "show") {
+        return false;
+    }
+
+    args[1..].iter().all(|token| {
+        !matches!(token.as_str(), "--output" | "--ext-diff" | "--no-index")
+            && !token.starts_with("--output=")
+            && read_only_shell_token_is_workspace_scoped(token)
+    })
+}
+
+fn is_read_only_rg_argument(token: &str) -> bool {
+    if matches!(token, "--pre" | "--replace" | "--passthru") {
+        return false;
+    }
+    if token.starts_with("--pre=") || token.starts_with("--replace=") {
+        return false;
+    }
+    if token.starts_with("--") {
+        return true;
+    }
+
+    !token.starts_with('-') || token.len() <= 1 || !token[1..].contains('r')
+}
+
+fn read_only_shell_args_are_workspace_scoped(args: &[String]) -> bool {
+    args.iter()
+        .all(|token| read_only_shell_token_is_workspace_scoped(token))
+}
+
+fn read_only_shell_token_is_workspace_scoped(token: &str) -> bool {
+    if token.starts_with('-') {
+        if let Some((_, value)) = token.split_once('=') {
+            return is_safe_workspace_relative_token(value);
+        }
+        return true;
+    }
+    is_safe_workspace_relative_token(token)
+}
+
+fn is_safe_workspace_relative_token(token: &str) -> bool {
+    let trimmed = token.trim();
+    if trimmed.is_empty() || trimmed == "." {
+        return true;
+    }
+
+    if trimmed.starts_with('/') || trimmed.starts_with('\\') || trimmed.starts_with('~') {
+        return false;
+    }
+    if trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':' {
+        return false;
+    }
+
+    !trimmed
+        .split(['/', '\\'])
+        .any(|component| component == "..")
+        && !is_sensitive_workspace_shell_token(trimmed)
+}
+
+fn is_sensitive_workspace_shell_token(token: &str) -> bool {
+    let token = token.trim_start_matches(['!', '+']);
+    token.split(['/', '\\']).any(|component| {
+        let component = component.to_ascii_lowercase();
+        matches!(
+            component.as_str(),
+            ".git" | ".secrets" | ".secret" | ".agents" | ".codex" | ".prole-coder"
+        ) || component == ".env"
+            || component.starts_with(".env.")
+    })
+}
+
+fn split_simple_read_only_shell_tokens(command: &str) -> Option<Vec<String>> {
+    if command.trim().is_empty()
+        || command.contains('$')
+        || command
+            .chars()
+            .any(|character| matches!(character, '|' | '&' | ';' | '<' | '>' | '`' | '\n' | '\r'))
+    {
+        return None;
+    }
+
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    for character in command.chars() {
+        if let Some(quote_character) = quote {
+            if character == quote_character {
+                quote = None;
+            } else {
+                current.push(character);
+            }
+            continue;
+        }
+
+        match character {
+            '\'' | '"' => quote = Some(character),
+            ' ' | '\t' => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(character),
+        }
+    }
+
+    if quote.is_some() {
+        return None;
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Some(tokens)
 }
 
 fn effective_approval_requirement(
     static_approval: ApprovalRequirement,
     risk: RiskLevel,
+    approval_override: Option<ApprovalRequirement>,
 ) -> ApprovalRequirement {
     let risk_approval = risk.default_approval();
-    if approval_requirement_rank(risk_approval) > approval_requirement_rank(static_approval) {
-        risk_approval
+    let base_approval = if static_approval == ApprovalRequirement::None {
+        // `ApprovalRequirement::None` is an explicit tool contract, not a shell risk
+        // classifier fallback: shell and model_turn_budget are registered as Required.
+        // The only write-capable built-in with static None is workspace apply_patch;
+        // network/destructive dynamic risk still upgrades to approval.
+        match risk {
+            RiskLevel::Network | RiskLevel::Destructive => risk_approval,
+            RiskLevel::Read | RiskLevel::Write | RiskLevel::Exec => ApprovalRequirement::None,
+        }
     } else {
-        static_approval
+        max_approval_requirement(static_approval, risk_approval)
+    };
+
+    match approval_override {
+        Some(ApprovalRequirement::None) => ApprovalRequirement::None,
+        Some(override_approval) => max_approval_requirement(base_approval, override_approval),
+        None => base_approval,
+    }
+}
+
+fn max_approval_requirement(
+    left: ApprovalRequirement,
+    right: ApprovalRequirement,
+) -> ApprovalRequirement {
+    if approval_requirement_rank(right) > approval_requirement_rank(left) {
+        right
+    } else {
+        left
+    }
+}
+
+fn is_recoverable_apply_patch_error(error: &ToolExecutionError) -> bool {
+    matches!(
+        error,
+        ToolExecutionError::InvalidPatch(_)
+            | ToolExecutionError::PatchFileMismatch { .. }
+            | ToolExecutionError::PatchHunkMismatch { .. }
+    )
+}
+
+fn failed_apply_patch_result(error: &ToolExecutionError) -> ApplyPatchResult {
+    ApplyPatchResult {
+        status: ToolStatus::Failed,
+        summary: format!("Patch failed: {error}"),
+        error_code: Some(apply_patch_error_code(error).to_owned()),
+        files: Vec::new(),
+        // Recoverable patch errors are reported before workspace writes. The executor parses,
+        // validates expected files, applies all hunks in memory, and only then writes staged files.
+        // With no modified files there is intentionally no reverse patch to return.
+        reverse_patch: String::new(),
+    }
+}
+
+fn apply_patch_error_code(error: &ToolExecutionError) -> &'static str {
+    match error {
+        ToolExecutionError::InvalidPatch(_) => "E_INVALID_PATCH",
+        ToolExecutionError::PatchFileMismatch { .. } => "E_PATCH_FILE_MISMATCH",
+        ToolExecutionError::PatchHunkMismatch { .. } => "E_PATCH_HUNK_MISMATCH",
+        _ => "E_PATCH_FAILED",
     }
 }
 
@@ -1994,6 +3534,153 @@ fn tool_requested_payload(
     }
 
     Value::Object(payload)
+}
+
+fn unknown_tool_requested_payload(tool_call_id: String, tool_name: &str) -> Value {
+    let risk = unknown_tool_risk(tool_name);
+    json!({
+        "toolCallId": tool_call_id,
+        "name": tool_name,
+        "risk": risk.as_str(),
+        "riskReasons": ["unknown tool requested; no executor available"],
+        "argumentsPreview": {
+            "omitted": "Arguments for unknown tools are not logged. Use the failed tool result guidance to retry with a supported tool."
+        }
+    })
+}
+
+fn unknown_tool_result(tool_name: &str, summary: &str) -> Value {
+    json!({
+        "status": ToolStatus::Failed,
+        "errorCode": "E_UNKNOWN_TOOL",
+        "summary": summary,
+        "requestedTool": tool_name,
+        "availableTools": available_builtin_tool_names(),
+        "guidance": unknown_tool_guidance(tool_name),
+    })
+}
+
+fn unknown_tool_summary(tool_name: &str) -> String {
+    format!("Unknown tool `{tool_name}`. Retry using a supported ProleCoder tool.")
+}
+
+fn invalid_tool_schema_result(
+    tool: ToolName,
+    tool_name: &str,
+    summary: &str,
+    validation_error: &str,
+) -> Value {
+    json!({
+        "status": ToolStatus::Failed,
+        "errorCode": "E_INVALID_TOOL_ARGUMENTS",
+        "summary": summary,
+        "requestedTool": tool_name,
+        "validationError": validation_error,
+        "guidance": invalid_tool_schema_guidance(tool),
+    })
+}
+
+fn invalid_tool_schema_summary(tool_name: &str, validation_error: &str) -> String {
+    format!(
+        "Tool arguments failed schema validation for `{tool_name}`: {validation_error}. Retry with the documented argument shape."
+    )
+}
+
+fn invalid_tool_schema_guidance(tool: ToolName) -> &'static str {
+    match tool {
+        ToolName::ReadFile => {
+            "Use read_file with path plus optional startLine/endLine only. Do not send limit, maxBytes, content, or other extra properties; for shorter reads, request a line range."
+        }
+        ToolName::Search => {
+            "Use search with the documented query and optional filter fields only. Remove unsupported properties before retrying."
+        }
+        ToolName::ApplyPatch => {
+            "Use apply_patch with expectedFiles and either unifiedDiff or payloadRef. Do not include both, and remove unsupported properties before retrying."
+        }
+        ToolName::Shell => {
+            "Use shell with command plus optional cwd/timeoutMs only. Put the directory in cwd instead of inventing extra execution fields."
+        }
+        ToolName::WorkspaceManifest => {
+            "Use workspace_manifest with only documented manifest options, or an empty object when no options are needed."
+        }
+        ToolName::GitStatus => "Use git_status with an empty object.",
+        ToolName::GitDiff => "Use git_diff with documented diff options only.",
+        ToolName::LspDiagnostics => {
+            "Use lsp_diagnostics with documented diagnostic request fields only."
+        }
+        ToolName::PlanUpdate => "Use plan_update with documented plan fields only.",
+        ToolName::ModelTurnBudget => {
+            "Do not call model_turn_budget directly; ProleCoder uses it internally for continuation approval."
+        }
+    }
+}
+
+fn unknown_tool_guidance(tool_name: &str) -> String {
+    if tool_name == "write_file" {
+        return "ProleCoder does not provide write_file. For text edits, use apply_patch with expectedFiles plus unifiedDiff or payloadRef; reread the target file before retrying after a patch mismatch.".to_owned();
+    }
+
+    "Use one of the availableTools exactly as named. Do not invent tool names.".to_owned()
+}
+
+fn unknown_tool_risk(tool_name: &str) -> RiskLevel {
+    let tokens = unknown_tool_name_tokens(tool_name);
+    if tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "delete" | "remove" | "destroy" | "reset"))
+    {
+        RiskLevel::Destructive
+    } else if tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "write" | "edit" | "patch" | "create"))
+    {
+        RiskLevel::Write
+    } else if tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "read" | "search" | "list"))
+    {
+        RiskLevel::Read
+    } else {
+        RiskLevel::Exec
+    }
+}
+
+fn unknown_tool_name_tokens(tool_name: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut previous_was_lowercase_or_digit = false;
+
+    for character in tool_name.chars() {
+        if !character.is_ascii_alphanumeric() {
+            push_unknown_tool_name_token(&mut tokens, &mut current);
+            previous_was_lowercase_or_digit = false;
+            continue;
+        }
+
+        if character.is_ascii_uppercase() && previous_was_lowercase_or_digit {
+            push_unknown_tool_name_token(&mut tokens, &mut current);
+        }
+        current.push(character.to_ascii_lowercase());
+        previous_was_lowercase_or_digit =
+            character.is_ascii_lowercase() || character.is_ascii_digit();
+    }
+
+    push_unknown_tool_name_token(&mut tokens, &mut current);
+    tokens
+}
+
+fn push_unknown_tool_name_token(tokens: &mut Vec<String>, current: &mut String) {
+    if current.is_empty() {
+        return;
+    }
+    tokens.push(std::mem::take(current));
+}
+
+fn available_builtin_tool_names() -> Vec<&'static str> {
+    BUILTIN_TOOLS
+        .iter()
+        .map(|definition| definition.name.as_str())
+        .collect()
 }
 
 fn approval_payload(request: &TurnApprovalRequest) -> Value {
@@ -2114,7 +3801,112 @@ fn provider_error_or_canceled(
     }
 }
 
-fn terminal_error_event(error: &AgentTurnLoopError) -> (&'static str, Value) {
+fn write_invalid_tool_arguments_diagnostic_file(
+    run_log: &mut (impl RunLogWriter + ?Sized),
+    turn_id: &str,
+    error: &AgentTurnLoopError,
+) -> Option<String> {
+    let run_id = run_log.run_id().to_owned();
+    let (relative_path, payload) = invalid_tool_arguments_diagnostic(&run_id, turn_id, error)?;
+    let contents = match serde_json::to_string_pretty(&payload) {
+        Ok(contents) => contents,
+        Err(source) => {
+            eprintln!(
+                "failed to serialize diagnostic for `{}`: {source}",
+                error.code()
+            );
+            return None;
+        }
+    };
+
+    match run_log.write_diagnostic_file(&relative_path, &contents) {
+        Ok(Some(path)) => Some(path.display().to_string()),
+        Ok(None) => None,
+        Err(source) => {
+            eprintln!(
+                "failed to write diagnostic for `{}`: {source}",
+                error.code()
+            );
+            None
+        }
+    }
+}
+
+fn invalid_tool_arguments_diagnostic(
+    run_id: &str,
+    turn_id: &str,
+    error: &AgentTurnLoopError,
+) -> Option<(PathBuf, Value)> {
+    let AgentTurnLoopError::InvalidToolArguments {
+        tool_call_id,
+        name,
+        source,
+        raw_arguments: Some(raw_arguments),
+    } = error
+    else {
+        return None;
+    };
+    let (raw_arguments, raw_arguments_truncated) =
+        diagnostic_raw_arguments(redact_text(raw_arguments));
+    let file_name = diagnostic_file_name("invalid-tool-arguments", tool_call_id);
+
+    Some((
+        Path::new("diagnostics").join(file_name),
+        json!({
+            "type": "invalid_tool_arguments",
+            "code": error.code(),
+            "message": error.to_string(),
+            "runId": run_id,
+            "turnId": turn_id,
+            "toolCallId": tool_call_id,
+            "toolName": name,
+            "jsonError": source.to_string(),
+            "rawArguments": raw_arguments,
+            "rawArgumentsTruncated": raw_arguments_truncated,
+        }),
+    ))
+}
+
+fn diagnostic_raw_arguments(text: String) -> (String, bool) {
+    if text.len() <= TOOL_ARGUMENT_DIAGNOSTIC_MAX_BYTES {
+        return (text, false);
+    }
+
+    let mut end = TOOL_ARGUMENT_DIAGNOSTIC_MAX_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let omitted = text.len() - end;
+    (
+        format!("{}\n[truncated {omitted} bytes]", &text[..end]),
+        true,
+    )
+}
+
+fn diagnostic_file_name(prefix: &str, id: &str) -> String {
+    let mut safe = id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(80)
+        .collect::<String>();
+    if safe.is_empty() {
+        safe.push_str("tool_call");
+    }
+    let hash = crate::hashing::sha256_hex(id.as_bytes());
+    let short_hash = hash.get(..12).unwrap_or(hash.as_str());
+    format!("{prefix}-{safe}-{short_hash}.json")
+}
+
+fn terminal_error_event(
+    error: &AgentTurnLoopError,
+    diagnostic_file: Option<&str>,
+) -> (&'static str, Value) {
     match error {
         AgentTurnLoopError::ApprovalCanceled {
             approval_id,
@@ -2143,19 +3935,42 @@ fn terminal_error_event(error: &AgentTurnLoopError) -> (&'static str, Value) {
                 "reason": reason,
             }),
         ),
-        _ => (
+        AgentTurnLoopError::ProviderIdleTimeout {
+            timeout_ms,
+            attempts,
+            partial_content,
+            partial_reasoning_chars,
+        } => (
             "run.failed",
             json!({
                 "code": error.code(),
                 "message": error.to_string(),
+                "timeoutMs": timeout_ms,
+                "attempts": attempts,
+                "partialContentChars": partial_content.chars().count(),
+                "partialReasoningChars": partial_reasoning_chars,
             }),
         ),
+        _ => {
+            let mut payload = Map::new();
+            payload.insert("code".to_owned(), json!(error.code()));
+            payload.insert("message".to_owned(), json!(error.to_string()));
+            if let Some(diagnostic_file) = diagnostic_file {
+                payload.insert("diagnosticFile".to_owned(), json!(diagnostic_file));
+            }
+            ("run.failed", Value::Object(payload))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, fs};
+    use std::{
+        collections::VecDeque,
+        fs, future,
+        path::{Path, PathBuf},
+        time::Duration,
+    };
 
     use futures_util::stream;
     use serde_json::json;
@@ -2164,19 +3979,34 @@ mod tests {
         context::ContextItem,
         provider::deepseek_api::ChatToolCall,
         reasoning::ReasoningContentMode,
-        run_log::{RunLogEvent, RunLogStore},
+        run_log::{REDACTED_VALUE, RunLogEvent, RunLogStore},
         test_helpers::TestWorkspace,
     };
 
     use super::{
         AgentRunMode, AgentTurnInput, AgentTurnLoop, AgentTurnLoopConfig, AgentTurnLoopError,
-        ApprovalDecision, ApprovalPolicy, ApprovalPolicyError, AutoApprovePolicy,
-        CancellationToken, TextRange, TurnApprovalRequest, TurnAttachment, TurnEventSink,
+        ApprovalRequirement, AutoApprovePolicy, CancellationToken, MODEL_TURN_BUDGET_TOOL_NAME,
+        RiskLevel, TextRange, ToolName, ToolStatus, TurnAttachment, TurnEventSink,
         TurnEventSinkError, TurnProvider, TurnProviderCompletion, TurnProviderDelta,
         TurnProviderError, TurnProviderEvent, TurnProviderFinishReason, TurnProviderFuture,
         TurnProviderRequest, TurnProviderResponse, TurnProviderStream,
-        TurnProviderStreamingSummary, TurnProviderUsage, turn_provider_response_stream,
+        TurnProviderStreamingSummary, TurnProviderUsage, TurnSteerQueue,
+        effective_approval_requirement, find_builtin_tool, is_auto_approved_read_only_shell,
+        is_verification_shell_command, tool_risk_assessment, turn_provider_response_stream,
+        unknown_tool_risk,
     };
+
+    #[test]
+    fn diagnostic_file_names_include_hash_for_sanitized_collisions() {
+        let left = super::diagnostic_file_name("invalid-tool-arguments", "call/a");
+        let right = super::diagnostic_file_name("invalid-tool-arguments", "call:a");
+
+        assert!(left.starts_with("invalid-tool-arguments-call_a-"));
+        assert!(right.starts_with("invalid-tool-arguments-call_a-"));
+        assert_ne!(left, right);
+        assert!(left.ends_with(".json"));
+        assert!(right.ends_with(".json"));
+    }
 
     #[tokio::test]
     async fn turn_loop_runs_read_tool_and_continues_to_final_answer() {
@@ -2366,6 +4196,416 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_loop_recovers_missing_tool_call_reasoning_when_thinking_is_enabled() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "hello from README\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_recovered_reasoning")
+            .expect("run should be created");
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                None,
+                vec![ChatToolCall::function(
+                    "call_1",
+                    "read_file",
+                    r#"{"path":"README.md"}"#,
+                )],
+            ),
+            TurnProviderResponse::final_text("README says hello."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(
+                AgentTurnInput::new("turn_1", "Read README and summarize it")
+                    .with_mode(AgentRunMode::Ask),
+                &mut run,
+            )
+            .await
+            .expect("missing tool-call reasoning should be recovered");
+
+        assert_eq!(outcome.final_message, "README says hello.");
+        assert_eq!(outcome.iterations, 2);
+        assert_eq!(outcome.tool_results.len(), 1);
+        assert_eq!(
+            loop_runner.provider.requests[1].messages[1]
+                .reasoning_content
+                .as_deref(),
+            Some("Tool call selected: read_file.")
+        );
+
+        let events = store
+            .load_run("run_turn_recovered_reasoning")
+            .expect("events should load");
+        assert!(!events.iter().any(|event| event.event_type == "run.failed"));
+        let recovered = events
+            .iter()
+            .find(|event| event.event_type == "provider.reasoningRecovered")
+            .expect("reasoning recovery should be logged");
+        assert_eq!(
+            recovered.payload["reason"],
+            "missing_tool_call_reasoning_content"
+        );
+        assert_eq!(recovered.payload["toolCallCount"], 1);
+    }
+
+    #[tokio::test]
+    async fn turn_loop_injects_final_response_summary_contract() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_final_summary_contract")
+            .expect("run should be created");
+        let provider =
+            ScriptedProvider::new(vec![TurnProviderResponse::final_text("Work summary.")]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Do a small task"), &mut run)
+            .await
+            .expect("turn should complete");
+
+        let prompt = loop_runner.provider.requests[0].messages[0]
+            .content
+            .as_deref()
+            .expect("provider prompt should include context");
+        assert!(prompt.contains("final assistant message"));
+        assert!(prompt.contains("Do not dump raw tool logs"));
+        assert!(prompt.contains("Tool usage rules"));
+        assert!(prompt.contains("cwd argument"));
+        assert!(prompt.contains("do not use cd"));
+        #[cfg(windows)]
+        {
+            assert!(prompt.contains("Windows PowerShell 5.1"));
+            assert!(prompt.contains("do not append redirections such as 2>&1"));
+            assert!(prompt.contains("captures stdout and stderr separately"));
+        }
+        #[cfg(not(windows))]
+        assert!(prompt.contains("POSIX sh"));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_retries_length_finished_final_response_until_summary() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_length_final_retry")
+            .expect("run should be created");
+        let length_response = TurnProviderResponse {
+            content: None,
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            completion: TurnProviderCompletion::fixture(TurnProviderFinishReason::Length),
+        };
+        let provider = ScriptedProvider::new(vec![
+            length_response,
+            TurnProviderResponse::final_text("Final work summary."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Finish the task"), &mut run)
+            .await
+            .expect("length-truncated final response should be retried");
+
+        assert_eq!(outcome.final_message, "Final work summary.");
+        assert_eq!(outcome.iterations, 2);
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+        assert_eq!(loop_runner.provider.requests[1].messages.len(), 2);
+        let retry_prompt = loop_runner.provider.requests[1]
+            .messages
+            .last()
+            .and_then(|message| message.content.as_deref())
+            .expect("retry request should include a user instruction");
+        assert!(retry_prompt.contains("output length limit"));
+        assert!(retry_prompt.contains("Return only a concise final work summary"));
+
+        let events = store
+            .load_run("run_turn_length_final_retry")
+            .expect("events should load");
+        let finish_reasons = events
+            .iter()
+            .filter(|event| event.event_type == "provider.completed")
+            .map(|event| event.payload["finishReason"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(finish_reasons, vec![json!("length"), json!("stop")]);
+        let completed = events
+            .iter()
+            .filter(|event| event.event_type == "run.completed")
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].payload["summary"], "Final work summary.");
+    }
+
+    #[test]
+    fn default_model_turn_budget_is_fifty() {
+        assert_eq!(AgentTurnLoopConfig::default().max_model_turns, 50);
+    }
+
+    #[tokio::test]
+    async fn turn_loop_requests_approval_to_continue_after_model_turn_budget() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_budget_continue")
+            .expect("run should be created");
+        let length_response = TurnProviderResponse {
+            content: Some("Partial work".to_owned()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            completion: TurnProviderCompletion::fixture(TurnProviderFinishReason::Length),
+        };
+        let provider = ScriptedProvider::new(vec![
+            length_response,
+            TurnProviderResponse::final_text("Completed after continuation."),
+        ]);
+        let config = AgentTurnLoopConfig {
+            max_model_turns: 1,
+            ..AgentTurnLoopConfig::default()
+        };
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
+                .expect("turn loop should initialize")
+                .with_config(config);
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Finish the task"), &mut run)
+            .await
+            .expect("approved model turn budget continuation should complete");
+
+        assert_eq!(outcome.final_message, "Completed after continuation.");
+        assert_eq!(outcome.iterations, 2);
+        let events = store
+            .load_run("run_turn_budget_continue")
+            .expect("events should load");
+        let approval = events
+            .iter()
+            .find(|event| event.event_type == "tool.approvalRequired")
+            .expect("continuation approval should be requested");
+        assert_eq!(approval.payload["toolName"], MODEL_TURN_BUDGET_TOOL_NAME);
+        assert_eq!(approval.payload["title"], "Continue agent turn");
+        assert_eq!(approval.payload["persistable"], false);
+        assert_eq!(
+            approval.payload["riskReasons"],
+            json!(["model turn budget reached"])
+        );
+        assert!(events.iter().any(|event| {
+            event.event_type == "tool.approvalResolved"
+                && event.payload["toolName"] == MODEL_TURN_BUDGET_TOOL_NAME
+                && event.payload["decision"] == "approved"
+        }));
+        assert!(!events.iter().any(|event| event.event_type == "run.failed"));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_resets_provider_transient_retry_budget_after_model_turn_continuation() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_budget_retry_reset")
+            .expect("run should be created");
+        let length_response = TurnProviderResponse {
+            content: Some("Partial work before continuation".to_owned()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            completion: TurnProviderCompletion::fixture(TurnProviderFinishReason::Length),
+        };
+        let provider = EventScriptedProvider::new_result_streams(vec![
+            vec![Err(TurnProviderError::transient("first connection reset"))],
+            vec![Ok(TurnProviderEvent::Completed(length_response))],
+            vec![Err(TurnProviderError::transient("second connection reset"))],
+            vec![Ok(TurnProviderEvent::Completed(
+                TurnProviderResponse::final_text("Completed after retry reset."),
+            ))],
+        ]);
+        let config = AgentTurnLoopConfig {
+            max_model_turns: 2,
+            provider_transient_retries: 1,
+            ..AgentTurnLoopConfig::default()
+        };
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
+                .expect("turn loop should initialize")
+                .with_config(config);
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Finish the task"), &mut run)
+            .await
+            .expect("continuation should reset transient retry quota");
+
+        assert_eq!(outcome.final_message, "Completed after retry reset.");
+        assert_eq!(outcome.iterations, 4);
+        assert_eq!(loop_runner.provider.requests.len(), 4);
+        let events = store
+            .load_run("run_turn_budget_retry_reset")
+            .expect("events should load");
+        let retries = events
+            .iter()
+            .filter(|event| event.event_type == "provider.retrying")
+            .collect::<Vec<_>>();
+        assert_eq!(retries.len(), 2);
+        assert!(retries.iter().all(|event| {
+            event.payload["reason"] == json!("transient_stream_error")
+                && event.payload["retriesRemaining"] == json!(0)
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "tool.approvalResolved"
+                && event.payload["toolName"] == MODEL_TURN_BUDGET_TOOL_NAME
+                && event.payload["decision"] == "approved"
+        }));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_cancels_model_turn_budget_continuation_before_approval_decision() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_budget_cancel")
+            .expect("run should be created");
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse {
+                content: Some("Partial work".to_owned()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+                completion: TurnProviderCompletion::fixture(TurnProviderFinishReason::Length),
+            },
+            TurnProviderResponse::final_text("Should not be requested."),
+        ]);
+        let config = AgentTurnLoopConfig {
+            max_model_turns: 1,
+            ..AgentTurnLoopConfig::default()
+        };
+        let cancellation_token = CancellationToken::new();
+        let mut sink = CancelOnEventSink::new(
+            cancellation_token.clone(),
+            "tool.approvalRequired",
+            "stop before model turn continuation",
+        );
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
+                .expect("turn loop should initialize")
+                .with_config(config);
+
+        let error = loop_runner
+            .run_turn_with_event_sink(
+                AgentTurnInput::new("turn_1", "Finish the task")
+                    .with_cancellation_token(cancellation_token),
+                &mut run,
+                &mut sink,
+            )
+            .await
+            .expect_err("cancellation should stop before continuation approval decision");
+
+        assert!(matches!(error, AgentTurnLoopError::Canceled { .. }));
+        assert_eq!(loop_runner.provider.requests.len(), 1);
+        let events = store
+            .load_run("run_turn_budget_cancel")
+            .expect("events should load");
+        assert!(events.iter().any(|event| {
+            event.event_type == "tool.approvalRequired"
+                && event.payload["toolName"] == MODEL_TURN_BUDGET_TOOL_NAME
+        }));
+        assert!(!events.iter().any(|event| {
+            event.event_type == "tool.approvalResolved"
+                && event.payload["toolName"] == MODEL_TURN_BUDGET_TOOL_NAME
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "run.canceled"
+                && event.payload["reason"] == "stop before model turn continuation"
+        }));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_retries_length_finished_tool_call_without_executing_partial_call() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "old\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_length_tool_retry")
+            .expect("run should be created");
+        let patch = "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n";
+        let length_response = TurnProviderResponse::tool_calls(
+            Some("The patch is needed; I will apply it.".to_owned()),
+            Some("I should edit the README.".to_owned()),
+            vec![ChatToolCall::function(
+                "partial_call",
+                "apply_patch",
+                "{\"unifiedDiff\"",
+            )],
+        )
+        .with_completion(TurnProviderCompletion::fixture(
+            TurnProviderFinishReason::Length,
+        ));
+        let provider = ScriptedProvider::new(vec![
+            length_response,
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should issue a complete tool call.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_1",
+                    "apply_patch",
+                    json!({
+                        "unifiedDiff": patch,
+                        "expectedFiles": ["README.md"],
+                    })
+                    .to_string(),
+                )],
+            ),
+            TurnProviderResponse::final_text("Updated README."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
+            .await
+            .expect("length-truncated tool call should be retried");
+
+        assert_eq!(workspace.read("README.md"), "new\n");
+        assert_eq!(outcome.final_message, "Updated README.");
+        assert_eq!(outcome.iterations, 3);
+        assert_eq!(loop_runner.provider.requests.len(), 3);
+        let retry_messages = &loop_runner.provider.requests[1].messages;
+        assert_eq!(retry_messages.len(), 3);
+        assert_eq!(
+            retry_messages[1].content.as_deref(),
+            Some("The patch is needed; I will apply it.")
+        );
+        let retry_prompt = retry_messages[2]
+            .content
+            .as_deref()
+            .expect("retry request should include a user instruction");
+        assert!(retry_prompt.contains("tool call"));
+        assert!(retry_prompt.contains("fresh complete tool call"));
+
+        let events = store
+            .load_run("run_turn_length_tool_retry")
+            .expect("events should load");
+        assert!(!events.iter().any(|event| {
+            event.event_type == "tool.requested"
+                && event.payload["toolCallId"] == json!("partial_call")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "tool.requested" && event.payload["toolCallId"] == json!("call_1")
+        }));
+        let finish_reasons = events
+            .iter()
+            .filter(|event| event.event_type == "provider.completed")
+            .map(|event| event.payload["finishReason"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            finish_reasons,
+            vec![json!("length"), json!("tool_calls"), json!("stop")]
+        );
+        assert!(!events.iter().any(|event| event.event_type == "run.failed"));
+    }
+
+    #[tokio::test]
     async fn turn_loop_rejects_duplicate_attachments_before_provider_call() {
         let workspace = TestWorkspace::new("turn-loop");
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
@@ -2536,6 +4776,118 @@ mod tests {
         assert!(events.iter().any(|event| event.event_type == "run.failed"));
     }
 
+    #[test]
+    fn read_only_shell_allowlist_disables_shell_approval() {
+        let shell =
+            find_builtin_tool(ToolName::Shell.as_str()).expect("shell tool must be registered");
+        for command in [
+            "rg --files src",
+            "Get-Content README.md",
+            "git diff -- src/lib.rs",
+            "git status --short",
+            "git log --oneline",
+            "git show HEAD -- README.md",
+            "python --version",
+            "python -V",
+            "node --version",
+            "node -v",
+            "cargo --version",
+            "rustc -v",
+            "git --version",
+            "go version",
+            "code --version",
+        ] {
+            let assessment = tool_risk_assessment(
+                shell,
+                &json!({
+                    "command": command,
+                    "cwd": ".",
+                }),
+            );
+            assert_eq!(assessment.risk, RiskLevel::Read, "command: {command}");
+            assert_eq!(
+                effective_approval_requirement(
+                    shell.approval,
+                    assessment.risk,
+                    assessment.approval_override
+                ),
+                ApprovalRequirement::None,
+                "command: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn read_only_shell_allowlist_rejects_ambiguous_or_outside_commands() {
+        for command in [
+            "rg foo | tee out.txt",
+            "Get-Content ..\\secret.txt",
+            "Get-Content C:\\secret.txt",
+            "git diff --output patch.txt",
+            "git diff --no-index a b",
+            "rg --replace x foo",
+            "rg -r replacement pattern",
+            "rg -rn pattern",
+            "rg -rU pattern",
+            "Get-Content .env",
+            "Get-Content .secrets\\deepseek-api-key",
+            "rg --files .git",
+            "python --version extra",
+            "python -c print(1)",
+            ".\\python --version",
+            "C:\\Python\\python.exe --version",
+            "go env",
+            "cargo -v build",
+        ] {
+            assert!(
+                !is_auto_approved_read_only_shell(command, Some(".")),
+                "command should not be allowlisted: {command}"
+            );
+        }
+        assert!(!is_auto_approved_read_only_shell("rg --files", Some("..")));
+    }
+
+    #[test]
+    fn verification_shell_command_detection_accepts_common_test_markers() {
+        for command in [
+            "node --test",
+            "npm test",
+            "pnpm --filter prole-coder-vscode test",
+            "pnpm run test:unit",
+            "yarn run lint",
+            "bun run typecheck",
+            "python -m unittest discover",
+            "py -m pytest tests",
+            "cargo check",
+            "cargo clippy",
+            "cargo --locked test",
+            "npm run typecheck",
+            "pytest tests",
+            "go test ./...",
+            "dotnet test",
+            "tsc --noEmit",
+        ] {
+            assert!(
+                is_verification_shell_command(command),
+                "command should be detected as verification: {command}"
+            );
+        }
+
+        for command in [
+            "node --version",
+            "Write-Output hello",
+            "npm run deploy-check",
+            "echo test complete",
+            "python scripts/generate_testdata.py",
+            "cargo build",
+        ] {
+            assert!(
+                !is_verification_shell_command(command),
+                "command should not be detected as verification: {command}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn turn_loop_upgrades_shell_approval_risk_for_dependency_install() {
         let workspace = TestWorkspace::new("turn-loop");
@@ -2704,49 +5056,215 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_loop_rejects_tool_arguments_before_typed_deserialization() {
+    async fn turn_loop_summarizes_shell_file_changes_and_verification_status() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_shell_summary_metadata")
+            .expect("run should be created");
+        #[cfg(windows)]
+        let write_command = "Set-Content -Path shell-output.txt -Value changed -Encoding UTF8";
+        #[cfg(not(windows))]
+        let write_command = "printf 'changed\\n' > shell-output.txt";
+        let verify_command = "node --test";
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("Write a file and verify.".to_owned()),
+                vec![
+                    ChatToolCall::function(
+                        "call_shell_write",
+                        "shell",
+                        json!({
+                            "command": write_command,
+                            "timeoutMs": 10_000
+                        })
+                        .to_string(),
+                    ),
+                    ChatToolCall::function(
+                        "call_shell_verify",
+                        "shell",
+                        json!({
+                            "command": verify_command,
+                            "timeoutMs": 10_000
+                        })
+                        .to_string(),
+                    ),
+                ],
+            ),
+            TurnProviderResponse::final_text("Done."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
+                .expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Write via shell"), &mut run)
+            .await
+            .expect("approved shell commands should complete");
+
+        assert_eq!(outcome.changed_files, vec!["shell-output.txt"]);
+        let events = store
+            .load_run("run_turn_shell_summary_metadata")
+            .expect("events should load");
+        let completed = events
+            .iter()
+            .find(|event| event.event_type == "run.completed")
+            .expect("run should complete");
+        assert_eq!(
+            completed.payload["changedFiles"],
+            json!(["shell-output.txt"])
+        );
+        assert_eq!(completed.payload["verificationStatus"], "passed");
+    }
+
+    #[tokio::test]
+    async fn turn_loop_reports_schema_validation_as_failed_tool_result_and_continues() {
         let workspace = TestWorkspace::new("turn-loop");
         workspace.write("README.md", "hello\n");
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
         let mut run = store
-            .create_run("run_turn_schema_reject")
+            .create_run("run_turn_schema_recover")
             .expect("run should be created");
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should read the README.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_1",
+                    "read_file",
+                    r#"{"path":"README.md","limit":20}"#,
+                )],
+            ),
+            TurnProviderResponse::final_text("I will retry with startLine and endLine."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Read README"), &mut run)
+            .await
+            .expect("schema validation result should be recoverable");
+
+        assert_eq!(
+            outcome.final_message,
+            "I will retry with startLine and endLine."
+        );
+        assert_eq!(outcome.tool_results.len(), 1);
+        assert_eq!(outcome.tool_results[0].name, "read_file");
+        assert_eq!(outcome.tool_results[0].status, ToolStatus::Failed);
+        assert_eq!(
+            outcome.tool_results[0].result["errorCode"],
+            json!("E_INVALID_TOOL_ARGUMENTS")
+        );
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+        let tool_result = loop_runner.provider.requests[1]
+            .messages
+            .iter()
+            .filter_map(|message| message.content.as_deref())
+            .filter_map(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+            .find(|content| content["errorCode"] == "E_INVALID_TOOL_ARGUMENTS")
+            .expect("schema validation result should be sent to the provider");
+        assert_eq!(tool_result["requestedTool"], "read_file");
+        assert_eq!(
+            tool_result["validationError"],
+            "$.limit: unexpected property"
+        );
+        assert!(
+            tool_result["guidance"]
+                .as_str()
+                .is_some_and(|guidance| guidance.contains("startLine"))
+        );
+
+        let events = store
+            .load_run("run_turn_schema_recover")
+            .expect("events should load");
+        assert!(!events.iter().any(|event| event.event_type == "run.failed"));
+        let requested = events
+            .iter()
+            .find(|event| event.event_type == "tool.requested")
+            .expect("schema-invalid known tool should still be logged as requested");
+        assert_eq!(requested.payload["name"], "read_file");
+        assert_eq!(requested.payload["argumentsPreview"]["limit"], 20);
+        let completed = events
+            .iter()
+            .find(|event| event.event_type == "tool.completed")
+            .expect("schema-invalid known tool should complete with failed result");
+        assert_eq!(completed.payload["status"], "failed");
+        assert_eq!(
+            completed.payload["result"]["errorCode"],
+            "E_INVALID_TOOL_ARGUMENTS"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_writes_diagnostic_file_for_malformed_tool_arguments() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "hello\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_malformed_tool_args")
+            .expect("run should be created");
+        let raw_secret = format!("sk-{}", "this-malformed-secret-123");
+        let malformed_arguments =
+            format!("{{\"unifiedDiff\":\"--- a/README.md\\n+++ b/README.md\\n{raw_secret}");
         let provider = ScriptedProvider::new(vec![TurnProviderResponse::tool_calls(
             None,
-            Some("I should read the README.".to_owned()),
+            Some("I should edit the README.".to_owned()),
             vec![ChatToolCall::function(
-                "call_1",
-                "read_file",
-                r#"{"path":"README.md","unexpected":true}"#,
+                "call_bad_json",
+                "apply_patch",
+                malformed_arguments,
             )],
         )]);
         let mut loop_runner =
             AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
 
         let error = loop_runner
-            .run_turn(AgentTurnInput::new("turn_1", "Read README"), &mut run)
+            .run_turn(AgentTurnInput::new("turn_1", "Edit README"), &mut run)
             .await
-            .expect_err("schema validation should reject unexpected properties");
+            .expect_err("malformed tool JSON should fail the turn");
 
         assert!(matches!(
             error,
-            AgentTurnLoopError::InvalidToolArgumentSchema { .. }
+            AgentTurnLoopError::InvalidToolArguments {
+                raw_arguments: Some(_),
+                ..
+            }
         ));
         let events = store
-            .load_run("run_turn_schema_reject")
+            .load_run("run_turn_malformed_tool_args")
             .expect("events should load");
         assert!(
             !events
                 .iter()
                 .any(|event| event.event_type == "tool.requested")
         );
-        assert!(events.iter().any(|event| {
-            event.event_type == "run.failed" && event.payload["code"] == "E_INVALID_TOOL_ARGUMENTS"
-        }));
+        let failed = events
+            .iter()
+            .find(|event| {
+                event.event_type == "run.failed"
+                    && event.payload["code"] == "E_INVALID_TOOL_ARGUMENTS"
+            })
+            .expect("run.failed should be recorded");
+        let diagnostic_file = failed.payload["diagnosticFile"]
+            .as_str()
+            .expect("run.failed should include diagnosticFile");
+        let diagnostic_path = PathBuf::from(diagnostic_file);
+        assert!(diagnostic_path.is_file());
+
+        let contents =
+            fs::read_to_string(&diagnostic_path).expect("diagnostic file should be readable");
+        assert!(contents.contains("invalid_tool_arguments"));
+        assert!(contents.contains("call_bad_json"));
+        assert!(contents.contains("apply_patch"));
+        assert!(contents.contains("unifiedDiff"));
+        assert!(!contents.contains(&raw_secret));
+        assert!(contents.contains(REDACTED_VALUE));
     }
 
     #[tokio::test]
-    async fn turn_loop_executes_approved_patch_and_tracks_changed_files() {
+    async fn turn_loop_executes_workspace_patch_without_approval_and_tracks_changed_files() {
         let workspace = TestWorkspace::new("turn-loop");
         workspace.write("README.md", "old\n");
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
@@ -2777,13 +5295,12 @@ mod tests {
             TurnProviderResponse::final_text("Updated README."),
         ]);
         let mut loop_runner =
-            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
-                .expect("turn loop should initialize");
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
 
         let outcome = loop_runner
             .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
             .await
-            .expect("approved patch should complete");
+            .expect("workspace patch should complete without approval");
 
         assert_eq!(workspace.read("README.md"), "new\n");
         assert_eq!(outcome.changed_files, vec!["README.md"]);
@@ -2791,7 +5308,7 @@ mod tests {
             .load_run("run_turn_patch")
             .expect("events should load");
         assert!(
-            events
+            !events
                 .iter()
                 .any(|event| event.event_type == "tool.approvalRequired")
         );
@@ -2803,7 +5320,516 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_loop_applies_only_approved_patch_hunks() {
+    async fn turn_loop_requires_approval_for_bulk_workspace_patch() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_bulk_patch")
+            .expect("run should be created");
+        let mut patch = String::new();
+        let mut expected_files = Vec::new();
+        for index in 1..=6 {
+            let path = format!("src/file{index}.txt");
+            workspace.write(&path, "old\n");
+            expected_files.push(path.clone());
+            patch.push_str(&format!(
+                "--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n"
+            ));
+        }
+        let provider = ScriptedProvider::new(vec![TurnProviderResponse::tool_calls(
+            None,
+            Some("I should edit several files.".to_owned()),
+            vec![ChatToolCall::function(
+                "call_1",
+                "apply_patch",
+                json!({
+                    "unifiedDiff": patch,
+                    "expectedFiles": expected_files,
+                })
+                .to_string(),
+            )],
+        )]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let error = loop_runner
+            .run_turn(
+                AgentTurnInput::new("turn_1", "Update several files"),
+                &mut run,
+            )
+            .await
+            .expect_err("bulk workspace patch should require approval");
+
+        assert!(matches!(error, AgentTurnLoopError::ApprovalRejected { .. }));
+        for index in 1..=6 {
+            assert_eq!(workspace.read(&format!("src/file{index}.txt")), "old\n");
+        }
+        let events = store
+            .load_run("run_turn_bulk_patch")
+            .expect("events should load");
+        let requested = events
+            .iter()
+            .find(|event| event.event_type == "tool.requested")
+            .expect("tool.requested should be recorded");
+        assert_eq!(requested.payload["risk"], "write");
+        assert_eq!(
+            requested.payload["riskReasons"],
+            json!(["bulk patch touches 6 files; limit for automatic workspace patch is 5"])
+        );
+        let approval = events
+            .iter()
+            .find(|event| event.event_type == "tool.approvalRequired")
+            .expect("bulk patch should request approval");
+        assert_eq!(approval.payload["risk"], "write");
+        assert_eq!(approval.payload["paths"].as_array().map(Vec::len), Some(6));
+        assert_eq!(
+            approval.payload["riskReasons"],
+            json!(["bulk patch touches 6 files; limit for automatic workspace patch is 5"])
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.started")
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_requires_approval_for_workspace_policy_patch() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write(".gitignore", ".env\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_policy_patch")
+            .expect("run should be created");
+        let patch = "--- a/.gitignore\n+++ b/.gitignore\n@@ -1 +0,0 @@\n-.env\n";
+        let provider = ScriptedProvider::new(vec![TurnProviderResponse::tool_calls(
+            None,
+            Some("I should update ignore rules.".to_owned()),
+            vec![ChatToolCall::function(
+                "call_1",
+                "apply_patch",
+                json!({
+                    "unifiedDiff": patch,
+                    "expectedFiles": [".gitignore"],
+                })
+                .to_string(),
+            )],
+        )]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let error = loop_runner
+            .run_turn(
+                AgentTurnInput::new("turn_1", "Update ignore rules"),
+                &mut run,
+            )
+            .await
+            .expect_err("workspace policy patch should require approval");
+
+        assert!(matches!(error, AgentTurnLoopError::ApprovalRejected { .. }));
+        assert_eq!(workspace.read(".gitignore"), ".env\n");
+        let events = store
+            .load_run("run_turn_policy_patch")
+            .expect("events should load");
+        let requested = events
+            .iter()
+            .find(|event| event.event_type == "tool.requested")
+            .expect("tool.requested should be recorded");
+        assert_eq!(requested.payload["risk"], "write");
+        assert_eq!(
+            requested.payload["riskReasons"],
+            json!(["workspace policy file `.gitignore` requires approval"])
+        );
+        let approval = events
+            .iter()
+            .find(|event| event.event_type == "tool.approvalRequired")
+            .expect("workspace policy patch should request approval");
+        assert_eq!(approval.payload["risk"], "write");
+        assert_eq!(approval.payload["paths"], json!([".gitignore"]));
+        assert_eq!(
+            approval.payload["riskReasons"],
+            json!(["workspace policy file `.gitignore` requires approval"])
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.started")
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_reports_patch_hunk_mismatch_as_failed_tool_result_and_continues() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "old\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_patch_hunk_mismatch")
+            .expect("run should be created");
+        let patch = concat!(
+            "--- a/README.md\n",
+            "+++ b/README.md\n",
+            "@@ -1 +1 @@\n",
+            "-missing\n",
+            "+new\n"
+        );
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should edit the README.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_1",
+                    "apply_patch",
+                    json!({
+                        "unifiedDiff": patch,
+                        "expectedFiles": ["README.md"],
+                    })
+                    .to_string(),
+                )],
+            ),
+            TurnProviderResponse::final_text(
+                "Patch context did not match; I will reread the file.",
+            ),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
+            .await
+            .expect("recoverable patch failure should be returned to the provider");
+
+        assert_eq!(workspace.read("README.md"), "old\n");
+        assert!(outcome.changed_files.is_empty());
+        assert_eq!(
+            outcome.final_message,
+            "Patch context did not match; I will reread the file."
+        );
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+        let tool_result = loop_runner.provider.requests[1].messages[2]
+            .content
+            .as_deref()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+            .expect("failed apply_patch result should be sent to the provider");
+        assert_eq!(tool_result["status"], "failed");
+        assert_eq!(tool_result["errorCode"], "E_PATCH_HUNK_MISMATCH");
+
+        let events = store
+            .load_run("run_turn_patch_hunk_mismatch")
+            .expect("events should load");
+        assert!(!events.iter().any(|event| event.event_type == "run.failed"));
+        let completed = events
+            .iter()
+            .find(|event| event.event_type == "tool.completed")
+            .expect("tool.completed should record failed apply_patch");
+        assert_eq!(completed.payload["status"], "failed");
+        assert_eq!(
+            completed.payload["result"]["errorCode"],
+            "E_PATCH_HUNK_MISMATCH"
+        );
+        assert_eq!(completed.payload["result"]["reversePatch"], "");
+    }
+
+    #[tokio::test]
+    async fn turn_loop_reports_invalid_patch_preview_as_failed_tool_result_and_continues() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "old\nsecond\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_invalid_patch_preview")
+            .expect("run should be created");
+        let patch = concat!(
+            "--- a/README.md\n",
+            "+++ b/README.md\n",
+            "@@ -1,2 +1,2 @@\n",
+            "-old\n",
+            "+new\n",
+            "\n",
+            " second\n",
+        );
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should edit the README.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_1",
+                    "apply_patch",
+                    json!({
+                        "unifiedDiff": patch,
+                        "expectedFiles": ["README.md"],
+                    })
+                    .to_string(),
+                )],
+            ),
+            TurnProviderResponse::final_text("Invalid patch was reported; I can retry."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
+            .await
+            .expect("invalid patch preview should be returned to the provider");
+
+        assert_eq!(workspace.read("README.md"), "old\nsecond\n");
+        assert!(outcome.changed_files.is_empty());
+        assert_eq!(
+            outcome.final_message,
+            "Invalid patch was reported; I can retry."
+        );
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+        let tool_result = loop_runner.provider.requests[1].messages[2]
+            .content
+            .as_deref()
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+            .expect("failed apply_patch result should be sent to the provider");
+        assert_eq!(tool_result["status"], "failed");
+        assert_eq!(tool_result["errorCode"], "E_INVALID_PATCH");
+        assert!(
+            tool_result["summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("invalid patch line"))
+        );
+
+        let events = store
+            .load_run("run_turn_invalid_patch_preview")
+            .expect("events should load");
+        assert!(!events.iter().any(|event| event.event_type == "run.failed"));
+        let completed = events
+            .iter()
+            .find(|event| event.event_type == "tool.completed")
+            .expect("tool.completed should record failed apply_patch preview");
+        assert_eq!(completed.payload["status"], "failed");
+        assert_eq!(completed.payload["result"]["errorCode"], "E_INVALID_PATCH");
+        assert_eq!(completed.payload["result"]["reversePatch"], "");
+    }
+
+    #[test]
+    fn unknown_tool_risk_uses_name_tokens_not_substrings() {
+        assert_eq!(unknown_tool_risk("write_file"), RiskLevel::Write);
+        assert_eq!(unknown_tool_risk("delete-file"), RiskLevel::Destructive);
+        assert_eq!(unknown_tool_risk("readFile"), RiskLevel::Read);
+
+        assert_eq!(unknown_tool_risk("thread_reader"), RiskLevel::Exec);
+        assert_eq!(unknown_tool_risk("bread_searcher"), RiskLevel::Exec);
+        assert_eq!(unknown_tool_risk("recreate_file"), RiskLevel::Exec);
+        assert_eq!(unknown_tool_risk("undelete_file"), RiskLevel::Exec);
+    }
+
+    #[tokio::test]
+    async fn turn_loop_reports_unknown_tool_as_failed_tool_result_and_continues() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "old\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_unknown_tool")
+            .expect("run should be created");
+        let raw_secret = format!("sk-{}", "unknown-tool-secret-123");
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should write a file.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_write",
+                    "write_file",
+                    json!({
+                        "path": "README.md",
+                        "content": format!("new {raw_secret}\n"),
+                    })
+                    .to_string(),
+                )],
+            ),
+            TurnProviderResponse::final_text("I will retry with apply_patch."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
+            .await
+            .expect("unknown tool result should be recoverable");
+
+        assert_eq!(workspace.read("README.md"), "old\n");
+        assert_eq!(outcome.final_message, "I will retry with apply_patch.");
+        assert_eq!(outcome.tool_results.len(), 1);
+        assert_eq!(outcome.tool_results[0].name, "write_file");
+        assert_eq!(outcome.tool_results[0].status, ToolStatus::Failed);
+        assert_eq!(
+            outcome.tool_results[0].result["errorCode"],
+            json!("E_UNKNOWN_TOOL")
+        );
+        assert!(
+            outcome.tool_results[0].result["availableTools"]
+                .as_array()
+                .expect("availableTools should be an array")
+                .iter()
+                .any(|tool| tool == "apply_patch")
+        );
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+        let tool_result = loop_runner.provider.requests[1]
+            .messages
+            .iter()
+            .filter_map(|message| message.content.as_deref())
+            .filter_map(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+            .find(|content| content["errorCode"] == "E_UNKNOWN_TOOL")
+            .expect("unknown tool result should be sent to the provider");
+        assert_eq!(tool_result["errorCode"], "E_UNKNOWN_TOOL");
+        assert!(
+            tool_result["guidance"]
+                .as_str()
+                .is_some_and(|guidance| guidance.contains("apply_patch"))
+        );
+
+        let events = store
+            .load_run("run_turn_unknown_tool")
+            .expect("events should load");
+        assert!(!events.iter().any(|event| event.event_type == "run.failed"));
+        let requested = events
+            .iter()
+            .find(|event| event.event_type == "tool.requested")
+            .expect("unknown tool request should be logged");
+        assert_eq!(requested.payload["name"], "write_file");
+        assert_eq!(requested.payload["risk"], "write");
+        assert_eq!(
+            requested.payload["argumentsPreview"]["omitted"],
+            "Arguments for unknown tools are not logged. Use the failed tool result guidance to retry with a supported tool."
+        );
+        let events_text = serde_json::to_string(&events).expect("events should serialize");
+        assert!(!events_text.contains(&raw_secret));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_applies_patch_from_run_scoped_payload_ref() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "old\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_patch_payload_ref")
+            .expect("run should be created");
+        let patch = "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n";
+        let split_at = patch
+            .find("@@")
+            .expect("fixture patch should contain a hunk");
+        run.append_run_payload_chunk(
+            Path::new("payloads/apply_patch/patch.diff"),
+            &patch[..split_at],
+        )
+        .expect("first payload chunk should append");
+        run.append_run_payload_chunk(
+            Path::new("payloads/apply_patch/patch.diff"),
+            &patch[split_at..],
+        )
+        .expect("second payload chunk should append");
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I should edit the README.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_1",
+                    "apply_patch",
+                    json!({
+                        "payloadRef": {
+                            "kind": "run_file",
+                            "path": "payloads/apply_patch/patch.diff",
+                            "sha256": crate::hashing::sha256_hex(patch.as_bytes()),
+                            "sizeBytes": patch.len(),
+                        },
+                        "expectedFiles": ["README.md"],
+                    })
+                    .to_string(),
+                )],
+            ),
+            TurnProviderResponse::final_text("Updated README."),
+        ]);
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
+            .await
+            .expect("payload-referenced patch should complete");
+
+        assert_eq!(workspace.read("README.md"), "new\n");
+        let events = store
+            .load_run("run_turn_patch_payload_ref")
+            .expect("events should load");
+        let requested = events
+            .iter()
+            .find(|event| event.event_type == "tool.requested")
+            .expect("tool.requested should be recorded");
+        assert!(
+            requested.payload["argumentsPreview"]
+                .get("unifiedDiff")
+                .is_none()
+        );
+        assert_eq!(
+            requested.payload["argumentsPreview"]["payloadRef"]["path"],
+            "payloads/apply_patch/patch.diff"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.approvalRequired")
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_rejects_patch_payload_ref_hash_mismatch() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "old\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_patch_payload_ref_hash_mismatch")
+            .expect("run should be created");
+        let patch = "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n";
+        run.write_run_payload_file(Path::new("payloads/apply_patch/patch.diff"), patch)
+            .expect("payload file should be written");
+        let provider = ScriptedProvider::new(vec![TurnProviderResponse::tool_calls(
+            None,
+            Some("I should edit the README.".to_owned()),
+            vec![ChatToolCall::function(
+                "call_1",
+                "apply_patch",
+                json!({
+                    "payloadRef": {
+                        "kind": "run_file",
+                        "path": "payloads/apply_patch/patch.diff",
+                        "sha256": "0".repeat(64),
+                        "sizeBytes": patch.len(),
+                    },
+                    "expectedFiles": ["README.md"],
+                })
+                .to_string(),
+            )],
+        )]);
+        let mut loop_runner =
+            AgentTurnLoop::with_approval_policy(workspace.path(), provider, AutoApprovePolicy)
+                .expect("turn loop should initialize");
+
+        let error = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
+            .await
+            .expect_err("hash mismatch should fail before tool execution");
+
+        assert!(matches!(
+            error,
+            AgentTurnLoopError::InvalidToolPayloadReference { .. }
+        ));
+        assert_eq!(workspace.read("README.md"), "old\n");
+        let events = store
+            .load_run("run_turn_patch_payload_ref_hash_mismatch")
+            .expect("events should load");
+        assert!(events.iter().any(|event| {
+            event.event_type == "run.failed" && event.payload["code"] == "E_INVALID_TOOL_ARGUMENTS"
+        }));
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.requested")
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_loop_applies_all_workspace_patch_hunks_without_approval() {
         let workspace = TestWorkspace::new("turn-loop");
         workspace.write("README.md", "one\nold\nthree\n\nkeep\nremove\n");
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
@@ -2840,35 +5866,25 @@ mod tests {
             TurnProviderResponse::final_text("Updated README."),
         ]);
         let mut loop_runner =
-            AgentTurnLoop::with_approval_policy(workspace.path(), provider, HunkApprovePolicy)
-                .expect("turn loop should initialize");
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
 
         let outcome = loop_runner
             .run_turn(AgentTurnInput::new("turn_1", "Update README"), &mut run)
             .await
-            .expect("hunk-approved patch should complete");
+            .expect("workspace patch should complete without approval");
 
         assert_eq!(
             workspace.read("README.md"),
-            "one\nold\nthree\n\nkeep\ninsert\nremove\n"
+            "one\nnew\nthree\n\nkeep\ninsert\nremove\n"
         );
         assert_eq!(outcome.changed_files, vec!["README.md"]);
         let events = store
             .load_run("run_turn_patch_hunks")
             .expect("events should load");
-        let required = events
-            .iter()
-            .find(|event| event.event_type == "tool.approvalRequired")
-            .expect("approval should be required");
-        assert_eq!(required.payload["hunks"].as_array().map(Vec::len), Some(2));
-        let resolved = events
-            .iter()
-            .find(|event| event.event_type == "tool.approvalResolved")
-            .expect("approval should resolve");
-        assert_eq!(resolved.payload["hunks"]["scope"], "selected");
-        assert_eq!(
-            resolved.payload["hunks"]["approved"],
-            json!(["README.md#2:old5+2:new5+3"])
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "tool.approvalRequired")
         );
     }
 
@@ -2993,6 +6009,237 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_loop_injects_queued_steer_before_next_provider_request() {
+        let workspace = TestWorkspace::new("turn-loop");
+        workspace.write("README.md", "hello\n");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_steer")
+            .expect("run should be created");
+        let steer_queue = TurnSteerQueue::default();
+        let provider = ScriptedProvider::new(vec![
+            TurnProviderResponse::tool_calls(
+                None,
+                Some("I will read first.".to_owned()),
+                vec![ChatToolCall::function(
+                    "call_read",
+                    "read_file",
+                    r#"{"path":"README.md"}"#,
+                )],
+            ),
+            TurnProviderResponse::final_text("Used steer."),
+        ]);
+        let mut sink = SteerOnEventSink {
+            steer_queue: steer_queue.clone(),
+            inserted: false,
+        };
+        let mut loop_runner =
+            AgentTurnLoop::new(workspace.path(), provider).expect("turn loop should initialize");
+
+        loop_runner
+            .run_turn_with_event_sink(
+                AgentTurnInput::new("turn_1", "Read README").with_steer_queue(steer_queue),
+                &mut run,
+                &mut sink,
+            )
+            .await
+            .expect("turn should complete with steer");
+
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+        assert!(
+            loop_runner.provider.requests[1]
+                .messages
+                .iter()
+                .any(|message| {
+                    message
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| content.contains("Please focus on tests"))
+                }),
+            "second provider request should include queued steer"
+        );
+        assert!(
+            loop_runner.provider.requests[1]
+                .messages
+                .iter()
+                .any(|message| {
+                    message.content.as_deref().is_some_and(|content| {
+                        content.contains("latest user instruction")
+                            && content.contains("subsequent user-visible assistant text")
+                    })
+                }),
+            "queued steer should be framed as the latest user instruction"
+        );
+        let events = store
+            .load_run("run_turn_steer")
+            .expect("events should load");
+        assert!(events.iter().any(|event| {
+            event.event_type == "turn.steered"
+                && event.payload["message"] == json!("Please focus on tests")
+        }));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_retries_transient_provider_stream_interruption() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_provider_retry")
+            .expect("run should be created");
+        let provider = EventScriptedProvider::new_result_streams(vec![
+            vec![
+                Ok(TurnProviderEvent::AssistantDelta(
+                    TurnProviderDelta::reasoning_content("private"),
+                )),
+                Ok(TurnProviderEvent::AssistantDelta(
+                    TurnProviderDelta::content("partial "),
+                )),
+                Err(TurnProviderError::transient("connection reset by peer")),
+            ],
+            vec![Ok(TurnProviderEvent::Completed(
+                TurnProviderResponse::final_text("complete"),
+            ))],
+        ]);
+        let config = AgentTurnLoopConfig {
+            provider_transient_retries: 1,
+            ..AgentTurnLoopConfig::default()
+        };
+        let mut loop_runner = AgentTurnLoop::new(workspace.path(), provider)
+            .expect("turn loop should initialize")
+            .with_config(config);
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Say hello"), &mut run)
+            .await
+            .expect("transient provider interruption should be retried");
+
+        assert_eq!(outcome.final_message, "complete");
+        assert_eq!(outcome.iterations, 2);
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+        assert!(
+            loop_runner.provider.requests[1]
+                .messages
+                .iter()
+                .any(|message| {
+                    message.content.as_deref().is_some_and(|content| {
+                        content.contains(super::PROVIDER_STREAM_RETRY_INSTRUCTION)
+                    })
+                })
+        );
+        assert!(
+            loop_runner.provider.requests[1]
+                .messages
+                .iter()
+                .any(|message| message.content.as_deref() == Some("partial"))
+        );
+
+        let events = store
+            .load_run("run_turn_provider_retry")
+            .expect("events should load");
+        let retries = events
+            .iter()
+            .filter(|event| event.event_type == "provider.retrying")
+            .collect::<Vec<_>>();
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].payload["reason"], "transient_stream_error");
+        assert_eq!(retries[0].payload["partialContentChars"], 8);
+        assert_eq!(retries[0].payload["partialReasoningChars"], 7);
+        assert_eq!(retries[0].payload["retriesRemaining"], 0);
+    }
+
+    #[tokio::test]
+    async fn turn_loop_retries_and_fails_provider_start_idle_timeout() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_provider_start_timeout")
+            .expect("run should be created");
+        let provider = HangingProvider::default();
+        let config = AgentTurnLoopConfig {
+            provider_transient_retries: 0,
+            provider_idle_timeout: Duration::from_millis(5),
+            provider_idle_timeout_attempts: 2,
+            ..AgentTurnLoopConfig::default()
+        };
+        let mut loop_runner = AgentTurnLoop::new(workspace.path(), provider)
+            .expect("turn loop should initialize")
+            .with_config(config);
+
+        let error = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Say hello"), &mut run)
+            .await
+            .expect_err("idle provider should fail after configured attempts");
+
+        assert!(matches!(
+            error,
+            AgentTurnLoopError::ProviderIdleTimeout {
+                timeout_ms: 5,
+                attempts: 2,
+                ..
+            }
+        ));
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+
+        let events = store
+            .load_run("run_turn_provider_start_timeout")
+            .expect("events should load");
+        let retries = events
+            .iter()
+            .filter(|event| event.event_type == "provider.retrying")
+            .collect::<Vec<_>>();
+        assert_eq!(retries.len(), 1);
+        assert_eq!(retries[0].payload["reason"], "provider_idle_timeout");
+        assert_eq!(retries[0].payload["timeoutMs"], 5);
+        assert_eq!(retries[0].payload["retriesRemaining"], 0);
+        assert!(events.iter().any(|event| {
+            event.event_type == "run.failed"
+                && event.payload["code"] == "E_PROVIDER_TIMEOUT"
+                && event.payload["attempts"] == 2
+        }));
+    }
+
+    #[tokio::test]
+    async fn turn_loop_retries_provider_stream_idle_timeout() {
+        let workspace = TestWorkspace::new("turn-loop");
+        let store = RunLogStore::new(workspace.path()).expect("run log store should open");
+        let mut run = store
+            .create_run("run_turn_provider_stream_timeout")
+            .expect("run should be created");
+        let provider = IdleThenCompleteProvider::new();
+        let config = AgentTurnLoopConfig {
+            provider_transient_retries: 0,
+            provider_idle_timeout: Duration::from_millis(5),
+            provider_idle_timeout_attempts: 2,
+            ..AgentTurnLoopConfig::default()
+        };
+        let mut loop_runner = AgentTurnLoop::new(workspace.path(), provider)
+            .expect("turn loop should initialize")
+            .with_config(config);
+
+        let outcome = loop_runner
+            .run_turn(AgentTurnInput::new("turn_1", "Say hello"), &mut run)
+            .await
+            .expect("idle stream should be retried");
+
+        assert_eq!(outcome.final_message, "complete after idle retry");
+        assert_eq!(outcome.iterations, 2);
+        assert_eq!(loop_runner.provider.requests.len(), 2);
+
+        let events = store
+            .load_run("run_turn_provider_stream_timeout")
+            .expect("events should load");
+        assert!(events.iter().any(|event| {
+            event.event_type == "provider.retrying"
+                && event.payload["reason"] == "provider_idle_timeout"
+                && event.payload["timeoutMs"] == 5
+        }));
+        assert!(events.iter().any(|event| {
+            event.event_type == "run.completed"
+                && event.payload["summary"] == "complete after idle retry"
+        }));
+    }
+
+    #[tokio::test]
     async fn turn_loop_cancels_provider_stream_when_token_is_signaled() {
         let workspace = TestWorkspace::new("turn-loop");
         let store = RunLogStore::new(workspace.path()).expect("run log store should open");
@@ -3103,21 +6350,6 @@ mod tests {
         requests: Vec<TurnProviderRequest>,
     }
 
-    struct HunkApprovePolicy;
-
-    impl ApprovalPolicy for HunkApprovePolicy {
-        fn decide(
-            &mut self,
-            request: &TurnApprovalRequest,
-        ) -> Result<ApprovalDecision, ApprovalPolicyError> {
-            assert_eq!(request.tool_name, "apply_patch");
-            assert_eq!(request.hunks.as_ref().map(Vec::len), Some(2));
-            Ok(ApprovalDecision::ApprovedHunks {
-                hunk_ids: vec!["README.md#2:old5+2:new5+3".to_owned()],
-            })
-        }
-    }
-
     impl ScriptedProvider {
         fn new(responses: Vec<TurnProviderResponse>) -> Self {
             Self {
@@ -3141,25 +6373,85 @@ mod tests {
     }
 
     struct EventScriptedProvider {
-        streams: VecDeque<Vec<TurnProviderEvent>>,
+        streams: VecDeque<Vec<Result<TurnProviderEvent, TurnProviderError>>>,
+        requests: Vec<TurnProviderRequest>,
     }
 
     impl EventScriptedProvider {
         fn new(streams: Vec<Vec<TurnProviderEvent>>) -> Self {
             Self {
+                streams: streams
+                    .into_iter()
+                    .map(|events| events.into_iter().map(Ok).collect())
+                    .collect(),
+                requests: Vec::new(),
+            }
+        }
+
+        fn new_result_streams(
+            streams: Vec<Vec<Result<TurnProviderEvent, TurnProviderError>>>,
+        ) -> Self {
+            Self {
                 streams: streams.into(),
+                requests: Vec::new(),
             }
         }
     }
 
     impl TurnProvider for EventScriptedProvider {
-        fn complete_stream(&mut self, _request: TurnProviderRequest) -> TurnProviderFuture<'_> {
+        fn complete_stream(&mut self, request: TurnProviderRequest) -> TurnProviderFuture<'_> {
             Box::pin(async move {
+                self.requests.push(request);
                 let events = self.streams.pop_front().ok_or_else(|| {
                     TurnProviderError::new("event scripted provider has no stream")
                 })?;
-                let stream: TurnProviderStream = Box::pin(stream::iter(events.into_iter().map(Ok)));
+                let stream: TurnProviderStream = Box::pin(stream::iter(events));
                 Ok(stream)
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct HangingProvider {
+        requests: Vec<TurnProviderRequest>,
+    }
+
+    impl TurnProvider for HangingProvider {
+        fn complete_stream(&mut self, request: TurnProviderRequest) -> TurnProviderFuture<'_> {
+            Box::pin(async move {
+                self.requests.push(request);
+                future::pending::<Result<TurnProviderStream, TurnProviderError>>().await
+            })
+        }
+    }
+
+    struct IdleThenCompleteProvider {
+        idle_once: bool,
+        requests: Vec<TurnProviderRequest>,
+    }
+
+    impl IdleThenCompleteProvider {
+        fn new() -> Self {
+            Self {
+                idle_once: true,
+                requests: Vec::new(),
+            }
+        }
+    }
+
+    impl TurnProvider for IdleThenCompleteProvider {
+        fn complete_stream(&mut self, request: TurnProviderRequest) -> TurnProviderFuture<'_> {
+            Box::pin(async move {
+                self.requests.push(request);
+                if self.idle_once {
+                    self.idle_once = false;
+                    let stream: TurnProviderStream = Box::pin(stream::pending());
+                    Ok(stream)
+                } else {
+                    Ok(turn_provider_response_stream(
+                        TurnProviderResponse::final_text("complete after idle retry"),
+                    ))
+                }
             })
         }
     }
@@ -3172,6 +6464,21 @@ mod tests {
     impl TurnEventSink for RecordingEventSink {
         fn on_event(&mut self, event: &RunLogEvent) -> Result<(), TurnEventSinkError> {
             self.events.push(event.clone());
+            Ok(())
+        }
+    }
+
+    struct SteerOnEventSink {
+        steer_queue: TurnSteerQueue,
+        inserted: bool,
+    }
+
+    impl TurnEventSink for SteerOnEventSink {
+        fn on_event(&mut self, event: &RunLogEvent) -> Result<(), TurnEventSinkError> {
+            if event.event_type == "tool.completed" && !self.inserted {
+                self.inserted = true;
+                self.steer_queue.push("steer_test", "Please focus on tests");
+            }
             Ok(())
         }
     }

@@ -15,21 +15,30 @@ import {
   type ChatParticipantRpcClient,
 } from "./chatParticipantCore";
 import { diagnosticAttachmentsFromProblems } from "./diagnostics";
+import type { ProleLogger } from "./logging";
+import {
+  isConfigureDeepSeekApiKeyAction,
+  providerConfigurationActionFromMetadata,
+} from "./providerConfigurationUx";
+import { CONFIGURE_DEEPSEEK_API_KEY_COMMAND } from "./providerSecretCommands";
+import type { MessageRedactor } from "./redaction";
 
 export function registerProleChatParticipant(
   context: vscode.ExtensionContext,
   rpcClient: ChatParticipantRpcClient | undefined,
   workspaceRoot: string | undefined,
+  logger?: ProleLogger,
+  redactor?: MessageRedactor,
 ): vscode.Disposable {
   const participant = vscode.chat.createChatParticipant(
     CHAT_PARTICIPANT_ID,
-    (request, chatContext, response, token) => {
+    async (request, chatContext, response, token) => {
       const automaticContext = automaticContextAttachmentFromMessages(
         messagesFromChatHistory(chatContext.history),
       );
       const diagnostics = collectDiagnosticAttachments(workspaceRoot);
       const attachments = mergeTurnAttachments(automaticContext, diagnostics);
-      return runChatParticipantTurn({
+      const result = await runChatParticipantTurn({
         ...(rpcClient === undefined ? {} : { rpcClient }),
         request: {
           prompt: request.prompt,
@@ -37,8 +46,15 @@ export function registerProleChatParticipant(
           ...(attachments.length === 0 ? {} : { attachments }),
         },
         response,
+        ...(logger === undefined ? {} : { logger }),
+        ...(redactor === undefined ? {} : { redactor }),
         token,
       });
+      const action = providerConfigurationActionFromMetadata(result.metadata);
+      if (isConfigureDeepSeekApiKeyAction(action)) {
+        await vscode.commands.executeCommand(CONFIGURE_DEEPSEEK_API_KEY_COMMAND);
+      }
+      return result;
     },
   );
   participant.iconPath = vscode.Uri.joinPath(context.extensionUri, "media", "prole-coder-view.svg");

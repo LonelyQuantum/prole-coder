@@ -1,0 +1,61 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ProleCoder: build debug dependencies",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "ProleCoder: prepare manual test workspace",
+        "ProleCoder: build CLI",
+        "ProleCoder: build VS Code extension"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ProleCoder: prepare manual test workspace",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "if (-not (Test-Path -LiteralPath 'test/projects/agent_misc_tests_working')) { Copy-Item -LiteralPath 'test/projects/agent_misc_tests' -Destination 'test/projects/agent_misc_tests_working' -Recurse }"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "ProleCoder: build CLI",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "build",
+        "-p",
+        "prole-coder-cli"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "ProleCoder: build VS Code extension",
+      "type": "shell",
+      "command": "pnpm",
+      "args": [
+        "--filter",
+        "prole-coder-vscode",
+        "build"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build",
+      "problemMatcher": "$tsc"
+    }
+  ]
+}

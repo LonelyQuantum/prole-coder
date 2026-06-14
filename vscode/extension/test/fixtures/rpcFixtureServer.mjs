@@ -14,6 +14,31 @@ fs.writeFileSync(logPath, "");
 let seq = 1;
 const pendingApprovals = new Map();
 const runs = new Map();
+const runTurnCounters = new Map();
+
+const ledgerHistorySummary = [
+  "## 代码库检查总结",
+  "",
+  "---",
+  "",
+  "### 项目概览",
+  "**Ledger Lite** — 个人财务辅助工具，位于 `src/ledger.js`，由 `test/ledger.test.js` 提供测试覆盖。",
+  "",
+  "### 发现的 5 个缺陷",
+  "",
+  "| # | 函数 | 问题 |",
+  "|---|---|---|",
+  "| 1 | `parseAmount` | 未处理逗号分隔符（如 `\"$1,234.50\"`） |",
+  "| 2 | `parseAmount` | 未处理会计括号负号（如 `\"($42.10)\"` → `-42.10`） |",
+  "| 3 | `parseAmount` | 无效输入应抛出 `TypeError`，当前静默返回 `NaN` |",
+  "| 4 | `summarizeByCategory` | 未忽略 voided 交易、未归一化类别大小写/空格、金额未四舍五入到分 |",
+  "| 5 | `topCategories` | 排序应按绝对值降序 + 类别名升序，当前仅按原始值降序 |",
+  "",
+  "---",
+  "",
+  "### 现状",
+  "尚未修改任何文件。测试当前**无法通过**。所有修改将集中在 `src/ledger.js`，API 签名保持不变。准备好修复时请告知。",
+].join("\n");
 
 const historyRun = {
   runId: "run-history-1",
@@ -25,7 +50,7 @@ const historyRun = {
   lastSeq: 2,
   eventCount: 2,
   mode: "edit",
-  summary: "Historical fixture summary",
+  summary: ledgerHistorySummary,
   changedFiles: ["fixture/history.txt"],
   verificationStatus: "passed",
 };
@@ -84,6 +109,9 @@ function handleRequest(request) {
     case "agent.resume":
       handleResume(request);
       return;
+    case "agent.deleteRun":
+      handleDeleteRun(request);
+      return;
     default:
       respondError(request.id, -32601, `Unknown method: ${request.method}`);
   }
@@ -92,14 +120,19 @@ function handleRequest(request) {
 function handleSendTurn(request) {
   const params = record(request.params);
   const message = typeof params?.message === "string" ? params.message : "";
-  const runId = message.includes("cancel") ? "run-cancel-1" : "run-approval-1";
-  const turnId = message.includes("cancel") ? "turn-cancel-1" : "turn-approval-1";
+  const runId = typeof params?.runId === "string" && params.runId.length > 0
+    ? params.runId
+    : message.includes("cancel") ? "run-cancel-1" : "run-approval-1";
+  const existing = runs.get(runId);
+  const turnIndex = nextTurnIndex(runId, existing);
+  const turnId = message.includes("cancel") ? "turn-cancel-1" : `turn-${turnIndex}`;
   const now = new Date().toISOString();
   runs.set(runId, {
+    ...(existing ?? {}),
     runId,
     title: message || "Untitled fixture run",
     status: "running",
-    startedAt: now,
+    startedAt: existing?.startedAt ?? now,
     updatedAt: now,
     lastSeq: seq,
     eventCount: 0,
@@ -119,6 +152,7 @@ function handleSendTurn(request) {
     });
     emitEvent(runId, turnId, "turn.started", {
       userTask: message,
+      ...(record(params?.supersedes) === undefined ? {} : { supersedes: params.supersedes }),
     });
     emitContextBuilt(runId, turnId);
 
@@ -127,8 +161,8 @@ function handleSendTurn(request) {
       return;
     }
 
-    const approvalId = "approval-approval-1";
-    const toolCallId = "tool-approval-1";
+    const approvalId = `approval-${encodeIdSegment(runId)}-${encodeIdSegment(turnId)}`;
+    const toolCallId = `tool-${encodeIdSegment(runId)}-${encodeIdSegment(turnId)}`;
     pendingApprovals.set(approvalId, { runId, turnId, toolCallId });
     emitEvent(runId, turnId, "tool.approvalRequired", {
       approvalId,
@@ -146,6 +180,30 @@ function handleSendTurn(request) {
     });
     updateRun(runId, { lastSeq: seq - 1, eventCount: 4 });
   }, 10);
+}
+
+function nextTurnIndex(runId, existing) {
+  const current = runTurnCounters.get(runId);
+  const baseline = Number.isInteger(current)
+    ? current
+    : Number.isInteger(existing?.eventCount) ? existing.eventCount : 0;
+  const next = baseline + 1;
+  runTurnCounters.set(runId, next);
+  return next;
+}
+
+function handleDeleteRun(request) {
+  const runId = request.params?.runId;
+  if (!runs.has(runId)) {
+    respondError(request.id, -32003, `Run not found: ${runId}`);
+    return;
+  }
+
+  runs.delete(runId);
+  respond(request.id, {
+    runId,
+    deleted: true,
+  });
 }
 
 function handleApprove(request) {
@@ -180,7 +238,22 @@ function handleApprove(request) {
       },
     });
     emitEvent(pending.runId, pending.turnId, "assistant.delta", {
-      text: "Fixture approval flow completed.",
+      text: [
+        "## Fixture approval flow completed",
+        "",
+        "- Rendered **strong** text",
+        "- Preserved `inline code`",
+        "",
+        "```txt",
+        "ok",
+        "```",
+        "",
+        "| Check | Result |",
+        "| --- | --- |",
+        "| Markdown | passed |",
+        "",
+        "[Fixture link](https://example.com/docs)",
+      ].join("\n"),
       stream: true,
     });
     emitEvent(pending.runId, pending.turnId, "run.completed", {
@@ -236,16 +309,26 @@ function handleResume(request) {
     replayStarted: true,
   });
   setTimeout(() => {
-    emitEvent(runId, "turn-history-1", "assistant.delta", {
-      text: "Historical replayed response.",
-      stream: false,
-    });
+    for (const text of chunkText(ledgerHistorySummary, 24)) {
+      emitEvent(runId, "turn-history-1", "assistant.delta", {
+        text,
+        stream: true,
+      });
+    }
     emitEvent(runId, "turn-history-1", "run.completed", {
-      summary: "Historical fixture summary",
+      summary: ledgerHistorySummary,
       changedFiles: ["fixture/history.txt"],
       verificationStatus: "passed",
     });
   }, 10);
+}
+
+function chunkText(text, chunkSize) {
+  const chunks = [];
+  for (let index = 0; index < text.length; index += chunkSize) {
+    chunks.push(text.slice(index, index + chunkSize));
+  }
+  return chunks;
 }
 
 function emitContextBuilt(runId, turnId) {
@@ -392,4 +475,8 @@ function log(entry) {
 
 function record(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+}
+
+function encodeIdSegment(value) {
+  return encodeURIComponent(String(value));
 }

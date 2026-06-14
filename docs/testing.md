@@ -65,17 +65,34 @@ pnpm run vscode:test-electron
 - Problems diagnostics 被采集为 `agent.sendTurn.attachments` 的 diagnostic attachment。
 - `tool.approvalRequired` 经过 test-only auto approval requester 回传为真实 `agent.approve`。
 - Chat Cancel UI 边界通过真实 `agent.cancel` 请求收口。
-- Run List refresh 和 `agent.resume` replay 通过同一 `agent.event` 渲染路径更新 timeline。
+- Run List refresh、`agent.resume` replay、`agent.loadRunEvents` 历史分页和 `agent.deleteRun` run 删除通过 typed RPC / timeline 渲染路径更新。
 
 test-only command 和 auto approval 同时要求 VS Code `ExtensionMode.Test` 以及 `PROLE_CODER_VSCODE_TEST=1` / `PROLE_CODER_VSCODE_TEST_AUTO_APPROVE=1` 环境变量，普通扩展激活不会注册这些测试入口。
 
-P4-15 到 P4-18 的 Codex-like UX 收敛继续复用这条 extension-host 入口，并补齐以下确定性覆盖：
+Phase 5 P5-1 到 P5-5 的 Codex-like UX 与诊断收敛继续复用 Phase 4 extension-host 入口，并补齐以下确定性覆盖：
 
 - `automaticContext.test.ts` 覆盖历史对话压缩、字符预算裁剪、空历史跳过、Sidebar timeline 转换、单条 timeline 消息限长和 attachment 上限合并。
 - `chatParticipantCore.test.ts` 覆盖原生 `@prole` Chat Participant turn runner、命令到 run mode 的映射、sendTurn response 前早到事件缓冲、assistant delta streaming、缺少 RPC client 的错误和自动上下文进度提示。
-- `commands.test.ts` 覆盖简化后的审批 choices：主弹窗只暴露 `Approve` / `Reject`，`Approve` 映射一次性批准，`apply_patch` 多 hunk 走 `Select Hunks`。
+- `logging.test.ts` 覆盖 `ProleCoder` Output Channel 日志格式与输出分发；`chatParticipantCore.test.ts` 还覆盖 RPC turn 失败写入 logger，确保完整错误可在 Output 面板诊断。
+
+- `commands.test.ts` 覆盖 legacy modal adapter 的简化审批 choices：主动作只暴露 `Approve` / `Reject`，`Approve` 映射一次性批准；`chatApprovals.test.ts` 覆盖 Sidebar 内联 approval card 的 approve/reject、部分 hunk、全 hunk 和空 hunk 选择解析。
 - `test/electron/index.ts` 覆盖 VS Code manifest 中的 `contributes.chatParticipants`，并通过 `ProleCoder: Open Chat` 入口验证原生 Chat 入口不会依赖手动拖动 Activity Bar view。
 - `pnpm run vsix:smoke` 和 `pnpm run vsix:alpha` 会校验 VSIX manifest 中的 `onChatParticipant:prole-coder.chatParticipant` activation event 以及 `@prole` Chat Participant 贡献点。
+
+Phase 5 P5-6 到 P5-13 的 API key/model、Git 工作流、Sidebar 连续会话和结构化 provider 配置错误恢复 UX 已补齐以下确定性覆盖：
+
+- `providerSecrets.test.ts` 覆盖 SecretStorage 多 key store 解析、malformed entry/重复 id/空 key 边界、写入前显式校验、active key 选择、masked key 展示、所有 stored key redaction、process env fallback、missing status、child env 覆盖值、model 配置优先级、`DEEPSEEK_MODEL` 注入和 redaction source。
+- `providerConfigurationUx.test.ts` 覆盖 RPC error data、run failed payload 和 Chat Participant metadata 中的结构化 `recoverableAction` 解析，确认缺少 API key 的恢复入口不依赖后端英文错误消息。
+- `notifier.test.ts` 覆盖 Output Channel/toast message 统一脱敏 SecretStorage/env key。
+- `providerSecretCommands.test.ts` 覆盖 Key 管理器的 `+ Add` 添加 key+alias、选择已有 active key、行内 edit 按钮修改 alias、trash 按钮删除非 active key、Clear API key、Select DeepSeek Model、含 model 的 provider status、idle 状态 RPC restart、active run 场景提示稍后生效。
+- `gitWorkflow.test.ts` 覆盖 staged diff、unstaged fallback、upstream/main base 选择、Generate Commit Message 写入 `repository.inputBox.value` 且不自动 commit、agent 重复 terminal event 只采纳首个终态、Generate PR Description 输出 markdown 且不自动创建 PR。
+- `rpcServer.test.ts` 覆盖 RPC child env 注入、key 轮换后重启使用新 env，以及 typed `agent.deleteRun` request；`providerSecretCommands.test.ts` 覆盖 model 切换后的 env 更新与 idle restart；`test/electron/index.ts` 覆盖新增命令在 VS Code test host 中注册。
+- `chatEvents.test.ts` 覆盖 tool/raw 过程事件默认折叠、用户消息/DeepSeek 回复默认可见、过程事件收敛到 Work log、无 assistant 时 `run.completed` 摘要仍可见，以及 `turn.started.payload.supersedes` 对旧用户消息的隐藏语义；`automaticContext.test.ts` 覆盖 superseded 用户消息不会进入自动上下文；`runHistory.test.ts` 覆盖 `deleteRun` webview message 解析；`chatApprovals.test.ts` 覆盖内联审批消息解析；`webviewSerialization.test.ts` 覆盖 webview 初始 JSON 的 `undefined` 与 `<` 转义；`webviewHtml.test.ts` 覆盖生成后的 Sidebar HTML 内联脚本可被 JavaScript parser 解析，防止 template literal 反斜杠转义回归导致 webview ready 静默超时；`webviewMarkdown.test.ts` 独立覆盖 Markdown renderer 的 horizontal rule、表格转义、链接安全边界、未闭合 inline 标记和大文本；extension-host webview probe 覆盖可见对话 Markdown 的代码块、表格、链接、inline code、horizontal rule、中文表格 summary、编辑重发 supersede metadata 和分块 replay 历史 `assistant.delta`；Rust `agent-rpc`/`run_log` 测试覆盖同一 run 多 turn 续号、编辑重发 supersede payload 和 inactive run 删除；`prole-coder-cli` 测试覆盖 DeepSeek missing API key RPC structured data。
+- 文档/打包验收已运行 `pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test`、`pnpm run vscode:test-electron`、`pnpm run vsix:smoke`、`pnpm run vsix:alpha`、`git diff --check` 和敏感信息扫描。
+
+P5-14 作为真实试用回归修复包，已把已发现的 Sidebar 对话、Work log、Markdown、provider/shell 稳定性和 composer / Settings 入口问题拆成 `docs/phase-tasks.md` 中的 P5-14a 到 P5-14h 子任务。新增 Runs、Key/Model、审批、Chat、Output 日志或上下文压缩体验问题时，应先补可重复测试或手动验收说明，再登记到 P5-15、P5-16、P5-17 或后续 Phase 任务；Phase 5 仍保留真实试用后的持续 backlog，不得在占位任务完成前标记整阶段完成。
+
+P5-15 已完成真实 VS Code 试用回归的第二批确定性覆盖：Sidebar webview bootstrap、历史加载、Send 按钮、Enter/Shift+Enter、composition 状态输入、Markdown renderer 独立边界、patch mismatch 可恢复、历史 resume 副作用隔离、编辑重发/停止入口、输出长度截断续写、patch preview hunk 计数宽容，以及 edit resend 的后端 supersede 语义。P5-16 已完成模型回合预算 continuation approval、Provider Key/Model 图标按钮、run mode 自动推断和 PowerShell 验证命令规则收敛。P5-17 已补充 pen edit icon、Work log 分组、本对话审批复用、只读 shell 白名单、运行中 steer、steer 内联确认、终态后 Work log 折叠、版本查询白名单和思考段间文件/命令摘要的确定性覆盖：Rust Turn Loop 测试覆盖只读白名单、版本查询免审批与 queued steer 注入，Protocol/RPC/VS Code 测试覆盖 `agent.steer` typed request，extension 单元测试继续覆盖 webview inline script parse、steer 确认 DOM、发送按钮状态同步、timeline 工作计数和 Electron probe 的可访问标签。P5-18 已补充 assistant 按工具/steer 边界分段、`Activity` 摘要插入、平凡工具过滤、steer 消息顺序、steer 确认卡位置、运行中 active work 单行状态、pending steer 本地消息送达判断、unknown `write_file` 可恢复工具结果、pending steer queued 文案、completed run 按用户消息 / steer 边界分段折叠并展开恢复原卡片格式、provider 建连/stream idle timeout 重试收口、已知工具 schema mismatch 可恢复工具结果、完成后折叠保留用户 / steer 消息、长 run timeline 裁剪只移除可重放过程项、保留不可丢对话内容，以及 run summary changedFiles / verification metadata 追踪的覆盖。P5-19 已记录最新真实试用回归验收：`test/projects/agent_misc_tests_working` 中四个独立项目的测试分别为 4/4、4/4、5/5、5/5 通过，共 18 个测试通过；并补充 `agent.loadRunEvents` / Sidebar timeline 向上滚动历史分页覆盖。P5-19z 已完成合并前 UX backlog 收口，新的真实试用性能、稳定性和长任务问题进入 Phase 6。涉及 HTML template literal 内联脚本的改动仍应通过 `webviewHtml.test.ts` parse smoke 覆盖，涉及 Markdown renderer 的改动应同步扩展 `webviewMarkdown.test.ts`。若本机 VS Code mutex 阻塞 `pnpm run vscode:test-electron`，必须至少运行 extension 单元测试并记录需要关闭测试实例后重跑 E2E。
 
 ## 新增测试的协作要求
 
@@ -147,7 +164,7 @@ Phase 2 的默认 CI 应优先覆盖离线、确定性测试：
 - token estimator metadata：`utf8_bytes` 和校准估算器都必须明确 `exact=false`，不能误报为真实 tokenizer；校准 fixture 覆盖系数、误差和不保存 prompt 原文的边界。
 - attachment fixture：file、selection、explicit_content、diagnostic 都能进入 Context Capsule；路径越界、重复 attachment、超大小 selection / explicit content 和 diagnostic 形状错误均有稳定错误。
 - provider summary：`provider.completed` 独立记录模型、duration、usage、cache hit/miss 和 streaming 摘要；DeepSeek streaming wrapper 从 include_usage chunk 填充这些字段。
-- JSON Schema validation：tool call arguments 在 typed deserialization 前通过 schema validator，未知字段、错误类型、空字符串/空数组等会稳定失败。
+- JSON Schema validation：tool call arguments 在 typed deserialization 前通过 schema validator；malformed JSON 和终止型 payload 错误会稳定失败，已知工具的未知字段、错误类型、空字符串/空数组等 schema mismatch 会作为失败 tool result 返回 provider 重试。
 - Run Log 体积边界：工具结果、verification 输出和 Run Log payload 共用脱敏/截断函数，并记录 `runLogTruncation`。
 
 以下验收必须保持 ignored/manual，不进入普通 CI：
@@ -156,7 +173,7 @@ Phase 2 的默认 CI 应优先覆盖离线、确定性测试：
 - 200K、500K、900K 样例仓库 Context Capsule 生成和 token 预算报告。
 - 真实多文件任务展示 manifest、选中文件/诊断、token 预算、provider usage/cache 和最终验证结果。
 
-Phase 2d 的大上下文手动入口：
+P2-4 的大上下文手动入口：
 
 ```powershell
 cargo test -p prole-coder-agent-core --test context_capsule_benchmark context_capsule_large_repository_budget_benchmark -- --ignored --exact --nocapture
@@ -164,7 +181,7 @@ cargo test -p prole-coder-agent-core --test context_capsule_benchmark context_ca
 
 该测试生成 200K、500K、900K 三档确定性样例 Context Capsule，输出 `inputTokens`、section tokens 和 omitted source 数量；默认 CI 只编译 ignored test，不自动执行。
 
-Phase 2c/2d 的 cache usage 手动入口：
+P2-3/P2-4 的 cache usage 手动入口：
 
 ```powershell
 cargo test -p prole-coder-agent-core --test deepseek_api_live live_cache_usage_summary_smoke_test -- --ignored --exact --nocapture
@@ -200,4 +217,4 @@ rg -n "sk-[A-Za-z0-9_-]+|C:\\User[s]\\|/Users/[^/]+/|/home/[^/]+/|DEEPSEEK_(CODE
 
 展示型 demo 的完整清单、运行命令和预期输出见 `demos.md`。`cargo demo`、`cargo demo-live`、`cargo demo-context`、`cargo demo-context-visual`、`cargo demo-truncation`、`cargo demo-schema` 和 `cargo demo-attachment` 均来自 `.cargo/config.toml`；新增或调整展示命令时，应先更新 `demos.md`，并且只在 demo 已实现、可运行后再加入 Cargo alias。
 
-Phase 2e 已补齐 context、truncation、schema、context-visual、attachment，并增强 `demo-live` 的 provider summary 展示。它们仍应默认 ignored，不进入普通 CI 自动执行，作为人工观察和阶段合并前验收入口。
+P2-5 已补齐 context、truncation、schema、context-visual、attachment，并增强 `demo-live` 的 provider summary 展示。它们仍应默认 ignored，不进入普通 CI 自动执行，作为人工观察和阶段合并前验收入口。

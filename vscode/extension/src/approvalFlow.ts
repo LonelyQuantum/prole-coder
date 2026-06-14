@@ -40,6 +40,7 @@ const TOOL_NAME_LOOKUP = {
   git_diff: true,
   lsp_diagnostics: true,
   plan_update: true,
+  model_turn_budget: true,
 } as const satisfies Record<ToolName, true>;
 
 export interface ApprovalRpcClient {
@@ -89,6 +90,10 @@ export class ApprovalEventController implements DisposableLike {
   }
 
   private handleEvent(event: AgentEventEnvelope): void {
+    if (event.replay === true) {
+      return;
+    }
+
     if (event.type !== APPROVAL_EVENT_TYPE) {
       return;
     }
@@ -171,6 +176,7 @@ export function approvalPromptRequestFromEvent(
 
   return {
     approvalId: event.payload.approvalId,
+    runId: event.runId,
     toolCallId: event.payload.toolCallId,
     toolName: event.payload.toolName,
     risk: event.payload.risk,
@@ -189,6 +195,7 @@ export function approvalPromptRequestFromEvent(
           hunks: event.payload.hunks.map((hunk) => ({
             id: hunk.id,
             filePath: hunk.filePath,
+            fileIndex: hunk.fileIndex,
             hunkIndex: hunk.hunkIndex,
             oldStart: hunk.oldStart,
             oldCount: hunk.oldCount,

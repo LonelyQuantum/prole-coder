@@ -10,7 +10,7 @@
 .prole-coder/
 
 # Rust
-/target/
+target/
 
 # Node / pnpm / TypeScript
 node_modules/
@@ -29,6 +29,13 @@ npm-debug.log*
 pnpm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local mutable copies of tracked manual test fixtures
+test/projects/agent_misc_tests_working/
 
 # OS files
 .DS_Store

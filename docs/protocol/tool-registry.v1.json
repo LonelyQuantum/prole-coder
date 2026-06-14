@@ -30,7 +30,7 @@
     {
       "name": "apply_patch",
       "risk": "write",
-      "approval": "required",
+      "approval": "none",
       "status": "executor_implemented"
     },
     {
@@ -61,6 +61,12 @@
       "name": "plan_update",
       "risk": "read",
       "approval": "none",
+      "status": "schema_only"
+    },
+    {
+      "name": "model_turn_budget",
+      "risk": "exec",
+      "approval": "required",
       "status": "schema_only"
     }
   ]
