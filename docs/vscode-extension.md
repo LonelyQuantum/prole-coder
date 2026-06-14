@@ -1,6 +1,6 @@
 # 编辑器插件（VS Code Extension）
 
-状态：Phase 3 VS Code 插件核心体验已完成；Phase 4 VS Code 深度集成已完成 14 项深度集成能力；Phase 5 VS Code Codex-like UX 与开发工作流进行中。基础命令、RPC server 启动监管、初始化握手、JSON-RPC request client、VS Code/protocol TypeScript 类型共享、RPC/commands 边界测试、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、共享 RPC 全双工事件管线、命令风险动态升级展示、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、VSIX alpha 打包、extension-host E2E、原生 `@prole` Chat Participant、简化审批 UX、自动上下文压缩、`ProleCoder` Output Channel 错误诊断、API key/model 配置、统一 redaction、Git 工作流、Sidebar 连续会话、Run 删除、折叠事件 UX、结构化 provider 配置错误恢复、P5-14 真实试用回归修复包、P5-15 Markdown renderer / edit resend 后端语义收敛、P5-16 第一批真实试用 UX 收敛、P5-17 Codex-like 交互细化、P5-18a-l 真实试用 UX 收敛，以及 P5-19a-b 四项目真实试用回归验收和 Sidebar timeline 历史分页均已实现；P5-19z 仍未完成。
+状态：Phase 3 VS Code 插件核心体验已完成；Phase 4 VS Code 深度集成已完成 14 项深度集成能力；Phase 5 VS Code Codex-like UX 与开发工作流已完成。基础命令、RPC server 启动监管、初始化握手、JSON-RPC request client、VS Code/protocol TypeScript 类型共享、RPC/commands 边界测试、Sidebar Chat 事件渲染、Chat 输入发送真实 turn、真实审批回传、共享 RPC 全双工事件管线、命令风险动态升级展示、Native diff editor patch 预览、Run List / resume、Context Capsule 可视化、VSIX alpha 打包、extension-host E2E、原生 `@prole` Chat Participant、简化审批 UX、自动上下文压缩、`ProleCoder` Output Channel 错误诊断、API key/model 配置、统一 redaction、Git 工作流、Sidebar 连续会话、Run 删除、折叠事件 UX、结构化 provider 配置错误恢复、P5-14 真实试用回归修复包、P5-15 Markdown renderer / edit resend 后端语义收敛、P5-16 第一批真实试用 UX 收敛、P5-17 Codex-like 交互细化、P5-18a-l 真实试用 UX 收敛、P5-19 四项目真实试用回归验收、Sidebar timeline 历史分页和合并前 UX backlog 收口均已实现；下一步进入 Phase 6 AGENT 性能调试。
 
 VS Code 插件是 `ProleCoder` 的一等前端。它必须通过 JSON-RPC server 复用 Rust Agent Core，而不是在 TypeScript 侧重新实现 agent loop、context builder、provider 调用或 tool execution。
 
@@ -163,6 +163,7 @@ Phase 5 Codex-like UX 与开发工作流清单与 `docs/phase-tasks.md` 对齐�
 17. P5-17：Codex-like 交互细化。
 18. P5-18：真实试用 UX backlog 第三批收敛。
 19. P5-19：真实试用 UX backlog 第四批收敛。
+20. P5-19z：真实试用 UX backlog 合并前收口。
 
 在这些能力稳定前，不在插件侧重复实现 context builder、tool execution 或 provider 调用。
 

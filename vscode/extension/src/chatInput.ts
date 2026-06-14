@@ -96,11 +96,14 @@ export function inferChatRunMode(message: string): RpcRunMode {
   if (matchesAny(text, PLAN_PATTERNS)) {
     return "plan";
   }
-  if (isQuestionLike(text) || matchesAny(text, ASK_PATTERNS)) {
+  if (isQuestionLike(text)) {
     return "ask";
   }
   if (matchesAny(text, EDIT_PATTERNS)) {
     return "edit";
+  }
+  if (matchesAny(text, ASK_PATTERNS)) {
+    return "ask";
   }
 
   return DEFAULT_CHAT_MODE;

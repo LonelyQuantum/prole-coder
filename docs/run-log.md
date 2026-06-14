@@ -67,7 +67,9 @@ Run Log 本身负责 append/load 串行化，并允许 Turn Loop 在同一 run �
 - `run.canceled`：状态变为 `canceled`，记录取消原因。
 - `verification.completed`：更新最终验证状态。
 
-`summary.json` 还记录 `lastSeq`、`eventCount` 和 `updatedAtUnixMs`。`RunLogStore::list_run_summaries` 只读取 summary 文件，并按更新时间从新到旧排序；它不会为了列出 run 而扫描完整 `events.jsonl`。如果遇到旧版本或半写入 run 目录缺少 `summary.json`，列表接口会跳过该目录；针对单个 run 的 `load_run_summary` 仍会返回明确错误。
+`summary.json` 还记录 `lastSeq`、`eventCount` 和 `updatedAtUnixMs`。`events.jsonl` 是事实来源：如果进程在写入 event 后、更新 summary 前崩溃，或 summary 文件缺失/半写入损坏，`RunLogStore::load_run_summary` 和 `list_run_summaries` 会从完整 `events.jsonl` 重放并修复 `summary.json`，避免 run log 因 summary 落后一拍而永久不可追加。
+
+RPC 层提供两个读取入口：`agent.resume` 用于恢复 run 并重放事件 notification；只读历史分页使用 `agent.loadRunEvents`，按 `beforeSeq` / `limit` 直接返回 event envelope，不重新发送 live notification，也不触发旧审批副作用。VS Code Sidebar 向上滚动历史时走 `agent.loadRunEvents` 从 workspace run log 读取更早事件页。
 
 ## 事件格式
 

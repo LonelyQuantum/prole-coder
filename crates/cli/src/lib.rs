@@ -836,8 +836,7 @@ fn turn_loop_error_json_rpc_code(error: &AgentTurnLoopError) -> i64 {
         | AgentTurnLoopError::ProviderStreamEndedWithoutCompletion
         | AgentTurnLoopError::ProviderCompletedMultipleTimes
         | AgentTurnLoopError::ProviderEventAfterCompletion
-        | AgentTurnLoopError::MissingAssistantReasoningContent
-        | AgentTurnLoopError::MaxModelTurnsExceeded { .. } => RPC_PROVIDER_ERROR,
+        | AgentTurnLoopError::MissingAssistantReasoningContent => RPC_PROVIDER_ERROR,
         AgentTurnLoopError::RunLog(error) => run_log_error_json_rpc_code(error),
         AgentTurnLoopError::EventSink(_) | AgentTurnLoopError::ApprovalPolicy(_) => {
             RPC_INTERNAL_INVARIANT

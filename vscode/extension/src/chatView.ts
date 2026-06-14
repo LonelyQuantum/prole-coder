@@ -3666,6 +3666,8 @@ ${WEBVIEW_MARKDOWN_RENDERER_SCRIPT}
       promptInput.title = busy ? "Steer the current turn without starting a new turn" : "";
       promptInput.setAttribute("aria-label", busy ? "Steer current turn" : "Chat message");
       modeInput.disabled = busy;
+      // Run mode is inferred from message text; the legacy selector stays hidden to keep
+      // the composer close to Codex's single-input UX.
       modeInput.hidden = true;
       sendButton.dataset.runId = cancelable === true ? runId : "";
       cancelButton.dataset.runId = cancelable === true ? runId : "";

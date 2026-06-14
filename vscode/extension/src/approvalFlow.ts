@@ -195,6 +195,7 @@ export function approvalPromptRequestFromEvent(
           hunks: event.payload.hunks.map((hunk) => ({
             id: hunk.id,
             filePath: hunk.filePath,
+            fileIndex: hunk.fileIndex,
             hunkIndex: hunk.hunkIndex,
             oldStart: hunk.oldStart,
             oldCount: hunk.oldCount,

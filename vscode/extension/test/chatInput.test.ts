@@ -36,6 +36,7 @@ test("chat input infers run mode when the sidebar omits the hidden selector valu
     ["should I add more tests?", "ask"],
     ["制定一个开发计划", "plan"],
     ["修复测试失败", "edit"],
+    ["fix the bug where the app crashes", "edit"],
     ["review the current changes", "review"],
     ["继续处理这个任务", "edit"],
   ];

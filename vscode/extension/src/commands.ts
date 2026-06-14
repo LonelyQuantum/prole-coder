@@ -111,6 +111,7 @@ export interface ApprovalPromptRequest {
 export interface ApprovalPromptHunk {
   readonly id: string;
   readonly filePath: string;
+  readonly fileIndex: number;
   readonly hunkIndex: number;
   readonly oldStart: number;
   readonly oldCount: number;

@@ -279,6 +279,7 @@ where
         let mut tool_results = Vec::new();
         let mut changed_files = Vec::new();
         let mut workspace_before = None;
+        let mut workspace_snapshot_failed = false;
         let mut verification_status = VerificationStatus::Skipped;
         let mut last_shell_output_summary = None;
         let mut provider_transient_retries_remaining = self.config.provider_transient_retries;
@@ -457,11 +458,20 @@ where
                         )));
                     }
                     let final_message = response.content.unwrap_or_default();
-                    let final_changed_files = final_changed_files(
+                    let (final_changed_files, snapshot_error) = final_changed_files(
                         changed_files,
                         workspace_before.as_ref(),
                         self.tools.root(),
                     );
+                    if let Some(message) = snapshot_error {
+                        append_workspace_snapshot_failed_event(
+                            run_log,
+                            event_sink,
+                            &input.turn_id,
+                            "afterToolExecution",
+                            message,
+                        )?;
+                    }
                     append_turn_event(
                         run_log,
                         event_sink,
@@ -491,9 +501,24 @@ where
 
                 for (tool_index, tool_call) in tool_calls.iter().enumerate() {
                     if workspace_before.is_none()
+                        && !workspace_snapshot_failed
                         && should_capture_workspace_diff_baseline(tool_call.function.name.as_str())
                     {
-                        workspace_before = workspace_file_snapshot(self.tools.root()).ok();
+                        match workspace_file_snapshot(self.tools.root()) {
+                            Ok(snapshot) => {
+                                workspace_before = Some(snapshot);
+                            }
+                            Err(error) => {
+                                workspace_snapshot_failed = true;
+                                append_workspace_snapshot_failed_event(
+                                    run_log,
+                                    event_sink,
+                                    &input.turn_id,
+                                    "beforeToolExecution",
+                                    error.to_string(),
+                                )?;
+                            }
+                        }
                     }
                     let tool_context = ToolCallContext {
                         turn_id: &input.turn_id,
@@ -2474,8 +2499,6 @@ pub enum AgentTurnLoopError {
     },
     #[error("approval policy failed: {0}")]
     ApprovalPolicy(#[from] ApprovalPolicyError),
-    #[error("model did not finish after {max_model_turns} turns")]
-    MaxModelTurnsExceeded { max_model_turns: usize },
 }
 
 impl AgentTurnLoopError {
@@ -2508,7 +2531,6 @@ impl AgentTurnLoopError {
             Self::ApprovalCanceled { .. } => "E_APPROVAL_CANCELED",
             Self::ApprovalExpired { .. } => "E_APPROVAL_EXPIRED",
             Self::ApprovalPolicy(_) => "E_APPROVAL_POLICY",
-            Self::MaxModelTurnsExceeded { .. } => "E_MAX_MODEL_TURNS",
         }
     }
 }
@@ -2917,13 +2939,43 @@ fn final_changed_files(
     mut changed_files: Vec<String>,
     workspace_before: Option<&WorkspaceFileSnapshot>,
     workspace_root: &Path,
-) -> Vec<String> {
-    if let Some(before) = workspace_before
-        && let Ok(after) = workspace_file_snapshot(workspace_root)
-    {
-        changed_files.extend(workspace_snapshot_changed_files(before, &after));
+) -> (Vec<String>, Option<String>) {
+    if let Some(before) = workspace_before {
+        match workspace_file_snapshot(workspace_root) {
+            Ok(after) => {
+                changed_files.extend(workspace_snapshot_changed_files(before, &after));
+            }
+            Err(error) => {
+                return (
+                    sorted_unique_strings(changed_files),
+                    Some(error.to_string()),
+                );
+            }
+        }
     }
-    sorted_unique_strings(changed_files)
+    (sorted_unique_strings(changed_files), None)
+}
+
+fn append_workspace_snapshot_failed_event<L>(
+    run_log: &mut L,
+    event_sink: &mut (impl TurnEventSink + ?Sized),
+    turn_id: &str,
+    phase: &str,
+    message: String,
+) -> Result<RunLogEvent, AgentTurnLoopError>
+where
+    L: RunLogWriter + ?Sized,
+{
+    append_turn_event(
+        run_log,
+        event_sink,
+        "workspace.snapshotFailed",
+        Some(turn_id.to_owned()),
+        json!({
+            "phase": phase,
+            "message": message,
+        }),
+    )
 }
 
 fn workspace_file_snapshot(root: &Path) -> std::io::Result<WorkspaceFileSnapshot> {
@@ -3346,6 +3398,10 @@ fn effective_approval_requirement(
 ) -> ApprovalRequirement {
     let risk_approval = risk.default_approval();
     let base_approval = if static_approval == ApprovalRequirement::None {
+        // `ApprovalRequirement::None` is an explicit tool contract, not a shell risk
+        // classifier fallback: shell and model_turn_budget are registered as Required.
+        // The only write-capable built-in with static None is workspace apply_patch;
+        // network/destructive dynamic risk still upgrades to approval.
         match risk {
             RiskLevel::Network | RiskLevel::Destructive => risk_approval,
             RiskLevel::Read | RiskLevel::Write | RiskLevel::Exec => ApprovalRequirement::None,
@@ -4343,9 +4399,7 @@ mod tests {
                 && event.payload["toolName"] == MODEL_TURN_BUDGET_TOOL_NAME
                 && event.payload["decision"] == "approved"
         }));
-        assert!(!events.iter().any(|event| {
-            event.event_type == "run.failed" && event.payload["code"] == json!("E_MAX_MODEL_TURNS")
-        }));
+        assert!(!events.iter().any(|event| event.event_type == "run.failed"));
     }
 
     #[tokio::test]

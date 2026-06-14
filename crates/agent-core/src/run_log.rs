@@ -148,7 +148,11 @@ impl RunLogStore {
 
     pub fn load_run_summary(&self, run_id: impl Into<String>) -> Result<RunSummary, RunLogError> {
         let run_id = validate_id("run id", run_id.into())?;
-        read_summary(&run_id, &self.summary_path(&run_id)?)
+        load_or_recover_summary(
+            &run_id,
+            &self.summary_path(&run_id)?,
+            &self.events_path(&run_id)?,
+        )
     }
 
     pub fn delete_run(&self, run_id: impl Into<String>) -> Result<(), RunLogError> {
@@ -188,11 +192,16 @@ impl RunLogStore {
 
             let run_id = entry.file_name().to_string_lossy().into_owned();
             let run_id = validate_id("run id", run_id)?;
-            let summary_path = entry.path().join(SUMMARY_FILE);
-            if !summary_path.is_file() {
+            let events_path = entry.path().join(EVENTS_FILE);
+            if !events_path.is_file() {
                 continue;
             }
-            summaries.push(read_summary(&run_id, &summary_path)?);
+            let summary_path = entry.path().join(SUMMARY_FILE);
+            summaries.push(load_or_recover_summary(
+                &run_id,
+                &summary_path,
+                &events_path,
+            )?);
         }
 
         summaries.sort_by(|left, right| {
@@ -311,7 +320,7 @@ impl RunLog {
             .next_seq
             .checked_add(1)
             .ok_or(RunLogError::SequenceOverflow)?;
-        update_summary(&self.run_id, &self.summary_path, &event)?;
+        update_summary(&self.run_id, &self.summary_path, &self.events_path, &event)?;
         Ok(event)
     }
 
@@ -865,10 +874,85 @@ fn read_summary(run_id: &str, path: &Path) -> Result<RunSummary, RunLogError> {
     Ok(summary)
 }
 
-fn update_summary(run_id: &str, path: &Path, event: &RunLogEvent) -> Result<(), RunLogError> {
-    let mut summary = read_summary(run_id, path)?;
-    summary.apply_event(event, path)?;
-    write_summary(path, &summary)
+fn load_or_recover_summary(
+    run_id: &str,
+    summary_path: &Path,
+    events_path: &Path,
+) -> Result<RunSummary, RunLogError> {
+    match read_summary(run_id, summary_path) {
+        Ok(summary) => {
+            if summary_matches_events(run_id, &summary, events_path)? {
+                Ok(summary)
+            } else {
+                rebuild_summary_from_events(run_id, summary_path, events_path)
+            }
+        }
+        Err(error) if is_recoverable_summary_error(&error) => {
+            rebuild_summary_from_events(run_id, summary_path, events_path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn update_summary(
+    run_id: &str,
+    summary_path: &Path,
+    events_path: &Path,
+    event: &RunLogEvent,
+) -> Result<(), RunLogError> {
+    match read_summary(run_id, summary_path) {
+        Ok(mut summary) => match summary.apply_event(event, summary_path) {
+            Ok(()) => write_summary(summary_path, &summary),
+            Err(error) if is_recoverable_summary_error(&error) => {
+                rebuild_summary_from_events(run_id, summary_path, events_path).map(|_| ())
+            }
+            Err(error) => Err(error),
+        },
+        Err(error) if is_recoverable_summary_error(&error) => {
+            rebuild_summary_from_events(run_id, summary_path, events_path).map(|_| ())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn summary_matches_events(
+    run_id: &str,
+    summary: &RunSummary,
+    events_path: &Path,
+) -> Result<bool, RunLogError> {
+    let next_seq = next_sequence_from_events(run_id, events_path)?;
+    let event_count = next_seq
+        .checked_sub(1)
+        .ok_or(RunLogError::SequenceOverflow)?;
+    Ok(summary.last_seq == event_count && summary.event_count == event_count)
+}
+
+fn rebuild_summary_from_events(
+    run_id: &str,
+    summary_path: &Path,
+    events_path: &Path,
+) -> Result<RunSummary, RunLogError> {
+    let events = read_events(run_id, events_path)?;
+    let created_at_unix_ms = events
+        .first()
+        .map(|event| event.time_unix_ms)
+        .unwrap_or(unix_time_millis()?);
+    let mut summary = RunSummary::new(run_id.to_owned(), created_at_unix_ms);
+    for event in &events {
+        summary.apply_event(event, summary_path)?;
+    }
+    write_summary(summary_path, &summary)?;
+    Ok(summary)
+}
+
+fn is_recoverable_summary_error(error: &RunLogError) -> bool {
+    matches!(
+        error,
+        RunLogError::RunSummaryNotFound { .. }
+            | RunLogError::InvalidSummaryJson { .. }
+            | RunLogError::RunIdMismatch { .. }
+            | RunLogError::SummarySequenceMismatch { .. }
+    )
 }
 
 fn next_sequence_from_events(run_id: &str, path: &Path) -> Result<u64, RunLogError> {
@@ -1214,7 +1298,7 @@ mod tests {
 
     use super::{
         REDACTED_VALUE, RUN_LOG_MAX_ARRAY_ITEMS, RUN_LOG_MAX_STRING_BYTES, RUNS_DIR, RunLogError,
-        RunLogStore, RunLogWriter, RunSummaryStatus, SerializedRunLog,
+        RunLogStore, RunLogWriter, RunSummary, RunSummaryStatus, SerializedRunLog, write_summary,
     };
     use crate::test_helpers::TestWorkspace;
 
@@ -1525,6 +1609,60 @@ mod tests {
     }
 
     #[test]
+    fn run_log_recovers_summary_from_events_after_stale_summary() {
+        let workspace = TestWorkspace::new("run-log");
+        let store = RunLogStore::new(workspace.path()).expect("store should open");
+        let mut run = store
+            .create_run("run_summary_recovery")
+            .expect("run should be created");
+
+        let started = run
+            .append_at(100, "run.started", None, json!({ "mode": "edit" }))
+            .expect("run started should append");
+        run.append_at(
+            110,
+            "turn.started",
+            Some("turn_1".to_owned()),
+            json!({ "userTask": "Fix the README" }),
+        )
+        .expect("turn started should append");
+
+        let mut stale_summary = RunSummary::new("run_summary_recovery".to_owned(), 100);
+        stale_summary
+            .apply_event(&started, run.summary_path())
+            .expect("stale summary should apply first event");
+        write_summary(run.summary_path(), &stale_summary).expect("stale summary should be written");
+
+        let recovered = store
+            .load_run_summary("run_summary_recovery")
+            .expect("summary should recover from events");
+        assert_eq!(recovered.last_seq, 2);
+        assert_eq!(recovered.title, "Fix the README");
+
+        write_summary(run.summary_path(), &stale_summary)
+            .expect("stale summary should be written again");
+        run.append_at(
+            120,
+            "run.completed",
+            Some("turn_1".to_owned()),
+            json!({
+                "summary": "done",
+                "changedFiles": ["README.md"],
+                "verificationStatus": "passed",
+            }),
+        )
+        .expect("append should recover stale summary before updating");
+
+        let summary = store
+            .load_run_summary("run_summary_recovery")
+            .expect("summary should load");
+        assert_eq!(summary.last_seq, 3);
+        assert_eq!(summary.status, RunSummaryStatus::Completed);
+        assert_eq!(summary.summary.as_deref(), Some("done"));
+        assert_eq!(summary.changed_files, vec!["README.md"]);
+    }
+
+    #[test]
     fn run_log_summary_resets_terminal_fields_when_run_reopens_for_next_turn() {
         let workspace = TestWorkspace::new("run-log");
         let store = RunLogStore::new(workspace.path()).expect("store should open");
@@ -1579,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn run_log_lists_summaries_by_recent_update_without_scanning_events() {
+    fn run_log_lists_summaries_by_recent_update() {
         let workspace = TestWorkspace::new("run-log");
         let store = RunLogStore::new(workspace.path()).expect("store should open");
         let mut older = store

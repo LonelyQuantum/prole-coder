@@ -61,7 +61,7 @@ target/vsix/prole-coder-vscode-0.1.0-alpha.vsix.sha256
 
 `vscode/extension/scripts/packageAlphaVsix.mjs` 使用 `@vscode/vsce` 的 `preRelease: true` 打包选项，保留 `package.json` 中的稳定版本号，并通过文件名中的 `alpha` 标识渠道。脚本会校验 VSIX manifest 中的 VS Code pre-release 标记、publisher/name/version 一致性、`onChatParticipant:prole-coder.chatParticipant` activation event 和 `@prole` Chat Participant 贡献点，并写出 SHA-256 校验和。产物位于被忽略的 `target/vsix/`，不提交到仓库。
 
-当前 alpha VSIX 用于本地安装和 clean 环境验收，不等同于 Marketplace / Open VSX 发布。正式对外发布前仍需在 Phase 7 补齐 `LICENSE` 文件、源码获取说明、发布 notes、公开 release checksum 和可复现构建说明。
+当前 alpha VSIX 用于本地安装和 clean 环境验收，不等同于 Marketplace / Open VSX 发布。正式对外发布前仍需在 Phase 8 补齐 `LICENSE` 文件、源码获取说明、发布 notes、公开 release checksum 和可复现构建说明。
 
 ## VSIX clean 环境安装验收
 

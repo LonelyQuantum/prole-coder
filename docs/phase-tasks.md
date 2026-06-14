@@ -1,6 +1,6 @@
 # 详细任务索引
 
-状态：Phase 1、Phase 2、Phase 3、Phase 4 已完成。Phase 5 进行中，P5-1 到 P5-18l、P5-19a 到 P5-19b 已完成；P5-19z 仍未完成；Phase 5 全部任务完成后再进入 Phase 6：TUI 与生态扩展。
+状态：Phase 1、Phase 2、Phase 3、Phase 4、Phase 5 已完成。下一步进入 Phase 6：AGENT 性能调试；TUI 与生态扩展顺延到 Phase 7，发布与治理顺延到 Phase 8。
 
 本文档是详细设计文档里的任务账本。README 保留高层开发计划；这里把各模块文档中出现的“已实现、尚未实现、后续增强、下一步”收敛为可勾选任务，避免后续工作只散落在说明文字里。
 
@@ -113,7 +113,7 @@
 
 ## Phase 5：VS Code Codex-like UX 与开发工作流
 
-状态：进行中。P5-1 到 P5-18l、P5-19a 到 P5-19b 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收、Output Channel、API key/model 配置、错误恢复、只读 Git context、GitLens-like commit / PR 文案生成工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误码与恢复动作、真实试用回归修复包、第二批真实试用 UX 收敛、模型回合预算 continuation approval、Provider Key/Model 图标按钮、Chat run mode 自动推断、PowerShell 验证命令规则收敛、Codex-like 交互细化、第三批真实试用 UX 收敛，以及第四批真实试用回归验收记录与历史分页；P5-19z 持续 backlog 仍未完成。G4 自动 commit / push / create PR 留作后续增强。
+状态：已完成。P5-1 到 P5-19z 已完成，覆盖原生 Chat、审批简化、自动上下文、测试验收、Output Channel、API key/model 配置、错误恢复、只读 Git context、GitLens-like commit / PR 文案生成工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误码与恢复动作、真实试用回归修复包、第二批真实试用 UX 收敛、模型回合预算 continuation approval、Provider Key/Model 图标按钮、Chat run mode 自动推断、PowerShell 验证命令规则收敛、Codex-like 交互细化、第三批真实试用 UX 收敛、第四批真实试用回归验收记录、历史分页和合并前 UX backlog 收口。G4 自动 commit / push / create PR 留作后续增强。
 
 | 状态 | 任务 | 来源 | 说明 |
 | --- | --- | --- | --- |
@@ -171,27 +171,38 @@
 | [x] | P5-18j：已知工具 schema 错误可恢复 | `crates/agent-core/src/turn_loop.rs`、`docs/tool-system.md`、`docs/turn-loop.md` | 已完成：真实试用发现模型向 `read_file` 传入 `limit` 等未知字段时，Turn Loop 不再直接 `run.failed(code=E_INVALID_TOOL_ARGUMENTS)`；合法 JSON 但不符合已知工具 schema 的参数会记录失败的 `tool.requested` / `tool.completed`，把 `E_INVALID_TOOL_ARGUMENTS`、schema 错误和纠偏 guidance 作为 tool result 喂回 provider，让模型可改用 `startLine` / `endLine` 等正确参数继续。验收：新增 Core fixture 覆盖 schema mismatch 可恢复并继续下一轮 provider request；malformed JSON 仍保留诊断文件和终止错误。 |
 | [x] | P5-18k：完成后折叠保留用户 / steer 消息 | `vscode/extension/src/chatEvents.ts`、`vscode/extension/test/chatEvents.test.ts` | 已完成：真实试用发现最终总结出现后，`Earlier activity` 折叠块会把初始用户消息和运行中 steer 一起折叠隐藏；现在用户消息作为折叠边界并原样留在主时间线，折叠块只包含两条用户消息之间的 assistant / Activity / work 过程。验收：补充 timeline 单元测试覆盖用户消息和 steer 可见、展开后仍恢复原 assistant / Activity 卡片格式。 |
 | [x] | P5-18l：长 run timeline 裁剪与持久化边界 | `vscode/extension/src/chatEvents.ts`、`vscode/extension/test/chatEvents.test.ts`、`docs/vscode-extension.md` | 已完成：真实试用发现长 run 中大量工具 / provider 过程事件会触发 Sidebar timeline 裁剪，导致初始用户消息、steer 和 steer 前后的记录从聊天框消失；现在默认过程 item 上限从 300 提高到 1200，裁剪只移除可从 workspace run log 重放的过程项，用户消息、steer、assistant 分段和 terminal 结果不参与裁剪；`.prole-coder/runs/<run>/events.jsonl` 继续作为不可丢对话内容的 workspace 持久源，直到 `agent.deleteRun` 删除该 run。验收：补充 timeline 单元测试覆盖长 run 裁剪后用户 / steer 仍可见，完成后折叠仍按用户 / steer 边界展开为原 assistant / Activity 卡片格式。 |
-| [x] | P5-19a：四项目真实试用回归验收记录 | `docs/testing.md`、`docs/vscode-extension.md` | 已完成：真实 VS Code 插件试用在 `agent_misc_tests_working` 对四个独立测试项目完成修复，最新 run `run_7196_1780870724369` 状态为 completed；人工复验 `01-js-ledger-lite`、`02-python-note-index`、`03-rust-path-rules`、`04-js-event-reducer` 的测试分别为 4/4、4/4、5/5、5/5 通过，共 18 个测试通过。验收同时确认 UI 中长 run 折叠和 steer 后消息保留效果正常。 |
+| [x] | P5-19a：四项目真实试用回归验收记录 | `docs/testing.md`、`docs/vscode-extension.md` | 已完成：真实 VS Code 插件试用在 `test/projects/agent_misc_tests_working` 对四个独立测试项目完成修复，最新 run `run_7196_1780870724369` 状态为 completed；人工复验 `01-js-ledger-lite`、`02-python-note-index`、`03-rust-path-rules`、`04-js-event-reducer` 的测试分别为 4/4、4/4、5/5、5/5 通过，共 18 个测试通过。验收同时确认 UI 中长 run 折叠和 steer 后消息保留效果正常；干净 baseline 已迁入 `test/projects/agent_misc_tests` 并纳入 git 追踪，`agent_misc_tests_working` 作为 ignored 本地工作副本。 |
 | [x] | P5-19b：Sidebar timeline 向上滚动历史分页 | `crates/agent-rpc/src/lib.rs`、`packages/protocol/src/index.ts`、`vscode/extension/src/chatEvents.ts`、`vscode/extension/src/chatView.ts`、`docs/json-rpc-protocol.md`、`docs/vscode-extension.md` | 已完成：协议/RPC 新增只读 `agent.loadRunEvents`，按 `beforeSeq` / `limit` 从 workspace run log 返回历史 event envelope，不重新发 live notification；Sidebar timeline 保存已加载事件索引，向上滚动时先恢复被裁剪的过程项，必要时再请求更早事件页，避免用 `agent.resume` 触发旧审批副作用；webview 的滚动加载节流由 extension 在 `loadEarlierTimeline` 完成/失败后通过 `timelineHistory` 消息确认重置，不再依赖 1 秒本地计时。验收：新增 Rust request loop / handler 测试、TypeScript RPC manager 测试、timeline prepend/reveal 测试和 webview scroll/ack 消息覆盖。 |
-| [ ] | P5-19z：真实试用 UX backlog 持续收敛 | `README.md`、`docs/testing.md`、`docs/vscode-extension.md` | 未完成：继续根据真实 VS Code 插件试用收集 Runs、Key/Model/Settings、审批、Chat、Output 日志、上下文压缩、Markdown 兼容性和大工具参数稳定性问题；新增可执行项时优先拆成新的 P5-19 子任务或后续 Phase 任务，不能把新需求继续堆进本行。 |
+| [x] | P5-19z：真实试用 UX backlog 合并前收口 | `README.md`、`docs/testing.md`、`docs/vscode-extension.md` | 已完成：Phase 5 合并主线前的真实试用 UX backlog 已收口；后续新发现的性能、稳定性、长任务、上下文压缩、Markdown 兼容性和大工具参数问题进入 Phase 6 性能调试或后续阶段，不再阻塞 Phase 5 完成。 |
 
-## Phase 6：TUI 与生态扩展
-
-| 状态 | 任务 | 来源 | 说明 |
-| --- | --- | --- | --- |
-| [ ] | P6-1a：TUI RPC 入口和事件流消费 | `README.md`、`docs/tui.md` | 消费 `agent.event`，展示 run、turn、工具和审批状态。 |
-| [ ] | P6-1b：TUI Chat / Plan / Diff / Tools / Context / Settings 页面 | `README.md`、`docs/tui.md` | 完整 ratatui 界面仍未实现。 |
-| [ ] | P6-2a：TUI hunk 级审批、run resume、配置文件和 release binary | `README.md`、`docs/tui.md` | 建议在 VS Code 核心体验和共享事件管线稳定后推进。 |
-| [ ] | P6-3a：多 active run 与事件订阅模型 | `docs/rpc-server.md`、`docs/turn-loop.md`、`docs/tool-system.md` | 扩展 active run、审批队列、取消句柄和事件订阅模型，支持多个 run 或多个前端并发推进。 |
-| [ ] | P6-3b：更细的 replay 语义 | `docs/rpc-server.md`、`docs/tool-system.md`、`docs/run-log.md` | 明确 resume 时哪些事件原样回放、哪些需要历史标记，并与 pending approval / hunk 审批状态保持一致。 |
-| [ ] | P6-4a：MCP client、本地模型/私有推理服务 adapter、包管理器工具、issue/PR 工具、审计包导出 | `docs/roadmap.md` | 生态扩展应在核心闭环、编辑器体验和 DeepSeek 差异化稳定后推进。 |
-
-## Phase 7：发布与治理
+## Phase 6：AGENT 性能调试
 
 | 状态 | 任务 | 来源 | 说明 |
 | --- | --- | --- | --- |
-| [x] | P7-1a：许可证策略确定为 AGPL-3.0-or-later | `README.md`、`docs/release.md`、`docs/adr/0003-use-agpl-3.0-or-later.md` | 正式发布文件仍在后续任务。 |
-| [ ] | P7-2a：发布 `LICENSE`、源码获取说明和网络服务源码提供说明 | `README.md`、`docs/release.md` | 发布前必需。 |
-| [ ] | P7-3a：发布源码包、Cargo crate、npm wrapper、VSIX、GitHub Release 校验和 | `README.md`、`docs/release.md` | 需要发布脚本和产物签名/校验策略。 |
-| [ ] | P7-4a：公开 roadmap、issue 模板和贡献流程增强 | `README.md`、`CONTRIBUTING.md` | 面向外部协作者。 |
-| [ ] | P7-5a：reproducible build 说明 | `README.md`、`docs/release.md` | 发布可信度要求。 |
+| [ ] | P6-1a：性能观测事件与日志字段基线 | `README.md`、`docs/roadmap.md`、`docs/testing.md` | 统一记录 context build、provider streaming、tool execution、run log append/load、RPC event batching、VS Code render 和 Markdown 渲染耗时；先定义字段和脱敏/截断边界，再接入调优。 |
+| [ ] | P6-2a：mini project 性能回归集与恢复流程 | `README.md`、`test/projects/README.md`、`docs/testing.md` | 只追踪 `test/projects/agent_misc_tests` 干净基线，`agent_misc_tests_working` 作为 ignored 本地工作副本；补充恢复脚本/任务和真实插件试用耗时记录入口。 |
+| [ ] | P6-3a：长上下文与缓存命中 profiling | `docs/context-capsule.md`、`docs/turn-loop.md`、`docs/testing.md` | 分析 Context Capsule 大小、自动上下文压缩、DeepSeek prompt cache hit/miss、max output 和 replay-required reasoning 对长任务耗时的影响。 |
+| [ ] | P6-4a：工具调用、patch 和 workspace diff 性能调试 | `docs/tool-system.md`、`docs/turn-loop.md` | 定位 shell 输出、large patch arguments、patch preview、workspace snapshot diff、run log truncation 和审批预览在长任务中的瓶颈。 |
+| [ ] | P6-5a：VS Code Sidebar / RPC 吞吐与卡顿分析 | `docs/vscode-extension.md`、`docs/rpc-server.md` | 评估 event batching、timeline paging、Markdown renderer、Output Channel 日志和 webview snapshot 合并策略，避免长 run 造成 UI 卡顿。 |
+| [ ] | P6-6a：性能预算、调优报告和回归门槛 | `docs/testing.md`、`docs/roadmap.md` | 为合并主线后的真实任务建立可重复性能预算和回归记录，决定哪些指标阻塞后续 TUI/生态扩展。 |
+
+## Phase 7：TUI 与生态扩展
+
+| 状态 | 任务 | 来源 | 说明 |
+| --- | --- | --- | --- |
+| [ ] | P7-1a：TUI RPC 入口和事件流消费 | `README.md`、`docs/tui.md` | 消费 `agent.event`，展示 run、turn、工具和审批状态。 |
+| [ ] | P7-1b：TUI Chat / Plan / Diff / Tools / Context / Settings 页面 | `README.md`、`docs/tui.md` | 完整 ratatui 界面仍未实现。 |
+| [ ] | P7-2a：TUI hunk 级审批、run resume、配置文件和 release binary | `README.md`、`docs/tui.md` | 建议在性能调试和共享事件管线稳定后推进。 |
+| [ ] | P7-3a：多 active run 与事件订阅模型 | `docs/rpc-server.md`、`docs/turn-loop.md`、`docs/tool-system.md` | 扩展 active run、审批队列、取消句柄和事件订阅模型，支持多个 run 或多个前端并发推进。 |
+| [ ] | P7-3b：更细的 replay 语义 | `docs/rpc-server.md`、`docs/tool-system.md`、`docs/run-log.md` | 明确 resume 时哪些事件原样回放、哪些需要历史标记，并与 pending approval / hunk 审批状态保持一致。 |
+| [ ] | P7-4a：MCP client、本地模型/私有推理服务 adapter、包管理器工具、issue/PR 工具、审计包导出 | `docs/roadmap.md` | 生态扩展应在核心闭环、编辑器体验、性能预算和 DeepSeek 差异化稳定后推进。 |
+
+## Phase 8：发布与治理
+
+| 状态 | 任务 | 来源 | 说明 |
+| --- | --- | --- | --- |
+| [x] | P8-1a：许可证策略确定为 AGPL-3.0-or-later | `README.md`、`docs/release.md`、`docs/adr/0003-use-agpl-3.0-or-later.md` | 正式发布文件仍在后续任务。 |
+| [ ] | P8-2a：发布 `LICENSE`、源码获取说明和网络服务源码提供说明 | `README.md`、`docs/release.md` | 发布前必需。 |
+| [ ] | P8-3a：发布源码包、Cargo crate、npm wrapper、VSIX、GitHub Release 校验和 | `README.md`、`docs/release.md` | 需要发布脚本和产物签名/校验策略。 |
+| [ ] | P8-4a：公开 roadmap、issue 模板和贡献流程增强 | `README.md`、`CONTRIBUTING.md` | 面向外部协作者。 |
+| [ ] | P8-5a：reproducible build 说明 | `README.md`、`docs/release.md` | 发布可信度要求。 |

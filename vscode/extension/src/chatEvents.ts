@@ -81,6 +81,7 @@ export class ChatEventTimeline {
   private eventCount = 0;
   private latestRunId: string | undefined;
   private latestStatus: string | undefined;
+  private oldestSeq: number | undefined;
   private hiddenProcessItemCount = 0;
 
   constructor(options: ChatEventTimelineOptions = {}) {
@@ -93,6 +94,7 @@ export class ChatEventTimeline {
       return this.snapshot();
     }
     this.eventsBySeq.set(key, event);
+    this.rememberOldestSeq(event.seq);
     this.eventCount = this.eventsBySeq.size;
     this.appendEventItem(event);
 
@@ -107,6 +109,7 @@ export class ChatEventTimeline {
         continue;
       }
       this.eventsBySeq.set(key, event);
+      this.rememberOldestSeq(event.seq);
       added += 1;
     }
     if (added > 0) {
@@ -131,8 +134,7 @@ export class ChatEventTimeline {
   }
 
   oldestLoadedSeq(): number | undefined {
-    const seqs = Array.from(this.eventsBySeq.values()).map((event) => event.seq);
-    return seqs.length === 0 ? undefined : Math.min(...seqs);
+    return this.oldestSeq;
   }
 
   private appendEventItem(event: AgentEventEnvelope, trim = true): void {
@@ -165,6 +167,7 @@ export class ChatEventTimeline {
     this.eventCount = 0;
     this.latestRunId = undefined;
     this.latestStatus = undefined;
+    this.oldestSeq = undefined;
     this.hiddenProcessItemCount = 0;
     return this.snapshot();
   }
@@ -198,6 +201,7 @@ export class ChatEventTimeline {
     this.eventCount = events.length;
     this.latestRunId = undefined;
     this.latestStatus = undefined;
+    this.oldestSeq = events[0]?.seq;
     this.hiddenProcessItemCount = 0;
 
     for (const event of events) {
@@ -253,17 +257,26 @@ export class ChatEventTimeline {
       return;
     }
 
-    this.hiddenProcessItemCount = discardableCount - this.maxItems;
-    for (let index = 0; index < this.items.length && discardableCount > this.maxItems;) {
-      const item = this.items[index];
-      if (item !== undefined && isDiscardableTimelineItem(item)) {
-        this.items.splice(index, 1);
-        discardableCount -= 1;
+    const discardableToRemove = discardableCount - this.maxItems;
+    this.hiddenProcessItemCount = discardableToRemove;
+    const kept: ChatTimelineItem[] = [];
+    let removed = 0;
+    for (const item of this.items) {
+      if (removed < discardableToRemove && isDiscardableTimelineItem(item)) {
+        removed += 1;
         continue;
       }
-      index += 1;
+      kept.push(item);
     }
 
+    this.items.length = 0;
+    this.items.push(...kept);
+  }
+
+  private rememberOldestSeq(seq: number): void {
+    if (this.oldestSeq === undefined || seq < this.oldestSeq) {
+      this.oldestSeq = seq;
+    }
   }
 }
 

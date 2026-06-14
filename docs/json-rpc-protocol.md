@@ -829,6 +829,17 @@ interface ProviderCompleted {
 }
 ```
 
+### `workspace.snapshotFailed`
+
+```ts
+interface WorkspaceSnapshotFailed {
+  phase: "beforeToolExecution" | "afterToolExecution";
+  message: string;
+}
+```
+
+该事件表示 Turn Loop 试图捕获 workspace 文件快照以统计 shell 副作用变更时失败。run 可以继续执行，但 `run.completed.changedFiles` 可能只包含工具显式报告的文件，前端应把它作为诊断信息写入 Output/run log。
+
 ### `tool.requested`
 
 ```ts
@@ -860,6 +871,8 @@ interface ToolApprovalRequired {
   persistable: boolean;
 }
 ```
+
+`toolName` 使用内置工具名，包括 `shell`、`apply_patch`，以及 Turn Loop 本地发出的 continuation approval `model_turn_budget`。`model_turn_budget` 不是模型可主动调用的工具；它表示 provider request 预算窗口耗尽，需要客户端通过同一 pending approval queue 批准是否继续。
 
 ### `tool.approvalResolved`
 

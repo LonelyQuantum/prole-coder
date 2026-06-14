@@ -309,6 +309,23 @@ pub enum RpcRunMode {
     Ask,
 }
 
+impl TryFrom<&str> for RpcRunMode {
+    type Error = AgentRpcHandlerError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "plan" => Ok(Self::Plan),
+            "edit" => Ok(Self::Edit),
+            "review" => Ok(Self::Review),
+            "ask" => Ok(Self::Ask),
+            other => Err(AgentRpcHandlerError::new(
+                RPC_INTERNAL_INVARIANT,
+                format!("run summary contains invalid mode `{other}`"),
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendTurnParams {
@@ -519,7 +536,7 @@ pub struct RpcRunSummary {
     pub last_seq: u64,
     pub event_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
+    pub mode: Option<RpcRunMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1388,7 +1405,11 @@ impl TryFrom<&RunSummary> for RpcRunSummary {
                 .map_err(map_rpc_error)?,
             last_seq: summary.last_seq,
             event_count: summary.event_count,
-            mode: summary.mode.clone(),
+            mode: summary
+                .mode
+                .as_deref()
+                .map(RpcRunMode::try_from)
+                .transpose()?,
             summary: summary.summary.clone(),
             changed_files: summary.changed_files.clone(),
             verification_status: summary.verification_status.clone(),
@@ -5643,7 +5664,7 @@ mod tests {
                     completed_at: Some("1970-01-01T00:00:01.000Z".to_owned()),
                     last_seq: 3,
                     event_count: 3,
-                    mode: Some("ask".to_owned()),
+                    mode: Some(super::RpcRunMode::Ask),
                     summary: Some("Done".to_owned()),
                     changed_files: Vec::new(),
                     verification_status: Some("skipped".to_owned()),

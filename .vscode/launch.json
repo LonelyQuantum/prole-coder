@@ -8,7 +8,7 @@
       "runtimeExecutable": "${execPath}",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}/vscode/extension",
-        "${workspaceFolder}/../agent_misc_tests_working"
+        "${workspaceFolder}/test/projects/agent_misc_tests_working"
       ],
       "env": {
         "PATH": "${workspaceFolder}/target/debug${pathSeparator}${env:PATH}",

@@ -568,7 +568,7 @@ extension.ts
 
 ## 开发计划
 
-当前进度：Phase 1 到 Phase 4 已完成；Phase 5：VS Code Codex-like UX 与开发工作流仍在进行中。Phase 5 已完成原生 Chat、简化审批、自动上下文压缩、Output Channel、API key/model 配置、Git 工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误恢复、真实试用回归修复、P5-15 第二批 UX 收敛、P5-16 第一批真实试用 UX 收敛、P5-17a 到 P5-17i 的交互细化，P5-18a 到 P5-18l 的 active work 单行状态、assistant 分段 / Activity 摘要和平凡工具过滤、steer 顺序与确认卡位置修复、pending steer queued 反馈、未知工具可恢复、steer 强指令注入、完成后中间过程按用户/steer 边界分段折叠、provider idle timeout 重试收口、已知工具 schema 错误可恢复、用户 / steer 消息不参与折叠、长 run timeline 裁剪 / 持久化边界与 run summary metadata 追踪，以及 P5-19a 到 P5-19b 的四项目真实试用回归验收和 Sidebar timeline 历史分页；P5-19 真实试用 UX backlog 持续收敛仍未完成。完成 P5-19 后再进入 Phase 6：TUI 与生态扩展。
+当前进度：Phase 1 到 Phase 5 已完成；Phase 5：VS Code Codex-like UX 与开发工作流已完成原生 Chat、简化审批、自动上下文压缩、Output Channel、API key/model 配置、Git 工作流、Sidebar 连续会话 / Run 删除 / 折叠事件 UX、结构化 provider 配置错误恢复、真实试用回归修复、P5-15 第二批 UX 收敛、P5-16 第一批真实试用 UX 收敛、P5-17a 到 P5-17i 的交互细化，P5-18a 到 P5-18l 的 active work 单行状态、assistant 分段 / Activity 摘要和平凡工具过滤、steer 顺序与确认卡位置修复、pending steer queued 反馈、未知工具可恢复、steer 强指令注入、完成后中间过程按用户/steer 边界分段折叠、provider idle timeout 重试收口、已知工具 schema 错误可恢复、用户 / steer 消息不参与折叠、长 run timeline 裁剪 / 持久化边界与 run summary metadata 追踪，以及 P5-19 的四项目真实试用回归验收、Sidebar timeline 历史分页和合并前 UX backlog 收口。下一步进入 Phase 6：AGENT 性能调试；TUI 与生态扩展顺延到 Phase 7。
 
 阶段完成口径：README 中某个 Phase 只有在 `docs/phase-tasks.md` 对应 Phase 下的所有任务都标记为 `[x]` 后，才能在高层开发计划中表述为“全部完成”。如果某阶段核心功能已完成但仍有 P1/P2 增强或发布/文档验收项未完成，README 必须继续把该阶段表述为进行中，并列出剩余任务。
 
@@ -681,7 +681,7 @@ extension.ts
 - [x] P5-16：真实试用 UX backlog 第一批收敛：完成模型回合预算 continuation approval、Provider Key/Model 图标按钮同排展示、Chat run mode 自动推断并隐藏默认 `edit` / `ask` / `plan` / `review` 下拉框，以及 Windows PowerShell 验证命令规则收敛，避免模型给测试命令追加 `2>&1` 后因 CLIXML/progress 噪声造成假失败。
 - [x] P5-17：Codex-like 交互细化：已完成用户消息笔形编辑按钮、Work log 按 provider/tool/approval 分组折叠、本对话命令审批复用、workspace-scoped 只读 shell 命令白名单免审批且敏感路径仍需审批、运行中 `agent.steer` 指导入口、steer 内联二次确认、最终总结后过程折叠、常见版本查询命令免审批，以及两段 provider 思考之间的文件/命令工作摘要；具体子项见 `docs/phase-tasks.md`。
 - [x] P5-18：真实试用 UX backlog 第三批收敛：已完成运行中 active work 单行状态栏、assistant 按工具/steer 边界分段、段间 `Activity` 摘要与平凡工具过滤、steer 消息顺序和确认卡位置修复、pending steer queued 反馈、`write_file` 等未知工具调用的可恢复纠偏、steer 强指令注入、完成后中间 assistant / Activity 按用户消息和 steer 边界分段折叠、provider idle timeout 重试与连接失败收口、已知工具 schema 错误的可恢复工具结果、用户 / steer 消息不参与完成后折叠、长 run timeline 裁剪只移除可重放过程项并保留不可丢对话内容，以及 run summary `changedFiles` / verification metadata 追踪增强，具体子项见 `docs/phase-tasks.md`。
-- [ ] P5-19：真实试用 UX backlog 第四批收敛：已登记四项目真实试用回归验收，确认 `agent_misc_tests_working` 四个项目共 18 个测试通过，UI 长 run 折叠与 steer 后消息保留效果正常，并补齐 Sidebar timeline 向上滚动历史分页；继续收集并拆分真实 VS Code 插件试用中的对话、审批、Runs、Key/Model、Output 日志、上下文压缩、Markdown 兼容性、输出长度截断和大工具参数稳定性问题。
+- [x] P5-19：真实试用 UX backlog 第四批收敛：已登记四项目真实试用回归验收，确认 `test/projects/agent_misc_tests_working` 四个项目共 18 个测试通过，UI 长 run 折叠与 steer 后消息保留效果正常，并补齐 Sidebar timeline 向上滚动历史分页；合并前持续 backlog 已收口，后续真实试用中发现的性能、稳定性和长任务问题转入 Phase 6。
 
 验收标准：
 
@@ -689,22 +689,31 @@ extension.ts
 - 原生 Chat 和 Sidebar Chat 都通过真实 `agent.sendTurn` 驱动回合，并继续复用 Problems diagnostics、审批回传、Cancel、Run Log 和 Context Capsule。
 - 连续对话会自动生成可审计、受限长度的上下文压缩 attachment；不会在 UI 文案里要求用户手动重开对话来延续上下文。
 - 主审批保持简单并默认在 Sidebar 内联卡片中完成；Sidebar 提供右上角 Settings 齿轮以及 Key/Model 直接入口，运行中过程事件只显示单行 active 状态，完整事件和错误诊断可在 `Output > ProleCoder` 查看。
-- `docs/phase-tasks.md` 的 Phase 5 仍有 P5-19z 未完成，README 不能把 Phase 5 表述为整阶段完成；G4 自动 commit / push / create PR 仍是后续增强。
+- `docs/phase-tasks.md` 的 Phase 5 条目已全部标记为 `[x]`，README 可以把 Phase 5 表述为整阶段完成；G4 自动 commit / push / create PR 仍是后续增强。
 
-### Phase 6：TUI 与生态扩展
+### Phase 6：AGENT 性能调试
 
-- [ ] P6-1：TUI RPC 入口、事件流消费和核心页面。
-- [ ] P6-2：TUI hunk 级审批、run resume、配置文件和 release binary。
-- [ ] P6-3：多 active run、replay 语义和事件订阅模型。
-- [ ] P6-4：生态扩展：MCP client、本地模型/私有推理服务 adapter、包管理器工具、issue/PR 工具和审计包导出。
+- [ ] P6-1：性能观测基线：统一记录 context build、provider streaming、tool execution、run log、RPC event 和 VS Code render 耗时。
+- [ ] P6-2：本地 mini project 性能回归集：追踪 `test/projects/agent_misc_tests` 干净基线，`agent_misc_tests_working` 作为 ignored 工作副本。
+- [ ] P6-3：长上下文与缓存命中调试：分析 DeepSeek cache hit/miss、Context Capsule 大小、自动上下文压缩和 token 预算。
+- [ ] P6-4：工具调用与 patch 性能调试：定位 shell 输出、workspace snapshot、large patch args、run log 截断和审批预览瓶颈。
+- [ ] P6-5：VS Code Sidebar / RPC 吞吐调试：分析 event batching、Markdown 渲染、timeline paging、Output 日志和长 run UI 卡顿。
+- [ ] P6-6：性能预算、调优报告和合并后回归门槛。
 
-### Phase 7：自由软件发布
+### Phase 7：TUI 与生态扩展
 
-- [x] P7-1：许可证策略确定。
-- [ ] P7-2：发布法律/源码提供文件。
-- [ ] P7-3：发布产物、校验和与源码包。
-- [ ] P7-4：公开 roadmap、issue 模板和贡献流程增强。
-- [ ] P7-5：reproducible build 说明。
+- [ ] P7-1：TUI RPC 入口、事件流消费和核心页面。
+- [ ] P7-2：TUI hunk 级审批、run resume、配置文件和 release binary。
+- [ ] P7-3：多 active run、replay 语义和事件订阅模型。
+- [ ] P7-4：生态扩展：MCP client、本地模型/私有推理服务 adapter、包管理器工具、issue/PR 工具和审计包导出。
+
+### Phase 8：自由软件发布
+
+- [x] P8-1：许可证策略确定。
+- [ ] P8-2：发布法律/源码提供文件。
+- [ ] P8-3：发布产物、校验和与源码包。
+- [ ] P8-4：公开 roadmap、issue 模板和贡献流程增强。
+- [ ] P8-5：reproducible build 说明。
 
 ## 安全与注意事项
 

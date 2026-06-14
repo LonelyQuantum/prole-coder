@@ -85,6 +85,44 @@ test("chat approval messages map approve and reject decisions", () => {
   );
 });
 
+test("chat approval messages map conversation approval to session persistence", () => {
+  const request = sampleApprovalRequest({}, false);
+
+  assert.deepEqual(
+    approvalDecisionFromWebviewMessage(
+      {
+        type: "approvalDecision",
+        approvalId: "approval_1",
+        decision: "approve",
+        persist: "conversation",
+      },
+      request,
+    ),
+    {
+      kind: "approve",
+      approvalId: "approval_1",
+      persist: "session",
+    },
+  );
+
+  assert.deepEqual(
+    approvalDecisionFromWebviewMessage(
+      {
+        type: "approvalDecision",
+        approvalId: "approval_1",
+        decision: "approve",
+        persist: "conversation",
+      },
+      sampleApprovalRequest({ persistable: false }, false),
+    ),
+    {
+      kind: "approve",
+      approvalId: "approval_1",
+      persist: "never",
+    },
+  );
+});
+
 test("chat approval hunk selection returns partial hunk approvals", () => {
   const request = sampleApprovalRequest();
 
@@ -185,6 +223,7 @@ function sampleApprovalRequest(
             {
               id: "hunk_1",
               filePath: "README.md",
+              fileIndex: 0,
               hunkIndex: 0,
               oldStart: 1,
               oldCount: 2,
@@ -194,6 +233,7 @@ function sampleApprovalRequest(
             {
               id: "hunk_2",
               filePath: "README.md",
+              fileIndex: 0,
               hunkIndex: 1,
               oldStart: 8,
               oldCount: 1,

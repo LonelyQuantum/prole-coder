@@ -1,5 +1,6 @@
 import {
   APPROVAL_REJECTED_REASON,
+  type ApprovalPersistence,
   type ApprovalPromptDecision,
   type ApprovalPromptHunk,
   type ApprovalPromptRequest,
@@ -122,13 +123,32 @@ export function approvalDecisionFromWebviewMessage(
           },
         }
       : {};
+  const hasPartialHunks = "hunks" in partialHunks;
 
   return {
     kind: "approve",
     approvalId: request.approvalId,
-    persist: "never",
+    persist: approvalPersistenceFromMessage(message["persist"], request, hasPartialHunks),
     ...partialHunks,
   };
+}
+
+function approvalPersistenceFromMessage(
+  value: unknown,
+  request: ApprovalPromptRequest,
+  hasPartialHunks: boolean,
+): ApprovalPersistence {
+  if (!request.persistable || hasPartialHunks) {
+    return "never";
+  }
+
+  if (value === "conversation" || value === "session") {
+    return "session";
+  }
+  if (value === "workspace") {
+    return "workspace";
+  }
+  return "never";
 }
 
 function approvedHunkIdsFromMessage(

@@ -5,9 +5,26 @@
       "label": "ProleCoder: build debug dependencies",
       "dependsOrder": "sequence",
       "dependsOn": [
+        "ProleCoder: prepare manual test workspace",
         "ProleCoder: build CLI",
         "ProleCoder: build VS Code extension"
       ],
+      "problemMatcher": []
+    },
+    {
+      "label": "ProleCoder: prepare manual test workspace",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "if (-not (Test-Path -LiteralPath 'test/projects/agent_misc_tests_working')) { Copy-Item -LiteralPath 'test/projects/agent_misc_tests' -Destination 'test/projects/agent_misc_tests_working' -Recurse }"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "problemMatcher": []
     },
     {
